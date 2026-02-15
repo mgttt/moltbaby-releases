@@ -7,6 +7,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, watchFile, unwatchFile, statSync } from 'fs';
 import { join } from 'path';
+import { execSync } from 'child_process';
 import { getQuickJS, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
 import type { QuickJSContext as QuickJSContextType } from 'quickjs-emscripten';
 import type { Kline } from 'quant-lib';
@@ -691,6 +692,26 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_cancelOrder', bridge_cancelOrder);
     bridge_cancelOrder.dispose();
+
+    // P2修复：bridge_tgSend - 发送Telegram通知
+    const bridge_tgSend = this.ctx.newFunction('bridge_tgSend', (toHandle, messageHandle) => {
+      const to = this.ctx!.getString(toHandle);
+      const message = this.ctx!.getString(messageHandle);
+      
+      try {
+        // 调用tg命令发送消息
+        const from = 'bot-001'; // 策略通知默认来自bot-001（投资组长）
+        const cmd = `/usr/local/bin/tg send! ${from} ${to} "${message.replace(/"/g, '\\"')}"`;
+        execSync(cmd, { encoding: 'utf-8', stdio: 'ignore' });
+        console.log(`[QuickJSStrategy] bridge_tgSend: ${from} → ${to}: ${message}`);
+      } catch (error: any) {
+        console.error(`[QuickJSStrategy] bridge_tgSend failed:`, error.message);
+      }
+      
+      return this.ctx!.newString('ok');
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_tgSend', bridge_tgSend);
+    bridge_tgSend.dispose();
   }
 
   /**

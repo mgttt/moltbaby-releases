@@ -103,6 +103,11 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
   if (p.direction) CONFIG.direction = p.direction;
   // P0修复：添加emergencyDirection参数覆盖
   if (p.emergencyDirection) CONFIG.emergencyDirection = p.emergencyDirection;
+  // P2修复：添加initialOffset参数覆盖（持仓差值监控）
+  if (p.initialOffset !== undefined) {
+    CONFIG.initialOffset = p.initialOffset;
+    positionDiffState.initialOffset = p.initialOffset;
+  }
 }
 
 // ================================
@@ -130,6 +135,9 @@ let state = {
   
   // P0修复：区分交易所持仓和策略内部持仓
   exchangePosition: 0,     // 交易所总持仓（仅显示，不用于应急切换）
+  
+  // P2修复：持仓差值监控
+  initialOffset: 0,        // 初始差值/历史遗留仓基准
 };
 
 // 运行时状态（不持久化）
@@ -159,6 +167,14 @@ let circuitBreakerState = {
   blockedSide: '',       // 熔断中禁止的开仓方向 ('Buy'/'Sell')
 };
 
+// P2修复：持仓差值监控风控
+let positionDiffState = {
+  initialOffset: 0,      // 初始差值/历史遗留仓基准
+  lastDiff: 0,           // 上次差值（用于趋势检测）
+  diffIncreaseCount: 0,  // 差值连续增大计数
+  lastAlertAt: 0,        // 上次告警时间（防抖）
+};
+
 // 加载状态
 function loadState() {
   try {
@@ -178,6 +194,10 @@ function loadState() {
         if (!state.runId) state.runId = 0;
         if (!state.orderSeq) state.orderSeq = 0;
         if (!state.exchangePosition) state.exchangePosition = 0;
+        // P2修复：加载initialOffset
+        if (obj.initialOffset !== undefined) {
+          positionDiffState.initialOffset = obj.initialOffset;
+        }
       }
     }
   } catch (e) {
@@ -392,6 +412,88 @@ function checkCircuitBreaker() {
   }
   
   return false;
+}
+
+// P2修复：持仓差值监控风控
+function checkPositionDiff() {
+  const now = Date.now();
+  const alertIntervalMs = 5 * 60 * 1000; // 5分钟防抖
+  
+  // 计算差值 = |exchange - internal - initialOffset|
+  const currentDiff = Math.abs(
+    (state.exchangePosition || 0) - (state.positionNotional || 0) - (positionDiffState.initialOffset || 0)
+  );
+  
+  // 趋势检测：差值是否连续增大
+  if (currentDiff > positionDiffState.lastDiff) {
+    positionDiffState.diffIncreaseCount++;
+  } else {
+    positionDiffState.diffIncreaseCount = 0;
+  }
+  positionDiffState.lastDiff = currentDiff;
+  
+  // 阈值判断
+  const maxPosition = CONFIG.maxPosition || 7874;
+  const diffRatio = currentDiff / maxPosition;
+  
+  // 熔断阈值：3000 USDT 或 30%，且连续3次或5分钟内持续超限
+  if (currentDiff > 3000 || diffRatio > 0.30) {
+    // P2修复：连续3次或时间窗防抖
+    const trendConfirmed = positionDiffState.diffIncreaseCount >= 3;
+    const timeWindowExceeded = (now - positionDiffState.lastAlertAt) > alertIntervalMs;
+    
+    if ((trendConfirmed || timeWindowExceeded) && (now - positionDiffState.lastAlertAt) > 60000) {
+      positionDiffState.lastAlertAt = now;
+      const msg = '[P2告急] 持仓差值熔断! diff=' + currentDiff.toFixed(2) + 
+                  ' (' + (diffRatio * 100).toFixed(1) + '%) | ' +
+                  'exchange=' + (state.exchangePosition || 0).toFixed(2) + 
+                  ' internal=' + (state.positionNotional || 0).toFixed(2);
+      logError(msg);
+      
+      // P2修复：TG通知bot-009、bot-004、bot-001
+      try {
+        if (typeof bridge_tgSend === 'function') {
+          bridge_tgSend('9号', '[告急] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT');
+          bridge_tgSend('4号', '[告急] 持仓差值熔断! 请检查策略代码和quant-lab模块，必要时通知1号检查quant-lib');
+          bridge_tgSend('1号', '[告急] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT，请检查quant-lib等底层模块');
+        }
+      } catch (e) {
+        logWarn('[P2] tg通知失败: ' + e);
+      }
+      
+      // 触发熔断（停止新订单）
+      circuitBreakerState.tripped = true;
+      circuitBreakerState.reason = '持仓差值熔断';
+      circuitBreakerState.tripAt = now;
+    }
+    return;
+  }
+  
+  // 告警阈值：1000 USDT 或 10%，且连续2次
+  if (currentDiff > 1000 || diffRatio > 0.10) {
+    // P2修复：连续2次防抖
+    const trendConfirmed = positionDiffState.diffIncreaseCount >= 2;
+    const timeWindowExceeded = (now - positionDiffState.lastAlertAt) > alertIntervalMs;
+    
+    if ((trendConfirmed || timeWindowExceeded) && (now - positionDiffState.lastAlertAt) > 60000) {
+      positionDiffState.lastAlertAt = now;
+      const msg = '[P2告警] 持仓差值过大! diff=' + currentDiff.toFixed(2) + 
+                  ' (' + (diffRatio * 100).toFixed(1) + '%) | ' +
+                  'exchange=' + (state.exchangePosition || 0).toFixed(2) + 
+                  ' internal=' + (state.positionNotional || 0).toFixed(2);
+      logWarn(msg);
+      
+      // P2修复：TG通知bot-009和bot-001
+      try {
+        if (typeof bridge_tgSend === 'function') {
+          bridge_tgSend('9号', '[告警] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT');
+          bridge_tgSend('1号', '[告警] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT，请关注');
+        }
+      } catch (e) {
+        logWarn('[P2] tg通知失败: ' + e);
+      }
+    }
+  }
 }
 
 // ================================
@@ -1002,6 +1104,12 @@ function st_init() {
   state.runId = Date.now();
   state.orderSeq = 0;
   logInfo('[Init] P0: 110072根治 - 新runId=' + state.runId + '，orderLinkId将唯一');
+  
+  // P2修复：同步initialOffset到state（用于持久化）
+  state.initialOffset = positionDiffState.initialOffset || 0;
+  if (state.initialOffset !== 0) {
+    logInfo('[Init] P2: 持仓差值监控 - initialOffset=' + state.initialOffset);
+  }
 }
 
 /**
@@ -1015,6 +1123,9 @@ function st_heartbeat(tickJson) {
 
   state.lastPrice = tick.price;
   state.tickCount = (state.tickCount || 0) + 1;
+
+  // P2修复：每tick检查持仓差值（移到st_heartbeat确保不被跳过）
+  checkPositionDiff();
 
   // P0 修复：每60心跳更新exchangePosition（从cache读取，cache由QuickJSStrategy.onTick刷新）
   if (state.tickCount % 60 === 0) {
