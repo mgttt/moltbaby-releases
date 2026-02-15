@@ -4,6 +4,14 @@
  * 磁铁限价网格策略
  */
 
+// P2修复：持仓差值监控风控（必须在CONFIG之前定义）
+let positionDiffState = {
+  initialOffset: 0,      // 初始差值/历史遗留仓基准
+  lastDiff: 0,           // 上次差值（用于趋势检测）
+  diffIncreaseCount: 0,  // 差值连续增大计数
+  lastAlertAt: 0,        // 上次告警时间（防抖）
+};
+
 // ================================
 // 配置
 // ================================
@@ -165,14 +173,6 @@ let circuitBreakerState = {
   // P1修复：熔断震荡
   recoveryTickCount: 0,  // 连续满足恢复条件的心跳数
   blockedSide: '',       // 熔断中禁止的开仓方向 ('Buy'/'Sell')
-};
-
-// P2修复：持仓差值监控风控
-let positionDiffState = {
-  initialOffset: 0,      // 初始差值/历史遗留仓基准
-  lastDiff: 0,           // 上次差值（用于趋势检测）
-  diffIncreaseCount: 0,  // 差值连续增大计数
-  lastAlertAt: 0,        // 上次告警时间（防抖）
 };
 
 // 加载状态
