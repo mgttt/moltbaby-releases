@@ -141,7 +141,14 @@ export class QuickJSStrategy {
       result.value.dispose();
 
       // 6.5. P0 修复：在 st_init 之前刷新缓存，确保 bridge_getPosition 有数据
-      await this.refreshCache(this.strategyCtx!);
+      // P1 修复：容错策略 - catch异常使用空缓存启动，避免SSL EOF导致进程退出
+      try {
+        await this.refreshCache(this.strategyCtx!);
+      } catch (error: any) {
+        console.error(`[QuickJSStrategy] [Init] 缓存刷新失败，使用空缓存启动:`, error.message);
+        console.error(`[QuickJSStrategy] [Init] 策略将继续运行，onTick会定期重试刷新`);
+        // 使用空缓存继续（稍后onTick每60心跳会重试）
+      }
 
       // 7. 调用 st_init
       await this.callStrategyFunction('st_init');
@@ -280,6 +287,16 @@ export class QuickJSStrategy {
 
     // 更新价格缓存
     this.lastPrice = tick.price;
+
+    // P0 修复：周期性刷新持仓缓存（每60心跳=5分钟）
+    if (this.tickCount % 60 === 0) {
+      try {
+        await this.refreshCache(ctx);
+        console.log(`[QuickJSStrategy] [Cache Refresh] 持仓缓存已刷新 (tick #${this.tickCount})`);
+      } catch (error: any) {
+        console.error(`[QuickJSStrategy] [Cache Refresh] 刷新失败:`, error.message);
+      }
+    }
 
     // 调用 st_heartbeat
     await this.callStrategyFunction('st_heartbeat', {
@@ -521,14 +538,16 @@ export class QuickJSStrategy {
             params.symbol,
             params.qty,
             params.price,
-            params.orderLinkId  // P0 修复：传递 orderLinkId（幂等性）
+            params.orderLinkId,  // P0 修复：传递 orderLinkId（幂等性）
+            params.reduceOnly    // P0修复：传递reduceOnly
           );
         } else {
           order = await this.strategyCtx.sell(
             params.symbol,
             params.qty,
             params.price,
-            params.orderLinkId  // P0 修复：传递 orderLinkId（幂等性）
+            params.orderLinkId,  // P0 修复：传递 orderLinkId（幂等性）
+            params.reduceOnly    // P0修复：传递reduceOnly
           );
         }
 

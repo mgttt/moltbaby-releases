@@ -1016,6 +1016,27 @@ function st_heartbeat(tickJson) {
   state.lastPrice = tick.price;
   state.tickCount = (state.tickCount || 0) + 1;
 
+  // P0 修复：每60心跳更新exchangePosition（从cache读取，cache由QuickJSStrategy.onTick刷新）
+  if (state.tickCount % 60 === 0) {
+    try {
+      const positionJson = bridge_getPosition(CONFIG.symbol);
+      if (positionJson && positionJson !== 'null') {
+        const position = JSON.parse(positionJson);
+        let exchangePosition = position.positionNotional || 0;
+        if (position.side === 'SHORT') {
+          exchangePosition = -Math.abs(exchangePosition);
+        }
+        const oldExchange = state.exchangePosition || 0;
+        state.exchangePosition = exchangePosition;
+        if (Math.abs(exchangePosition - oldExchange) > 10) {
+          logInfo('[Position Refresh] 交易所持仓更新: ' + oldExchange.toFixed(2) + ' -> ' + exchangePosition.toFixed(2));
+        }
+      }
+    } catch (e) {
+      logWarn('[Position Refresh] 读取失败: ' + e);
+    }
+  }
+
   // 首次初始化网格
   if (!state.initialized) {
     state.centerPrice = tick.price;
@@ -1531,6 +1552,20 @@ function placeOrder(grid) {
       throw new Error('Invalid symbol: ' + CONFIG.symbol);
     }
 
+    // P0修复：添加reduceOnly字段（neutral只减仓，short允许开空）
+    let reduceOnly = false;
+    if (CONFIG.direction === 'neutral') {
+      // neutral策略：只减仓，不开新仓
+      reduceOnly = true;
+    } else if (CONFIG.direction === 'short' && grid.side === 'Sell') {
+      // short策略开空仓：允许
+      reduceOnly = false;
+    } else if (CONFIG.direction === 'short' && grid.side === 'Buy') {
+      // short策略回补：通常是平仓，但也能是开多（根据设计决定）
+      // 目前保持false允许操作，如果需要严格只做空可设为true
+      reduceOnly = false;
+    }
+    
     const params = {
       symbol: CONFIG.symbol,
       side: grid.side,
@@ -1538,6 +1573,7 @@ function placeOrder(grid) {
       price: orderPrice,
       orderLinkId: orderLinkId,
       gridId: grid.id,  // P0 修复：必须传递 gridId（notifyOrderUpdate 依赖）
+      reduceOnly: reduceOnly,  // P0修复：添加reduceOnly
     };
 
     const result = bridge_placeOrder(JSON.stringify(params));

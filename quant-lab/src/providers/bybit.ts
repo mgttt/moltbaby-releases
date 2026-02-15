@@ -277,7 +277,7 @@ export class BybitProvider implements TradingProvider {
   /**
    * 买入
    */
-  async buy(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order> {
+  async buy(symbol: string, quantity: number, price?: number, orderLinkId?: string, reduceOnly?: boolean): Promise<Order> {
     const params: Record<string, any> = {
       category: this.category,
       symbol: this.toExchangeSymbol(symbol),
@@ -292,6 +292,11 @@ export class BybitProvider implements TradingProvider {
     
     if (orderLinkId) {
       params.orderLinkId = orderLinkId;
+    }
+    
+    // P0修复：添加reduceOnly字段
+    if (reduceOnly) {
+      params.reduceOnly = true;
     }
     
     // P0 DEBUG：确认 orderLinkId 是否被传递
@@ -344,7 +349,7 @@ export class BybitProvider implements TradingProvider {
   /**
    * 卖出
    */
-  async sell(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order> {
+  async sell(symbol: string, quantity: number, price?: number, orderLinkId?: string, reduceOnly?: boolean): Promise<Order> {
     const params: Record<string, any> = {
       category: this.category,
       symbol: this.toExchangeSymbol(symbol),
@@ -359,6 +364,11 @@ export class BybitProvider implements TradingProvider {
     
     if (orderLinkId) {
       params.orderLinkId = orderLinkId;
+    }
+    
+    // P0修复：添加reduceOnly字段
+    if (reduceOnly) {
+      params.reduceOnly = true;
     }
     
     // P0 DEBUG：确认 orderLinkId 是否被传递
