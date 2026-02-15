@@ -101,6 +101,8 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
 
   if (p.simMode !== undefined) CONFIG.simMode = p.simMode;
   if (p.direction) CONFIG.direction = p.direction;
+  // P0修复：添加emergencyDirection参数覆盖
+  if (p.emergencyDirection) CONFIG.emergencyDirection = p.emergencyDirection;
 }
 
 // ================================
@@ -287,8 +289,12 @@ function checkCircuitBreaker() {
       return true;  // 仍在冷却期
     }
     
-    // P1修复：熔断震荡 - 需要positionRatio < 阈值 连续3个心跳才恢复
-    const positionRatio = Math.abs(state.positionNotional) / CONFIG.maxPosition;
+    // P0修复：熔断震荡 - 使用effectivePosition判断恢复条件
+    const effectivePos = Math.max(
+      Math.abs(state.positionNotional || 0),
+      Math.abs(state.exchangePosition || 0)
+    );
+    const positionRatio = effectivePos / CONFIG.maxPosition;
     if (positionRatio < cb.maxPositionRatio) {
       circuitBreakerState.recoveryTickCount = (circuitBreakerState.recoveryTickCount || 0) + 1;
       if (circuitBreakerState.recoveryTickCount >= 3) {
@@ -308,26 +314,30 @@ function checkCircuitBreaker() {
     return true;  // 冷却期结束但仓位未回落，继续熔断
   }
   
+  // P0修复：熔断机制使用effectivePosition（取策略内部和交易所的较大值）
+  const effectivePosition = Math.max(
+    Math.abs(state.positionNotional || 0),
+    Math.abs(state.exchangePosition || 0)
+  );
+  
   // 1. 回撤熔断
   if (circuitBreakerState.highWaterMark === 0) {
     // 冷启动：用当前权益初始化，没持仓时跳过回撤检查
-    const initEquity = Math.abs(state.positionNotional);
-    if (initEquity === 0) {
+    if (effectivePosition === 0) {
       // 没持仓不检查回撤（避免 0/maxPosition = 100% 误触发）
       circuitBreakerState.highWaterMark = 0;
     } else {
-      circuitBreakerState.highWaterMark = initEquity;
+      circuitBreakerState.highWaterMark = effectivePosition;
     }
   }
   
-  const equity = Math.abs(state.positionNotional);
-  if (equity > circuitBreakerState.highWaterMark) {
-    circuitBreakerState.highWaterMark = equity;
+  if (effectivePosition > circuitBreakerState.highWaterMark) {
+    circuitBreakerState.highWaterMark = effectivePosition;
   }
   
   // highWaterMark 为 0 时跳过回撤检查（没有持仓历史，避免 0 除法误触发）
   if (circuitBreakerState.highWaterMark > 0) {
-    const drawdown = (circuitBreakerState.highWaterMark - equity) / circuitBreakerState.highWaterMark;
+    const drawdown = (circuitBreakerState.highWaterMark - effectivePosition) / circuitBreakerState.highWaterMark;
     if (drawdown > cb.maxDrawdown) {
       circuitBreakerState.tripped = true;
       circuitBreakerState.reason = '回撤熔断';
@@ -343,17 +353,17 @@ function checkCircuitBreaker() {
   }
   
   // 2. 仓位熔断
-  const positionRatio = Math.abs(state.positionNotional) / CONFIG.maxPosition;
+  const positionRatio = effectivePosition / CONFIG.maxPosition;
   if (positionRatio > cb.maxPositionRatio) {
     circuitBreakerState.tripped = true;
     circuitBreakerState.reason = '仓位熔断';
     circuitBreakerState.tripAt = now;
     circuitBreakerState.recoveryTickCount = 0;
     
-    // P1修复：记录禁止开仓方向
-    if (state.positionNotional > 0) {
+    // P0修复：记录禁止开仓方向（使用effectivePosition，而非internal）
+    if (state.exchangePosition > 0 || state.positionNotional > 0) {
       circuitBreakerState.blockedSide = 'Buy';  // 多仓超限，禁Buy
-    } else if (state.positionNotional < 0) {
+    } else if (state.exchangePosition < 0 || state.positionNotional < 0) {
       circuitBreakerState.blockedSide = 'Sell'; // 空仓超限，禁Sell
     }
     
@@ -1392,16 +1402,22 @@ function shouldPlaceOrder(grid, distance) {
     return false;
   }
 
-  // 6. 仓位检查（考虑"已持仓 + 未成交挂单"的最坏情况）
-  const orderNotional = CONFIG.orderSize; // 订单名义价值
+  // P0修复：仓位检查使用effectivePosition（考虑交易所真实持仓）
+  const effectivePos = Math.max(
+    Math.abs(state.positionNotional || 0),
+    Math.abs(state.exchangePosition || 0)
+  );
+  const effectivePosSigned = state.exchangePosition || state.positionNotional || 0;
+  const orderNotional = CONFIG.orderSize;
 
   if (grid.side === 'Buy') {
     // short 模式下，Buy 只是虚仓，不限制
     if (CONFIG.direction !== 'short') {
       const pendingBuy = calcPendingNotional('Buy');
-      const afterFill = state.positionNotional + pendingBuy + orderNotional;
+      // 使用effectivePosition评估最坏情况
+      const afterFill = effectivePosSigned + pendingBuy + orderNotional;
       if (afterFill > CONFIG.maxPosition) {
-        warnPositionLimit('Buy', grid.id, state.positionNotional + pendingBuy, afterFill);
+        warnPositionLimit('Buy', grid.id, effectivePosSigned + pendingBuy, afterFill);
         return false;
       }
     }
@@ -1413,9 +1429,10 @@ function shouldPlaceOrder(grid, distance) {
     // long 模式下，Sell 只是虚仓，不限制
     if (CONFIG.direction !== 'long') {
       const pendingSell = calcPendingNotional('Sell');
-      const afterFill = state.positionNotional - pendingSell - orderNotional;
+      // 使用effectivePosition评估最坏情况
+      const afterFill = effectivePosSigned - pendingSell - orderNotional;
       if (afterFill < -CONFIG.maxPosition) {
-        warnPositionLimit('Sell', grid.id, state.positionNotional - pendingSell, afterFill);
+        warnPositionLimit('Sell', grid.id, effectivePosSigned - pendingSell, afterFill);
         return false;
       }
     }
