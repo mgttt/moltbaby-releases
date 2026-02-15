@@ -228,6 +228,18 @@ async function main() {
 
   console.log('[按 Ctrl+C 停止]\n');
 
+  // P0修复：添加退出日志（诊断#350消失问题）
+  const startTime = Date.now();
+  process.on('exit', (code) => {
+    const runtime = Math.floor((Date.now() - startTime) / 1000);
+    console.log(`[QuickJS] [EXIT] 进程退出 code=${code}, tickCount=${tickCount}, runtime=${runtime}s`);
+  });
+
+  process.on('beforeExit', (code) => {
+    const runtime = Math.floor((Date.now() - startTime) / 1000);
+    console.log(`[QuickJS] [BEFORE_EXIT] 即将退出 code=${code}, tickCount=${tickCount}, runtime=${runtime}s`);
+  });
+
   // 5. 启动心跳循环
   console.log('[QuickJS] 策略启动...');
 
@@ -241,9 +253,14 @@ async function main() {
       const ticker = await provider.getTicker(symbol);
       const price = ticker.lastPrice;
 
-      // 每 10 次心跳输出一次
-      if (tickCount % 10 === 0) {
-        console.log(`[QuickJS] 心跳 #${tickCount} - 价格: ${price}`);
+      // P0修复：加强心跳日志（诊断#350消失问题）
+      const runtime = Math.floor((Date.now() - startTime) / 1000);
+      if (tickCount >= 345 && tickCount <= 355) {
+        // 心跳#345-#355详细日志
+        console.log(`[QuickJS] [CRITICAL] 心跳 #${tickCount} - 价格: ${price}, runtime: ${runtime}s`);
+      } else if (tickCount % 10 === 0) {
+        // 每 10 次心跳输出一次
+        console.log(`[QuickJS] 心跳 #${tickCount} - 价格: ${price}, runtime: ${runtime}s`);
       }
 
       // 构造 tick
@@ -286,7 +303,8 @@ async function main() {
 
   // 6. 优雅退出
   process.on('SIGINT', async () => {
-    console.log('\n[QuickJS] 正在停止策略...');
+    const runtime = Math.floor((Date.now() - startTime) / 1000);
+    console.log(`\n[QuickJS] [SIGINT] 收到 SIGINT 信号，停止策略... tickCount=${tickCount}, runtime=${runtime}s`);
     clearInterval(heartbeatInterval);
 
     try {
@@ -300,7 +318,8 @@ async function main() {
   });
 
   process.on('SIGTERM', async () => {
-    console.log('\n[QuickJS] 收到 SIGTERM，停止策略...');
+    const runtime = Math.floor((Date.now() - startTime) / 1000);
+    console.log(`\n[QuickJS] [SIGTERM] 收到 SIGTERM 信号，停止策略... tickCount=${tickCount}, runtime=${runtime}s`);
     clearInterval(heartbeatInterval);
 
     try {
