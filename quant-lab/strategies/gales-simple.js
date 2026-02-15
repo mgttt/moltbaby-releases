@@ -125,6 +125,9 @@ let state = {
   // P0修复：110072根治 - 唯一orderLinkId生成
   runId: 0,                // 本次运行唯一ID
   orderSeq: 0,             // 订单序列号
+  
+  // P0修复：区分交易所持仓和策略内部持仓
+  exchangePosition: 0,     // 交易所总持仓（仅显示，不用于应急切换）
 };
 
 // 运行时状态（不持久化）
@@ -172,6 +175,7 @@ function loadState() {
         if (!state.lastRecenterTick) state.lastRecenterTick = 0;
         if (!state.runId) state.runId = 0;
         if (!state.orderSeq) state.orderSeq = 0;
+        if (!state.exchangePosition) state.exchangePosition = 0;
       }
     }
   } catch (e) {
@@ -946,7 +950,7 @@ function st_init() {
 
   loadState();
 
-  // P0 修复：从交易所同步实际持仓
+  // P0修复：读取交易所持仓仅用于显示/参考，不覆盖策略内部记账
   try {
     logInfo('[Init] P0 DEBUG: 准备调用 bridge_getPosition, symbol=' + CONFIG.symbol);
     const positionJson = bridge_getPosition(CONFIG.symbol);
@@ -954,40 +958,34 @@ function st_init() {
     
     if (positionJson === 'null' || positionJson === null || positionJson === undefined || positionJson === '') {
       logInfo('[Init] P0 DEBUG: 检测到空持仓 (null/undefined/empty)');
-      logInfo('[Init] 当前无持仓，初始化为空仓');
-      state.positionNotional = 0;
+      logInfo('[Init] 交易所无持仓');
+      state.exchangePosition = 0;  // 仅记录交易所持仓，不影响策略内部记账
     } else {
       logInfo('[Init] P0 DEBUG: 开始解析持仓 JSON');
       const position = JSON.parse(positionJson);
       
-      logInfo('[Init] 检测到现有持仓:');
+      logInfo('[Init] 检测到交易所持仓:');
       logInfo('[Init]   symbol: ' + position.symbol);
       logInfo('[Init]   side: ' + position.side);
-      logInfo('[Init]   positionNotional (原始): ' + position.positionNotional);
+      logInfo('[Init]   positionNotional: ' + position.positionNotional);
       
-      // 直接使用 Bybit 返回的 positionNotional (positionValue)
-      let positionNotional = position.positionNotional || 0;
-      logInfo('[Init]   使用原始 positionNotional: ' + positionNotional);
-      
-      // 根据方向调整符号（short模式下Sell为负）
-      // 注意: Position side 可能是 'LONG'/'SHORT'/'FLAT' 或 'Buy'/'Sell'
+      // 记录交易所持仓（仅用于显示，不覆盖策略内部positionNotional）
+      let exchangePosition = position.positionNotional || 0;
       const isShortSide = position.side === 'Sell' || position.side === 'SHORT' || position.side === 'short';
-      if (CONFIG.direction === 'short' && isShortSide) {
-        positionNotional = -Math.abs(positionNotional);
-        logInfo('[Init] short模式调整: positionNotional = ' + positionNotional);
+      if (isShortSide) {
+        exchangePosition = -Math.abs(exchangePosition);
       }
+      state.exchangePosition = exchangePosition;
       
-      // 同步到策略状态
-      state.positionNotional = positionNotional;
-      
-      logInfo('[Init] ✅ 持仓同步完成: positionNotional=' + state.positionNotional.toFixed(2));
+      logInfo('[Init]   交易所持仓: ' + state.exchangePosition.toFixed(2));
+      logInfo('[Init]   策略内部持仓: ' + state.positionNotional.toFixed(2));
+      logInfo('[Init] ✅ 注意：应急切换基于策略内部持仓，不基于交易所总持仓');
     }
     
     saveState();
   } catch (e) {
     logWarn('[Init] P0 DEBUG: 获取持仓异常: ' + e);
-    logWarn('[Init] 获取持仓失败: ' + e + '，使用默认空仓');
-    state.positionNotional = 0;
+    logWarn('[Init] 获取交易所持仓失败: ' + e);
   }
   
   // P0修复：110072根治 - 生成新的runId
@@ -1370,16 +1368,22 @@ function shouldPlaceOrder(grid, distance) {
     return false;
   }
 
-  // 5. 方向检查
+  // 5. 方向检查（总裁决策修改：允许止盈单）
   if (CONFIG.direction === 'long' && grid.side === 'Sell') {
-    // 做多模式：卖单仅记账，不实际下单
-    logDebug('[方向限制] long 模式下 Sell 仅记账 gridId=' + grid.id);
-    return false;  // P1修复：阻止实际下单
+    // long模式：有多仓(>0)时允许Sell止盈，无仓(<=0)时禁止Sell开空
+    if (state.positionNotional <= 0) {
+      logDebug('[方向限制] long 模式下无多仓时禁止 Sell 开空 gridId=' + grid.id);
+      return false;
+    }
+    // 有多仓时允许Sell止盈（不return false）
   }
   if (CONFIG.direction === 'short' && grid.side === 'Buy') {
-    // 做空模式：买单仅记账，不实际下单
-    logDebug('[方向限制] short 模式下 Buy 仅记账 gridId=' + grid.id);
-    return false;  // P1修复：阻止实际下单
+    // short模式：有空仓(<0)时允许Buy回补，无仓(>=0)时禁止Buy做多
+    if (state.positionNotional >= 0) {
+      logDebug('[方向限制] short 模式下无空仓时禁止 Buy 做多 gridId=' + grid.id);
+      return false;
+    }
+    // 有空仓时允许Buy回补（不return false）
   }
 
   // P1修复：熔断震荡 - 熔断中禁止超限方向开仓

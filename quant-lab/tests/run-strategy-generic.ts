@@ -126,8 +126,17 @@ async function main() {
     isDryRun,
   });
 
+  // P0修复：fail-fast检查，防止误启纸盘冒充实盘
   if (liveMode && isDryRun) {
-    console.warn('⚠️  [警告] --live 模式但 DRY_RUN=true，将使用 Paper Trade');
+    const allowPaperOnLive = process.env.ALLOW_PAPER_ON_LIVE === 'true';
+    if (!allowPaperOnLive) {
+      console.error('❌ [P0 fail-fast] --live 模式但 DRY_RUN=true（纸盘）');
+      console.error('   如确实需要在live模式使用纸盘，请设置环境变量:');
+      console.error('   ALLOW_PAPER_ON_LIVE=true bun tests/run-strategy-generic.ts ...');
+      console.error('   否则请设置 DRY_RUN=false 启用真实订单流');
+      process.exit(1);
+    }
+    console.warn('⚠️  [ALLOW_PAPER_ON_LIVE] --live 模式但 DRY_RUN=true，将使用 Paper Trade');
   }
 
   if (liveMode && !isDryRun) {
