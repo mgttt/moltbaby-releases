@@ -423,6 +423,11 @@ function checkPositionDiff() {
   const now = Date.now();
   const alertIntervalMs = 5 * 60 * 1000; // 5分钟防抖
   
+  // P2修复：方案C独立账本设计 - internal=0时跳过告警（等累积后再监控）
+  if (Math.abs(state.positionNotional || 0) < 1) {
+    return;  // internal未开始累积，跳过差值监控
+  }
+  
   // 计算差值 = |exchange - internal - initialOffset|
   const currentDiff = Math.abs(
     (state.exchangePosition || 0) - (state.positionNotional || 0) - (positionDiffState.initialOffset || 0)
