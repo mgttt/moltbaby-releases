@@ -4,7 +4,7 @@
 
 import type { StrategyContext, Order, Position, Account } from '../engine/types';
 import type { Kline } from 'quant-lib';
-import type { BybitProvider } from '../providers/bybit';
+import type { BybitProvider } from '../../quant-lib/src/providers/bybit';
 
 /**
  * Bybit 策略上下文配置

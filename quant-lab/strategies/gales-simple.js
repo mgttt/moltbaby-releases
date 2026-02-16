@@ -383,9 +383,18 @@ function checkCircuitBreaker() {
   // 2. 仓位熔断（P1修复：告警only不置tripped - bot-009建议）
   const positionRatio = effectivePosition / CONFIG.maxPosition;
   if (positionRatio > cb.maxPositionRatio) {
-    // P1修复：告警only不置tripped，避免进入熔断中阻断交易（bot-009建议）
-    // 只记录警告，不设置tripped，不阻断交易
-    logWarn('[熔断触发] 仓位熔断（告警only，不撤单）positionRatio=' + (positionRatio * 100).toFixed(2) + '%');
+    // P2修复：熔断告警节流（>=60s或ratio变化>=0.2%才打一次）
+    const now = Date.now();
+    const lastWarn = circuitBreakerState.lastPositionWarnAt || 0;
+    const lastRatio = circuitBreakerState.lastPositionWarnRatio || 0;
+    const timeElapsed = now - lastWarn;
+    const ratioDiff = Math.abs(positionRatio - lastRatio);
+    
+    if (timeElapsed >= 60000 || ratioDiff >= 0.002) {
+      circuitBreakerState.lastPositionWarnAt = now;
+      circuitBreakerState.lastPositionWarnRatio = positionRatio;
+      logWarn('[熔断触发] 仓位熔断（告警only，不撤单）positionRatio=' + (positionRatio * 100).toFixed(2) + '%');
+    }
     
     // 不触发熔断停止，继续交易
     return false;

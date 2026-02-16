@@ -8,7 +8,7 @@
  * Actual existing id in config: wjcgm@bbt-sub1
  */
 
-import { BybitProvider } from '../src/providers/bybit';
+import { BybitProvider } from '../../quant-lib/src/providers/bybit';
 import { requireAccountConfig, redactAccount } from '../src/config/accounts';
 
 async function main() {

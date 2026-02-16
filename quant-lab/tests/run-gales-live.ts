@@ -6,7 +6,7 @@
  */
 
 import { LiveEngine } from '../src/engine/live';
-import { BybitProvider } from '../src/providers/bybit';
+import { BybitProvider } from '../../quant-lib/src/providers/bybit';
 import { GalesStrategy } from '../src/strategies/GalesStrategy';
 import { requireAccountConfig, redactAccount } from '../src/config/accounts';
 

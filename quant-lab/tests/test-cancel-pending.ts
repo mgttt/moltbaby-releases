@@ -10,7 +10,7 @@
  * 3. 撤销错误格式订单 → 抛出异常
  */
 
-import { BybitProvider } from '../src/providers/bybit';
+import { BybitProvider } from '../../quant-lib/src/providers/bybit';
 
 // 模拟 request 方法，记录调用
 let requestCalls: Array<{ method: string; endpoint: string; params: any }> = [];

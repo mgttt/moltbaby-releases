@@ -6,7 +6,7 @@
  * - 多渠道告警（tg send + 日志）
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import type { ReloadResult } from './HotReloadManager';
 
 export interface AlertConfig {
@@ -117,6 +117,8 @@ export class AlertManager {
 
   /**
    * 发送Telegram告警
+   * 
+   * D项修复（鲶鱼建议）：用execFileSync避免shell引号问题
    */
   private async sendTgAlert(message: string, force: boolean = false): Promise<void> {
     if (!this.config.enableTg && !force) {
@@ -125,9 +127,9 @@ export class AlertManager {
 
     try {
       const target = this.config.tgTarget || 'bot-000';
-      const cmd = `tg send! bot-001 ${target} "${message.replace(/"/g, '\\"')}"`;
       
-      execSync(cmd, {
+      // D项修复：使用execFileSync，避免shell引号问题
+      execFileSync('tg', ['send!', 'bot-001', target, message], {
         encoding: 'utf-8',
         stdio: 'ignore', // 忽略输出，避免干扰
       });

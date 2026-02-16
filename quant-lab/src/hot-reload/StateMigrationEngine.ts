@@ -64,39 +64,44 @@ export interface ReconcileResult {
 export class StateMigrationEngine {
   /**
    * 序列化状态
+   * 
+   * 注意：完整实现需要访问StrategyContext，当前基于state文件
    */
   async serialize(context: StrategyContext): Promise<SerializedState> {
-    // TODO: 从实际context提取状态
+    // 注意：context参数目前未使用，因为HotReloadManager是独立的
+    // 实际使用时需要从context提取状态
+    
     const state: SerializedState = {
-      runId: 0, // TODO: 从策略状态读取
-      orderSeq: 0, // TODO: 从策略状态读取
-      positionNotional: 0, // TODO: 从策略状态读取
-      exchangePosition: 0, // TODO: 从缓存读取
+      runId: 0, // TODO: 从策略状态读取（需要context API）
+      orderSeq: 0, // TODO: 从策略状态读取（需要context API）
+      positionNotional: 0, // TODO: 从策略状态读取（需要context API）
+      exchangePosition: 0, // TODO: 从缓存读取（需要context API）
       
-      pendingOrders: [], // TODO: 从策略读取
-      openOrders: [], // TODO: 从exchange拉取
+      pendingOrders: [], // TODO: 从策略读取（需要context API）
+      openOrders: [], // TODO: 从exchange拉取（需要Provider）
       
-      strategyState: {}, // TODO: 从策略读取
+      strategyState: {}, // TODO: 从策略读取（需要context API）
       
-      cachedAccount: undefined, // TODO: 从缓存读取
-      cachedPositions: [], // TODO: 从缓存读取
+      cachedAccount: undefined, // TODO: 从缓存读取（需要context API）
+      cachedPositions: [], // TODO: 从缓存读取（需要context API）
       
       snapshotTime: Date.now(),
-      snapshotHash: '', // TODO: 计算hash
+      snapshotHash: '', // 将在下面计算
     };
 
     // 计算hash（用于验证完整性）
     state.snapshotHash = this.hashState(state);
 
+    console.log(`[StateMigration] 序列化完成（基础实现，完整实现需要context API）`);
     return state;
   }
 
   /**
    * 反序列化状态
+   * 
+   * 注意：完整实现需要访问StrategyContext API
    */
   async deserialize(state: SerializedState, newContext: StrategyContext): Promise<void> {
-    // TODO: 恢复状态到newContext
-    
     // 验证hash
     const expectedHash = this.hashState(state);
     if (state.snapshotHash !== expectedHash) {
@@ -111,6 +116,14 @@ export class StateMigrationEngine {
     console.log(`  pendingOrders: ${state.pendingOrders.length}`);
     console.log(`  openOrders: ${state.openOrders.length}`);
     console.log(`  cachedPositions: ${state.cachedPositions.length}`);
+
+    // TODO: 恢复状态到newContext（需要context API）
+    // 例如：
+    // newContext.setState(state.strategyState);
+    // newContext.setRunId(state.runId);
+    // newContext.setOrderSeq(state.orderSeq);
+    
+    console.log(`[StateMigration] 反序列化完成（基础实现，完整实现需要context API）`);
   }
 
   /**

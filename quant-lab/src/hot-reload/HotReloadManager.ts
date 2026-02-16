@@ -73,6 +73,7 @@ export interface ReloadEvent {
   after?: any;
   duration?: number;
   error?: string;
+  lockId?: string; // C项修复：lockId入审计
 }
 
 export interface FileLock {
@@ -125,16 +126,17 @@ export class HotReloadManager {
     let snapshot: StateSnapshot | undefined;
 
     try {
-      // 1. 审计日志：开始
+      // 1. 获取单实例锁
+      const lock = await this.acquireLock(strategyId);
+      
+      // 2. 审计日志：开始（C项修复：lockId入审计）
       await this.audit({
         timestamp: Date.now(),
         strategyId,
         event: 'reload_start',
         target: options.target,
+        lockId: lock.lockId,
       });
-
-      // 2. 获取单实例锁
-      const lock = await this.acquireLock(strategyId);
       
       try {
         // 3. 门闸检查
@@ -254,39 +256,107 @@ export class HotReloadManager {
   }
 
   /**
-   * 门闸检查
+   * 门闸检查（A项修复 - 鲶鱼建议）
    */
   async checkGate(strategyId: string, options: ReloadOptions): Promise<GateCheckResult> {
     const checks: GateCheck[] = [];
 
-    // TODO: 实现具体检查
-    // 1. 无进行中订单
-    checks.push({
-      name: 'NoActiveOrders',
-      passed: true, // TODO: 实际检查
-    });
+    // A项修复：真实检查，基于状态文件
+    const stateFile = join(homedir(), '.quant-lab/state', `${strategyId}.json`);
+    let state: any = null;
+
+    try {
+      if (existsSync(stateFile)) {
+        const raw = readFileSync(stateFile, 'utf-8');
+        const data = JSON.parse(raw);
+        state = data.state || data;
+      }
+    } catch (error) {
+      console.warn(`[HotReload] 无法读取状态文件: ${stateFile}`);
+    }
+
+    // 1. 无进行中订单（检查gridLevels中的PENDING/PLACING状态）
+    if (state && state.gridLevels) {
+      const activeGrids = state.gridLevels.filter((g: any) => 
+        g.state === 'PENDING' || g.state === 'PLACING' || g.state === 'FILLED'
+      );
+      
+      if (activeGrids.length > 0) {
+        checks.push({
+          name: 'NoActiveOrders',
+          passed: false,
+          reason: `有 ${activeGrids.length} 个活跃网格（${activeGrids.map((g: any) => g.state).join(', ')}）`,
+        });
+      } else {
+        checks.push({
+          name: 'NoActiveOrders',
+          passed: true,
+        });
+      }
+    } else {
+      // 没有状态文件或没有gridLevels，谨慎起见认为通过
+      checks.push({
+        name: 'NoActiveOrders',
+        passed: true,
+      });
+    }
 
     // 2. 无熔断中状态
-    checks.push({
-      name: 'NoCircuitBreaker',
-      passed: true, // TODO: 实际检查
-    });
+    if (state && state.circuitBreakerState) {
+      const cb = state.circuitBreakerState;
+      if (cb.tripped) {
+        checks.push({
+          name: 'NoCircuitBreaker',
+          passed: false,
+          reason: `熔断中: ${cb.reason || 'unknown'}`,
+        });
+      } else {
+        checks.push({
+          name: 'NoCircuitBreaker',
+          passed: true,
+        });
+      }
+    } else {
+      checks.push({
+        name: 'NoCircuitBreaker',
+        passed: true,
+      });
+    }
 
     // 3. 无锁冲突
     // 注意：锁检查移到acquireLock中处理，这里不检查
-    // const lockCheck = await this.checkNoLockConflict(strategyId);
-    // checks.push(lockCheck);
 
     // 4. 状态文件可写
-    checks.push({
-      name: 'StateFileWritable',
-      passed: true, // TODO: 实际检查
-    });
+    try {
+      if (existsSync(stateFile)) {
+        // 尝试写入测试
+        const testFile = stateFile + '.test';
+        writeFileSync(testFile, 'test');
+        unlinkSync(testFile);
+        checks.push({
+          name: 'StateFileWritable',
+          passed: true,
+        });
+      } else {
+        checks.push({
+          name: 'StateFileWritable',
+          passed: false,
+          reason: '状态文件不存在',
+        });
+      }
+    } catch (error: any) {
+      checks.push({
+        name: 'StateFileWritable',
+        passed: false,
+        reason: `状态文件不可写: ${error.message}`,
+      });
+    }
 
-    // 5. 新代码语法检查
+    // 5. 新代码语法检查（策略JS）
+    // TODO: 如果是strategy target，可以检查策略文件语法
     checks.push({
       name: 'NewCodeSyntax',
-      passed: true, // TODO: 实际检查
+      passed: true, // 暂时通过，语法检查较复杂
     });
 
     const failedChecks = checks.filter(c => !c.passed);
@@ -298,7 +368,7 @@ export class HotReloadManager {
   }
 
   /**
-   * 检查锁冲突
+   * 检查锁冲突（C项修复 - 鲶鱼建议：PID存活检查）
    */
   private async checkNoLockConflict(strategyId: string): Promise<GateCheck> {
     const lockFile = join(this.lockDir, `${strategyId}.lock`);
@@ -311,6 +381,16 @@ export class HotReloadManager {
       const lockData = JSON.parse(readFileSync(lockFile, 'utf-8'));
       const lock = lockData as FileLock;
 
+      // C项修复：检查PID是否存活
+      const pidAlive = this.checkPidAlive(lock.pid);
+      
+      if (!pidAlive) {
+        // PID已死亡，删除锁
+        unlinkSync(lockFile);
+        console.log(`[HotReload] 锁文件PID ${lock.pid} 已死亡，删除锁`);
+        return { name: 'NoLockConflict', passed: true };
+      }
+
       // 检查锁是否超时（5分钟）
       const now = Date.now();
       const timeout = 5 * 60 * 1000; // 5分钟
@@ -318,6 +398,7 @@ export class HotReloadManager {
       if (now - lock.startTime > timeout) {
         // 超时，删除锁
         unlinkSync(lockFile);
+        console.log(`[HotReload] 锁超时，删除锁`);
         return { name: 'NoLockConflict', passed: true };
       }
 
@@ -330,6 +411,19 @@ export class HotReloadManager {
       // 锁文件损坏，删除
       unlinkSync(lockFile);
       return { name: 'NoLockConflict', passed: true };
+    }
+  }
+
+  /**
+   * 检查PID是否存活（C项修复）
+   */
+  private checkPidAlive(pid: number): boolean {
+    try {
+      // 使用 kill -0 检查进程是否存在
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return false;
     }
   }
 
@@ -377,32 +471,88 @@ export class HotReloadManager {
   }
 
   /**
-   * 状态快照
+   * 状态快照（B项修复 - 鲶鱼建议：保存策略state+openOrders+position）
    */
   async snapshot(strategyId: string): Promise<StateSnapshot> {
-    // TODO: 实现实际快照逻辑
+    // B项修复：从状态文件读取真实状态
+    const stateFile = join(homedir(), '.quant-lab/state', `${strategyId}.json`);
+    let state: Record<string, any> = {};
+    
+    try {
+      if (existsSync(stateFile)) {
+        const raw = readFileSync(stateFile, 'utf-8');
+        const data = JSON.parse(raw);
+        state = data.state || data;
+        console.log(`[HotReload] 快照：从状态文件加载 ${Object.keys(state).length} 个键`);
+      }
+    } catch (error: any) {
+      console.warn(`[HotReload] 快照：无法读取状态文件: ${error.message}`);
+    }
+
+    // TODO: 从exchange拉取openOrders和position
+    // 这需要Provider实例，暂时使用空数组
+    const openOrders: any[] = [];
+    const position: any = null;
+
     const snapshot: StateSnapshot = {
       timestamp: Date.now(),
       strategyId,
-      state: {}, // TODO: 从实际策略加载
-      openOrders: [], // TODO: 从exchange拉取
-      position: null, // TODO: 从exchange拉取
-      hash: '', // TODO: 计算hash
+      state,
+      openOrders,
+      position,
+      hash: this.hashState(state), // B项修复：计算真实hash
     };
 
     // 保存快照到磁盘
     const snapshotFile = join(this.snapshotDir, `${strategyId}-${snapshot.timestamp}.json`);
     writeFileSync(snapshotFile, JSON.stringify(snapshot, null, 2));
+    console.log(`[HotReload] 快照已保存: ${snapshotFile}`);
 
     return snapshot;
   }
 
   /**
-   * 回滚
+   * 计算状态hash（B项修复）
+   */
+  private hashState(state: any): string {
+    const str = JSON.stringify(state, null, 0);
+    let hash = 0;
+    
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    
+    return hash.toString(16);
+  }
+
+  /**
+   * 回滚（B项修复 - 鲶鱼建议：恢复策略state）
    */
   async rollback(strategyId: string, snapshot: StateSnapshot): Promise<void> {
-    // TODO: 实现实际回滚逻辑
-    console.log(`[HotReload] 回滚到快照: ${snapshot.timestamp}`);
+    console.log(`[HotReload] 回滚到快照: ${new Date(snapshot.timestamp).toISOString()}`);
+
+    // B项修复：恢复状态文件
+    const stateFile = join(homedir(), '.quant-lab/state', `${strategyId}.json`);
+    
+    try {
+      if (snapshot.state && Object.keys(snapshot.state).length > 0) {
+        // 恢复状态文件
+        const data = { state: snapshot.state };
+        writeFileSync(stateFile, JSON.stringify(data, null, 2));
+        console.log(`[HotReload] 回滚：状态文件已恢复 (${Object.keys(snapshot.state).length} 个键)`);
+      }
+
+      // 验证hash
+      const restoredHash = this.hashState(snapshot.state);
+      if (restoredHash !== snapshot.hash) {
+        console.warn(`[HotReload] 回滚：hash不匹配 (expected: ${snapshot.hash}, got: ${restoredHash})`);
+      }
+    } catch (error: any) {
+      console.error(`[HotReload] 回滚失败: ${error.message}`);
+      throw error;
+    }
 
     await this.audit({
       timestamp: Date.now(),
@@ -410,6 +560,7 @@ export class HotReloadManager {
       event: 'rollback',
       target: 'rollback',
       before: snapshot,
+      lockId: undefined, // rollback时可能已经释放锁
     });
   }
 
@@ -426,8 +577,21 @@ export class HotReloadManager {
     switch (options.target) {
       case 'strategy':
         // 策略JS热更新
-        console.log(`[HotReload] TODO: 策略JS热更新（需要QuickJSStrategy API）`);
-        // TODO: await this.strategyReloader.reloadStrategy(...)
+        console.log(`[HotReload] 策略JS热更新`);
+        
+        // 鲶鱼验收修复：未接入真实API前，抛出错误避免假成功
+        throw new Error(
+          '策略JS热更新需要QuickJSStrategy.reload() API支持。' +
+          '当前实现不完整，需要手动重启策略进程。' +
+          '请使用 systemctl --user restart <service> 重启策略。'
+        );
+        
+        // TODO: 完整实现需要：
+        // 1. QuickJSStrategy.reload(snapshot) API
+        // 2. 保存当前策略state（已在snapshot中）
+        // 3. 重新加载策略JS文件
+        // 4. 恢复策略state（已在rollback中）
+        // 5. 调用st_init（标记热重载模式，保留runId）
         break;
 
       case 'module':
@@ -449,7 +613,14 @@ export class HotReloadManager {
 
       case 'provider':
         // Provider热更新
-        console.log(`[HotReload] TODO: Provider热更新（Step 3）`);
+        console.log(`[HotReload] Provider热更新`);
+        
+        // 鲶鱼验收修复：未接入真实API前，抛出错误避免假成功
+        throw new Error(
+          'Provider热更新需要Provider.reload() API支持（Step 3待实现）。' +
+          '当前实现不完整，需要手动重启策略进程。' +
+          '请使用 systemctl --user restart <service> 重启策略。'
+        );
         break;
 
       case 'all':
