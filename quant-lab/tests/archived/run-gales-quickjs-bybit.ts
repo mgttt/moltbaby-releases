@@ -7,7 +7,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createHmac } from 'crypto';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 
 // ============================================================
 // 简化版 QuickJS 集成（独立运行，不依赖复杂类型系统）
@@ -129,7 +129,31 @@ class BybitClient {
     // P0 修复：指数退避重试
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const out = execFileSync('curl', args, { encoding: 'utf8' });
+        // 显式pipe stderr（鲶鱼建议1）
+        const res = spawnSync('curl', args, {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'], // stdin, stdout, stderr
+        });
+
+        const out = res.stdout || '';
+        const err = res.stderr || '';
+
+        // 成功但stderr非空：打结构化日志（鲶鱼建议2）
+        if (res.status === 0 && err.trim()) {
+          console.warn(
+            `[Bybit] Curl success with stderr: ` +
+            `method=${method} | ` +
+            `url=${url} | ` +
+            `stderr="${err.trim().slice(0, 150)}"`,
+          );
+        }
+
+        // curl失败（非0退出码）
+        if (res.status !== 0) {
+          const errorMsg = err.trim() || res.error?.message || 'Unknown curl error';
+          throw new Error(`Curl failed: ${errorMsg}`);
+        }
+
         const result = JSON.parse(out);
 
         if (result.retCode !== 0) {

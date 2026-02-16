@@ -60,6 +60,7 @@ export class QuickJSStrategy {
 
   // 生命周期跟踪
   private tickCount = 0;
+  private bootTimeMs = 0;  // 策略启动时间（用于Order Reconcile过滤）
 
   // 数据缓存（用于同步 bridge 调用）
   private lastPrice = 0;
@@ -111,6 +112,7 @@ export class QuickJSStrategy {
    */
   async onInit(ctx: StrategyContext): Promise<void> {
     this.strategyCtx = ctx;
+    this.bootTimeMs = Date.now();  // 记录启动时间（用于Order Reconcile过滤）
 
     console.log(`[QuickJSStrategy] 初始化策略: ${this.config.strategyId}`);
     console.log(`[QuickJSStrategy] 文件: ${this.config.strategyFile}`);
@@ -609,9 +611,14 @@ export class QuickJSStrategy {
         }
       }
       
-      // 拉取成交记录（最近50条）
-      const executions = await (ctx as any).getExecutions();
-      console.log(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个`);
+      // 拉取成交记录（过滤startTime=bootTimeMs，避免历史数据）
+      const executions = await (ctx as any).getExecutions(
+        undefined,  // symbol
+        'linear',   // category
+        50,         // limit
+        this.bootTimeMs  // startTime（过滤启动前的历史数据）
+      );
+      console.log(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个 (startTime=${this.bootTimeMs})`);
       
       if (executions.length > 0) {
         for (const exec of executions.slice(0, 5)) {
