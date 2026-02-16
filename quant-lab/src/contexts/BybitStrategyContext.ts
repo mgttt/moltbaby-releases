@@ -209,13 +209,14 @@ export class BybitStrategyContext implements StrategyContext {
    * P2修复：获取未完成订单（订单闭环对账 - bot-009/鲶鱼建议）
    */
   async getOpenOrders(symbol?: string, limit: number = 50): Promise<any[]> {
-    return this.provider.getOpenOrders(symbol, 'linear', limit);
+    // Bybit 要求至少提供 symbol / settleCoin / baseCoin；策略侧默认用当前 ctx.symbol
+    return this.provider.getOpenOrders(symbol ?? this.symbol, 'linear', limit);
   }
 
   /**
    * P2修复：获取成交记录（订单闭环对账 - bot-009/鲶鱼建议）
    */
   async getExecutions(symbol?: string, limit: number = 50, startTime?: number): Promise<any[]> {
-    return this.provider.getExecutions(symbol, 'linear', limit, startTime);
+    return this.provider.getExecutions(symbol ?? this.symbol, 'linear', limit, startTime);
   }
 }

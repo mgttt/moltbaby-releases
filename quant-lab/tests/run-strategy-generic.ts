@@ -202,7 +202,7 @@ async function main() {
     params,
     maxRetries: 3,
     retryDelayMs: 5000,
-    hotReload: true,  // 启用热重载
+    hotReload: !liveMode,  // P2修复：live模式禁用热重载（鲶鱼建议）
   });
 
   // 4. 创建 BybitStrategyContext 并初始化策略

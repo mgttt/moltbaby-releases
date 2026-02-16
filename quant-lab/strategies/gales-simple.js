@@ -380,25 +380,12 @@ function checkCircuitBreaker() {
     }
   }
   
-  // 2. 仓位熔断
+  // 2. 仓位熔断（P1修复：告警only不置tripped - bot-009建议）
   const positionRatio = effectivePosition / CONFIG.maxPosition;
   if (positionRatio > cb.maxPositionRatio) {
-    circuitBreakerState.tripped = true;
-    circuitBreakerState.reason = '仓位熔断';
-    circuitBreakerState.tripAt = now;
-    circuitBreakerState.recoveryTickCount = 0;
-    
-    // P0修复：记录禁止开仓方向（使用effectivePosition，而非internal）
-    if (state.exchangePosition > 0 || state.positionNotional > 0) {
-      circuitBreakerState.blockedSide = 'Buy';  // 多仓超限，禁Buy
-    } else if (state.exchangePosition < 0 || state.positionNotional < 0) {
-      circuitBreakerState.blockedSide = 'Sell'; // 空仓超限，禁Sell
-    }
-    
+    // P1修复：告警only不置tripped，避免进入熔断中阻断交易（bot-009建议）
+    // 只记录警告，不设置tripped，不阻断交易
     logWarn('[熔断触发] 仓位熔断（告警only，不撤单）positionRatio=' + (positionRatio * 100).toFixed(2) + '%');
-    
-    // P0修复：取消撤单，只保留告警
-    // cancelAllOrders();
     
     // 不触发熔断停止，继续交易
     return false;

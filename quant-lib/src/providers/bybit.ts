@@ -246,6 +246,14 @@ export class BybitProvider {
     };
     if (symbol) {
       params.symbol = symbol;
+    } else {
+      // P1修复：Bybit API要求至少传symbol/settleCoin/baseCoin之一（bot-009发现）
+      // linear永续合约默认使用USDT作为settleCoin
+      if (category === 'linear') {
+        params.settleCoin = 'USDT';
+      } else if (category === 'spot') {
+        params.baseCoin = 'USDT';
+      }
     }
     
     const data = await this.signedRequest<any>(

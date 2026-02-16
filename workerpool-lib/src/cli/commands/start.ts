@@ -58,13 +58,15 @@ export async function startCommand(
     return;
   }
 
-  // 解析环境变量 --env KEY=VAL
+  // 解析环境变量 --env KEY=VAL（支持多次指定，会合并）
   if (options.env) {
-    const envStr = options.env as string;
-    const [key, ...valParts] = envStr.split('=');
-    const val = valParts.join('=');
-    if (key && val !== undefined) {
-      config.env = { [key]: val };
+    const envList = Array.isArray(options.env) ? options.env : [options.env];
+    for (const envStr of envList as string[]) {
+      const [key, ...valParts] = envStr.split('=');
+      const val = valParts.join('=');
+      if (key && val !== undefined) {
+        config.env = { ...config.env, [key]: val };
+      }
     }
   }
 

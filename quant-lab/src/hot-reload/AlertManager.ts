@@ -1,0 +1,138 @@
+/**
+ * 告警管理器
+ * 
+ * 职责：
+ * - 告警必达（鲶鱼要求#7）
+ * - 多渠道告警（tg send + 日志）
+ */
+
+import { execSync } from 'child_process';
+import type { ReloadResult } from './HotReloadManager';
+
+export interface AlertConfig {
+  enableTg?: boolean;
+  tgTarget?: string; // tg send目标（如'bot-000'或'总裁'）
+}
+
+export class AlertManager {
+  private config: AlertConfig;
+
+  constructor(config: AlertConfig = {}) {
+    this.config = {
+      enableTg: true,
+      tgTarget: 'bot-000',
+      ...config,
+    };
+  }
+
+  /**
+   * 发送热更新成功告警
+   */
+  async alertSuccess(result: ReloadResult): Promise<void> {
+    const message = this.formatSuccessMessage(result);
+    
+    // 控制台输出
+    console.log(message);
+    
+    // Telegram告警
+    if (this.config.enableTg) {
+      await this.sendTgAlert(message);
+    }
+  }
+
+  /**
+   * 发送热更新失败告警
+   */
+  async alertFailure(result: ReloadResult): Promise<void> {
+    const message = this.formatFailureMessage(result);
+    
+    // 控制台输出
+    console.error(message);
+    
+    // Telegram告警（失败时强制发送）
+    await this.sendTgAlert(message, true);
+  }
+
+  /**
+   * 发送门闸检查失败告警
+   */
+  async alertGateFailed(strategyId: string, failedChecks: string[]): Promise<void> {
+    const message = `【热更新门闸检查失败】
+策略ID: ${strategyId}
+失败项: ${failedChecks.join(', ')}
+状态: 未执行热更新
+建议: 检查失败项后重试`;
+
+    console.warn(message);
+    
+    if (this.config.enableTg) {
+      await this.sendTgAlert(message);
+    }
+  }
+
+  /**
+   * 格式化成功消息
+   */
+  private formatSuccessMessage(result: ReloadResult): string {
+    const lines = [
+      '【热更新成功】',
+      `策略ID: ${result.strategyId}`,
+      `目标: ${result.target}`,
+      `耗时: ${(result.duration / 1000).toFixed(2)}秒`,
+    ];
+
+    if (result.snapshot) {
+      const s = result.snapshot;
+      lines.push('');
+      lines.push('状态保持:');
+      lines.push(`- runId: ${s.state.runId || 'N/A'} ✅（保留）`);
+      lines.push(`- 持仓: ${s.position || 'N/A'} ✅（保持）`);
+      lines.push(`- 订单: ${s.openOrders.length}个 ✅（一致）`);
+      lines.push(`- hash: ${s.hash.substring(0, 8)}...`);
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * 格式化失败消息
+   */
+  private formatFailureMessage(result: ReloadResult): string {
+    const lines = [
+      '【热更新失败】',
+      `策略ID: ${result.strategyId}`,
+      `目标: ${result.target}`,
+      `错误: ${result.error}`,
+      `耗时: ${(result.duration / 1000).toFixed(2)}秒`,
+    ];
+
+    if (result.snapshot) {
+      lines.push('');
+      lines.push('已回滚 ✅');
+      lines.push('策略继续运行 ✅');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * 发送Telegram告警
+   */
+  private async sendTgAlert(message: string, force: boolean = false): Promise<void> {
+    if (!this.config.enableTg && !force) {
+      return;
+    }
+
+    try {
+      const target = this.config.tgTarget || 'bot-000';
+      const cmd = `tg send! bot-001 ${target} "${message.replace(/"/g, '\\"')}"`;
+      
+      execSync(cmd, {
+        encoding: 'utf-8',
+        stdio: 'ignore', // 忽略输出，避免干扰
+      });
+    } catch (error: any) {
+      console.error(`[AlertManager] Telegram告警发送失败:`, error.message);
+    }
+  }
+}
