@@ -30,7 +30,7 @@ const CONFIG = {
 
   maxPosition: 7874,  // 2026-02-15: 总权益10%（78739×0.1），避免触顶，熔断只告警不撤单
 
-  magnetDistance: 0.005,     // 0.5%
+  magnetDistance: 0.015,     // 1.5% (P3优化: 减少空窗)
   cancelDistance: 0.01,      // 1%
 
   // magnetDistance 的补强：默认按 gridSpacing 的比例给一个"相对磁铁范围"，避免长期擦边不触发
@@ -1122,6 +1122,86 @@ function st_init() {
   state.initialOffset = positionDiffState.initialOffset || 0;
   if (state.initialOffset !== 0) {
     logInfo('[Init] P2: 持仓差值监控 - initialOffset=' + state.initialOffset);
+  }
+  
+  // P2修复：检测遗留订单（鲶鱼建议）
+  checkLegacyOrders();
+}
+
+// P2修复：检测遗留订单并告警
+function checkLegacyOrders() {
+  try {
+    // 检查bridge_getOpenOrders是否存在
+    if (typeof bridge_getOpenOrders !== 'function') {
+      logDebug('[P2] bridge_getOpenOrders未定义，跳过遗留订单检测');
+      return;
+    }
+    
+    const ordersJson = bridge_getOpenOrders(CONFIG.symbol);
+    if (!ordersJson || ordersJson === 'null' || ordersJson === '[]') {
+      return; // 无挂单
+    }
+    
+    const orders = JSON.parse(ordersJson);
+    if (!Array.isArray(orders) || orders.length === 0) {
+      return;
+    }
+    
+    // 筛选遗留订单（orderLinkId以gales-开头但runId不匹配）
+    const legacyOrders = orders.filter(o => {
+      if (o.orderLinkId && o.orderLinkId.startsWith('gales-')) {
+        const parts = o.orderLinkId.split('-');
+        if (parts.length >= 2) {
+          const orderRunId = parts[1];
+          return orderRunId !== String(state.runId);
+        }
+      }
+      return false;
+    });
+    
+    if (legacyOrders.length > 0) {
+      // 构建详细告警信息
+      let details = '[P2告警] 发现' + legacyOrders.length + '个遗留订单来自旧run\n';
+      details += '当前runId: ' + state.runId + '\n';
+      details += '遗留订单详情:\n';
+      
+      // P3修复：补充mark价格和距离百分比（9号建议）
+      const markPrice = state.lastPrice || 0;
+      details += '当前mark价格: ' + markPrice.toFixed(4) + '\n';
+      
+      legacyOrders.forEach((o, idx) => {
+        const parts = o.orderLinkId.split('-');
+        const oldRunId = parts[1] || 'unknown';
+        const orderPrice = o.price || 0;
+        const distancePct = markPrice > 0 ? ((orderPrice - markPrice) / markPrice * 100).toFixed(2) : 'N/A';
+        
+        details += (idx + 1) + '. orderId=' + o.orderId + '\n';
+        details += '   orderLinkId=' + o.orderLinkId + '\n';
+        details += '   旧runId=' + oldRunId + '\n';
+        details += '   side=' + o.side + ' price=' + orderPrice.toFixed(4) + ' qty=' + (o.qty || 0).toFixed(4) + '\n';
+        details += '   status=' + (o.status || 'Unknown') + '\n';
+        details += '   距离mark: ' + distancePct + '% (mark=' + markPrice.toFixed(4) + ')\n';
+      });
+      
+      details += '建议操作: 请手动检查上述订单是否仍需保留，如不需要请手动撤单';
+      
+      logWarn(details);
+      state.legacyOrdersAtStartup = legacyOrders.length;
+      
+      // TG通知bot-009
+      try {
+        if (typeof bridge_tgSend === 'function') {
+          const summary = '[告警] 遗留订单: ' + legacyOrders.length + '个来自旧run，请检查是否手动处理';
+          bridge_tgSend('9号', summary);
+        }
+      } catch (e) {
+        logWarn('[P2] tg通知失败: ' + e);
+      }
+    } else {
+      logInfo('[P2] 未检测到遗留订单');
+    }
+  } catch (e) {
+    logWarn('[P2] 检测遗留订单失败: ' + e);
   }
 }
 
