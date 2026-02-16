@@ -196,8 +196,11 @@ async function main() {
   const symbol = params.symbol || 'MYXUSDT';
 
   // 3. 创建策略实例
+  // P0修复：使用固定strategyId（symbol+direction）而非Date.now()
+  // 确保重启后能加载到相同的state文件
+  const direction = params.direction || 'neutral';
   const strategy = new QuickJSStrategy({
-    strategyId: `gales-${symbol}-${Date.now()}`,
+    strategyId: `gales-${symbol}-${direction}`,
     strategyFile,
     params,
     maxRetries: 3,

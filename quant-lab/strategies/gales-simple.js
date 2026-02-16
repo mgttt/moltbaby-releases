@@ -207,6 +207,10 @@ function loadState() {
   } catch (e) {
     logInfo('Failed to load state: ' + e);
   }
+  
+  // P2修复v4: tick可能先于st_init执行，立即清空initialOffset避免假告警
+  state.initialOffset = 0;
+  positionDiffState.initialOffset = 0;
 }
 
 // 保存状态
@@ -428,10 +432,11 @@ function checkPositionDiff() {
     return;  // internal未开始累积，跳过差值监控
   }
   
-  // 计算差值 = |exchange - internal - initialOffset|
-  const currentDiff = Math.abs(
-    (state.exchangePosition || 0) - (state.positionNotional || 0) - (positionDiffState.initialOffset || 0)
-  );
+  // P2修复v2: 计算差值 = |(exchange - initialOffset) - internal|
+  // 原公式 diff = |exchange - internal - initialOffset| 在internal累积后仍触发误报
+  // 新公式 diff = |(exchange - initialOffset) - internal| 正确反映"新增差异"
+  const adjustedExchange = (state.exchangePosition || 0) - (positionDiffState.initialOffset || 0);
+  const currentDiff = Math.abs(adjustedExchange - (state.positionNotional || 0));
   
   // 趋势检测：差值是否连续增大
   if (currentDiff > positionDiffState.lastDiff) {
