@@ -67,6 +67,7 @@ export class QuickJSStrategy {
   private lastBar?: Kline;
   private cachedAccount?: Account;
   private cachedPositions: Map<string, Position> = new Map();
+  private cachedOpenOrders: any[] = [];  // P2修复：缓存openOrders（遗留订单检测）
   
   // P2修复：缓存就绪门闸（bot-009建议）
   private cacheReady = false;
@@ -603,6 +604,7 @@ export class QuickJSStrategy {
       
       // 拉取未完成订单
       const openOrders = await (ctx as any).getOpenOrders();
+      this.cachedOpenOrders = openOrders;  // P2修复：缓存openOrders（遗留订单检测）
       console.log(`[QuickJSStrategy] [Order Reconcile] 未完成订单: ${openOrders.length} 个`);
       
       if (openOrders.length > 0) {
@@ -782,6 +784,14 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_getPosition', bridge_getPosition);
     bridge_getPosition.dispose();
+
+    // P2修复：bridge_getOpenOrders - 获取未完成订单（遗留订单检测）
+    const bridge_getOpenOrders = this.ctx.newFunction('bridge_getOpenOrders', () => {
+      console.log(`[QuickJSStrategy] bridge_getOpenOrders: cached=${this.cachedOpenOrders.length} orders`);
+      return this.ctx!.newString(JSON.stringify(this.cachedOpenOrders));
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getOpenOrders', bridge_getOpenOrders);
+    bridge_getOpenOrders.dispose();
 
     // bridge_placeOrder - 下单（队列化异步执行）
     const bridge_placeOrder = this.ctx.newFunction('bridge_placeOrder', (paramsHandle) => {
