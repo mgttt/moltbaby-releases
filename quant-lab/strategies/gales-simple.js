@@ -12,6 +12,9 @@ let positionDiffState = {
   lastAlertAt: 0,        // 上次告警时间（防抖）
 };
 
+// P0修复：execution去重集合（防止重复处理成交）
+let processedExecIds = {};
+
 // ================================
 // 配置
 // ================================
@@ -211,6 +214,9 @@ function loadState() {
   // P2修复v4: tick可能先于st_init执行，立即清空initialOffset避免假告警
   state.initialOffset = 0;
   positionDiffState.initialOffset = 0;
+  
+  // P0修复：清空execution去重集合，避免重启后历史数据干扰
+  processedExecIds = {};
 }
 
 // 保存状态
@@ -979,6 +985,69 @@ function st_onOrderUpdate(orderJson) {
     saveState();
   } catch (e) {
     logWarn('st_onOrderUpdate parse failed: ' + e);
+  }
+}
+
+/**
+ * P0修复：成交明细回调（WebSocket收到execution时调用）
+ * 直接更新positionNotional，带execId去重
+ */
+function st_onExecution(execJson) {
+  try {
+    const exec = (typeof execJson === 'string') ? JSON.parse(execJson) : execJson;
+    if (!exec || !exec.execId) {
+      logDebug('[st_onExecution] 无execId，跳过');
+      return;
+    }
+
+    // execId去重
+    if (processedExecIds[exec.execId]) {
+      logDebug('[st_onExecution] execId=' + exec.execId + ' 已处理，跳过');
+      return;
+    }
+    processedExecIds[exec.execId] = true;
+
+    // 清理旧execId（保留最近1000个）
+    const execIds = Object.keys(processedExecIds);
+    if (execIds.length > 1000) {
+      execIds.slice(0, execIds.length - 1000).forEach(id => delete processedExecIds[id]);
+    }
+
+    const side = exec.side;
+    const execQty = parseFloat(exec.execQty || 0);
+    const execPrice = parseFloat(exec.execPrice || 0);
+    const notional = execQty * execPrice;
+
+    if (execQty <= 0 || execPrice <= 0) {
+      logWarn('[st_onExecution] 无效成交数据: qty=' + execQty + ' price=' + execPrice);
+      return;
+    }
+
+    // 直接更新positionNotional（与updatePositionFromFill相同逻辑）
+    if (CONFIG.direction === 'long') {
+      if (side === 'Buy') {
+        state.positionNotional += notional;
+      }
+      // Sell在long模式下是虚仓，不更新
+    } else if (CONFIG.direction === 'short') {
+      if (side === 'Sell') {
+        state.positionNotional -= notional;
+      } else {
+        // Buy减少空仓
+        state.positionNotional += notional;
+      }
+    } else {
+      // neutral模式
+      if (side === 'Buy') state.positionNotional += notional;
+      else state.positionNotional -= notional;
+    }
+
+    logInfo('[成交明细] execId=' + exec.execId + ' ' + side + ' ' + execQty.toFixed(4) + ' @ ' + execPrice.toFixed(4) + 
+            ' | 仓位Notional=' + state.positionNotional.toFixed(2));
+
+    saveState();
+  } catch (e) {
+    logWarn('st_onExecution failed: ' + e);
   }
 }
 
