@@ -6,6 +6,7 @@
 import { QuickJSStrategy } from '../src/sandbox/QuickJSStrategy';
 import { LiveEngine } from '../src/engine/live';
 import { PaperTradingProvider } from '../../quant-lib/src/providers/paper-trading';
+import { PaperTradingProviderAdapter } from '../src/adapters/PaperTradingProviderAdapter';
 import type { Kline } from '../../quant-lib/src';
 
 async function main() {
@@ -27,9 +28,12 @@ async function main() {
   });
 
   // 2. 创建 Provider
-  const provider = new PaperTradingProvider({
+  const paperProvider = new PaperTradingProvider({
     initialBalance: 1000,
   });
+
+  // 用适配器包装（桥接quant-lib和quant-lab接口）
+  const provider = new PaperTradingProviderAdapter(paperProvider);
 
   // 3. 创建引擎
   const engine = new LiveEngine(

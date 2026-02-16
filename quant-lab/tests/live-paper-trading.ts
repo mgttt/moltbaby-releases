@@ -6,6 +6,7 @@
 
 import { LiveEngine } from '../src/engine/live';
 import { PaperTradingProvider } from '../../quant-lib/src/providers/paper-trading';
+import { PaperTradingProviderAdapter } from '../src/adapters/PaperTradingProviderAdapter';
 import type { Strategy, StrategyContext } from '../src/engine/types';
 import type { Kline } from '../../quant-lib/src';
 
@@ -122,11 +123,14 @@ console.log('📊 实盘引擎 + PaperTradingProvider 测试\n');
 const symbol = 'BTC/USDT';
 
 // 创建 Provider
-const provider = new PaperTradingProvider({
+const paperProvider = new PaperTradingProvider({
   initialBalance: 10000,
   commission: 0.001,  // 0.1%
   slippage: 0.0005,   // 0.05%
 });
+
+// 用适配器包装（桥接quant-lib和quant-lab接口）
+const provider = new PaperTradingProviderAdapter(paperProvider);
 
 // 创建策略
 const strategy = new SimpleMAStrategy(symbol);
