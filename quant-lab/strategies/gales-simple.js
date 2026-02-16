@@ -1088,7 +1088,8 @@ function st_init() {
       logInfo('[Init]   side: ' + position.side);
       logInfo('[Init]   positionNotional: ' + position.positionNotional);
       
-      // P0修复：启动时对齐internal到exchange（风控必须基于实际持仓）
+      // 记录交易所持仓（仅用于显示和initialOffset计算）
+      // 方案C：每个策略维护独立账本，不覆盖策略内部positionNotional
       let exchangePosition = position.positionNotional || 0;
       const isShortSide = position.side === 'Sell' || position.side === 'SHORT' || position.side === 'short';
       if (isShortSide) {
@@ -1096,21 +1097,9 @@ function st_init() {
       }
       state.exchangePosition = exchangePosition;
       
-      // P0修复：对齐internal到exchange（防止风控失效）
-      // neutral模式：直接对齐
-      // long模式：只取正仓（忽略对冲虚仓）
-      // short模式：只取负仓（符号一致）
-      if (CONFIG.direction === 'neutral') {
-        state.positionNotional = exchangePosition;
-      } else if (CONFIG.direction === 'long') {
-        state.positionNotional = Math.max(0, exchangePosition);  // 只取正仓
-      } else if (CONFIG.direction === 'short') {
-        state.positionNotional = Math.min(0, exchangePosition);  // 只取负仓
-      }
-      
-      logInfo('[Init]   交易所持仓: ' + state.exchangePosition.toFixed(2));
-      logInfo('[Init]   策略内部持仓(已对齐): ' + state.positionNotional.toFixed(2));
-      logInfo('[Init] ✅ P0修复：internal已对齐exchange，风控基于实际持仓');
+      logInfo('[Init]   交易所持仓(仅供参考): ' + state.exchangePosition.toFixed(2));
+      logInfo('[Init]   策略内部持仓(独立账本): ' + state.positionNotional.toFixed(2));
+      logInfo('[Init] ✅ 方案C：策略独立账本，通过订单历史累积positionNotional');
     }
     
     saveState();
