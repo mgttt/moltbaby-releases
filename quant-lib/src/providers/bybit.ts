@@ -11,7 +11,7 @@ import type {
 import type { Kline } from 'quant-lib';
 import type { TradingProvider } from '../engine/live';
 import { createHmac } from 'crypto';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 
 /**
  * Bybit 配置
@@ -745,13 +745,36 @@ export class BybitProvider implements TradingProvider {
       args.push('--data', body);
     }
 
-    let out: string;
-    try {
-      out = execFileSync('curl', args, { encoding: 'utf8' });
-    } catch (error: any) {
-      // SSL 错误或其他 curl 失败
-      const errorMsg = error.stderr?.toString() || error.message || 'Unknown curl error';
-      console.error(`[BybitProvider] Curl failed (${method}): ${errorMsg}`);
+    // 显式pipe stderr（鲶鱼建议1）
+    const result = spawnSync('curl', args, { 
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'], // stdin, stdout, stderr
+    });
+
+    const out = result.stdout || '';
+    const err = result.stderr || '';
+
+    // 成功但stderr非空：打结构化日志（鲶鱼建议2）
+    if (result.status === 0 && err.trim()) {
+      console.warn(
+        `[BybitProvider] Curl success with stderr: ` +
+        `method=${method} | ` +
+        `url=${url} | ` +
+        `stderr="${err.trim().slice(0, 150)}"`,
+      );
+      // TODO: 计入netErr/阈值告警（鲶鱼建议3）
+    }
+
+    // curl失败（非0退出码）
+    if (result.status !== 0) {
+      const errorMsg = err.trim() || result.error?.message || 'Unknown curl error';
+      console.error(
+        `[BybitProvider] Curl failed: ` +
+        `method=${method} | ` +
+        `url=${url} | ` +
+        `status=${result.status} | ` +
+        `stderr="${errorMsg.slice(0, 150)}"`,
+      );
       console.error(`[BybitProvider] Command: curl ${args.join(' ')}`);
       throw new Error(`Bybit API request failed (curl): ${errorMsg}`);
     }

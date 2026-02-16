@@ -29,6 +29,21 @@ export interface QuickJSStrategyConfig {
 }
 
 /**
+ * 策略状态快照（用于热更新）
+ */
+export interface StrategySnapshot {
+  timestamp: number;
+  strategyId: string;
+  state: Record<string, any>;    // 完整策略状态
+  cachedAccount?: Account;       // 缓存的账户状态
+  cachedPositions: Array<[string, Position]>; // 缓存的持仓
+  cacheReady: boolean;           // 缓存就绪标志
+  tickCount: number;             // 心跳计数
+  lastPrice: number;             // 最后价格
+  lastBar?: Kline;               // 最后K线
+}
+
+/**
  * QuickJS 策略运行器
  */
 export class QuickJSStrategy {
@@ -183,29 +198,69 @@ export class QuickJSStrategy {
   /**
    * 热重载监听
    */
+  /**
+   * 手动触发热重载（Day 1实现）
+   */
+  async reload(): Promise<void> {
+    console.log(`[QuickJSStrategy] 开始手动热重载: ${this.config.strategyFile}`);
+
+    try {
+      // 1. 保存完整状态快照
+      const snapshot = this.createSnapshot();
+      console.log(`[QuickJSStrategy] 状态快照已创建`);
+
+      // 2. 调用st_stop清理旧策略
+      if (this.ctx && this.initialized) {
+        await this.callStrategyFunction('st_stop').catch((err) => {
+          console.warn(`[QuickJSStrategy] st_stop失败:`, err.message);
+        });
+      }
+
+      // 3. 释放旧QuickJS VM
+      if (this.ctx) {
+        this.ctx.dispose();
+        this.ctx = undefined;
+      }
+
+      // 4. 重新初始化QuickJS VM + 加载策略文件
+      this.initialized = false;
+      await this.initializeSandbox();
+
+      // 5. 恢复状态快照
+      await this.restoreSnapshot(snapshot);
+
+      // 6. 标记热重载模式（通过全局标志）
+      if (this.ctx) {
+        const hotReloadFlag = this.ctx.newNumber(1);
+        this.ctx.setProp(this.ctx.global, '_hotReload', hotReloadFlag);
+        hotReloadFlag.dispose();
+      }
+
+      // 7. 调用st_init（策略可检查_hotReload标志）
+      if (this.strategyCtx) {
+        await this.callStrategyFunction('st_init', this.strategyCtx);
+      }
+
+      console.log(`[QuickJSStrategy] 热重载完成 ✅`);
+    } catch (error: any) {
+      console.error(`[QuickJSStrategy] 热重载失败:`, error.message);
+      throw error;
+    }
+  }
+
   private startHotReload(): void {
     console.log(`[QuickJSStrategy] 启动热重载监听: ${this.config.strategyFile}`);
 
     watchFile(this.config.strategyFile, { interval: 2000 }, async (curr, prev) => {
       if (curr.mtimeMs !== this.fileLastModified) {
-        console.log(`[QuickJSStrategy] 检测到文件变化，重新加载...`);
+        console.log(`[QuickJSStrategy] 检测到文件变化，触发自动重新加载...`);
         this.fileLastModified = curr.mtimeMs;
 
         try {
-          // 清理旧沙箱
-          if (this.ctx) {
-            await this.callStrategyFunction('st_stop').catch(() => {});
-            this.ctx.dispose();
-            this.ctx = undefined;
-          }
-
-          // 重新初始化
-          this.initialized = false;
-          await this.initializeSandbox();
-
-          console.log(`[QuickJSStrategy] 热重载完成`);
+          // 使用新的reload()方法
+          await this.reload();
         } catch (error: any) {
-          console.error(`[QuickJSStrategy] 热重载失败:`, error.message);
+          console.error(`[QuickJSStrategy] 自动热重载失败:`, error.message);
         }
       }
     });
@@ -866,6 +921,51 @@ export class QuickJSStrategy {
         console.warn(`[QuickJSStrategy] 加载状态失败:`, error.message);
       }
     }
+  }
+
+  /**
+   * 创建策略状态快照（用于热更新）
+   */
+  createSnapshot(): StrategySnapshot {
+    return {
+      timestamp: Date.now(),
+      strategyId: this.config.strategyId,
+      state: Object.fromEntries(this.strategyState.entries()),
+      cachedAccount: this.cachedAccount,
+      cachedPositions: Array.from(this.cachedPositions.entries()),
+      cacheReady: this.cacheReady,
+      tickCount: this.tickCount,
+      lastPrice: this.lastPrice,
+      lastBar: this.lastBar,
+    };
+  }
+
+  /**
+   * 恢复策略状态快照（用于热更新）
+   */
+  async restoreSnapshot(snapshot: StrategySnapshot): Promise<void> {
+    console.log(`[QuickJSStrategy] 恢复快照: ${new Date(snapshot.timestamp).toISOString()}`);
+
+    // 恢复策略状态
+    this.strategyState.clear();
+    for (const [k, v] of Object.entries(snapshot.state)) {
+      this.strategyState.set(k, v);
+    }
+
+    // 恢复缓存
+    this.cachedAccount = snapshot.cachedAccount;
+    this.cachedPositions.clear();
+    for (const [symbol, position] of snapshot.cachedPositions) {
+      this.cachedPositions.set(symbol, position);
+    }
+    this.cacheReady = snapshot.cacheReady;
+
+    // 恢复运行状态
+    this.tickCount = snapshot.tickCount;
+    this.lastPrice = snapshot.lastPrice;
+    this.lastBar = snapshot.lastBar;
+
+    console.log(`[QuickJSStrategy] 快照恢复完成: ${Object.keys(snapshot.state).length} 个状态键`);
   }
 
   /**
