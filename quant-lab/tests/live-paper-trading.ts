@@ -208,7 +208,7 @@ console.log(`最终权益: $${account.equity.toFixed(2)}`);
 console.log(`总盈亏: $${(account.equity - 10000).toFixed(2)}`);
 console.log(`回报率: ${((account.equity / 10000 - 1) * 100).toFixed(2)}%`);
 
-const orders = provider.getOrders();
+const orders = (await provider.getOrders?.()) ?? [];
 console.log(`\n总订单数: ${orders.length}`);
 console.log(`买入订单: ${orders.filter(o => o.side === 'BUY').length}`);
 console.log(`卖出订单: ${orders.filter(o => o.side === 'SELL').length}`);

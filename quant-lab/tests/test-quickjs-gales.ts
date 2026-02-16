@@ -18,7 +18,7 @@ async function main() {
   // 1. 创建策略
   const strategy = new QuickJSStrategy({
     strategyId: 'gales-quickjs-test',
-    strategyFile: './quant-lab/strategies/gales-simple.js',
+    strategyFile: './strategies/gales-simple.js',
     params: {
       symbol: 'MYXUSDT',
       gridCount: 5,
