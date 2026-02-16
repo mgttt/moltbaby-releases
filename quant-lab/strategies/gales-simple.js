@@ -112,9 +112,13 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
   // P0修复：添加emergencyDirection参数覆盖
   if (p.emergencyDirection) CONFIG.emergencyDirection = p.emergencyDirection;
   // P2修复：添加initialOffset参数覆盖（持仓差值监控）
+  // 如果用户传了initialOffset，使用用户值；否则在st_init中自动计算
   if (p.initialOffset !== undefined) {
     CONFIG.initialOffset = p.initialOffset;
     positionDiffState.initialOffset = p.initialOffset;
+  } else {
+    // 标记为需要自动计算（在st_init中计算）
+    CONFIG.initialOffset = null;
   }
 }
 
@@ -220,6 +224,10 @@ function logInfo(msg) {
 
 function logWarn(msg) {
   bridge_log('warn', '[Gales] ' + msg);
+}
+
+function logError(msg) {
+  bridge_log('error', '[Gales] ' + msg);
 }
 
 function logDebug(msg) {
@@ -448,23 +456,22 @@ function checkPositionDiff() {
                   ' (' + (diffRatio * 100).toFixed(1) + '%) | ' +
                   'exchange=' + (state.exchangePosition || 0).toFixed(2) + 
                   ' internal=' + (state.positionNotional || 0).toFixed(2);
-      logError(msg);
+      bridge_log('error', '[Gales] ' + msg);  // P0修复：直接用bridge_log
       
-      // P2修复：TG通知bot-009、bot-004、bot-001
+      // P2修复：TG通知bot-009、bot-004、bot-001（9号建议：加runId避免延迟消息误判）
       try {
         if (typeof bridge_tgSend === 'function') {
-          bridge_tgSend('9号', '[告急] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT');
-          bridge_tgSend('4号', '[告急] 持仓差值熔断! 请检查策略代码和quant-lab模块，必要时通知1号检查quant-lib');
-          bridge_tgSend('1号', '[告急] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT，请检查quant-lib等底层模块');
+          bridge_tgSend('9号', '[告急] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('4号', '[告急] 持仓差值熔断! 请检查策略代码和quant-lab模块 (runId=' + state.runId + ')');
+          bridge_tgSend('1号', '[告急] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
         }
       } catch (e) {
         logWarn('[P2] tg通知失败: ' + e);
       }
       
-      // 触发熔断（停止新订单）
-      circuitBreakerState.tripped = true;
-      circuitBreakerState.reason = '持仓差值熔断';
-      circuitBreakerState.tripAt = now;
+      // P2修复：只告警不熔断（9号/鲶鱼建议）
+      // 持仓差值监控设计为告警only，不置tripped，避免长期熔断中
+      logWarn('[P2] 持仓差值告警：仅通知，不触发熔断');
     }
     return;
   }
@@ -483,11 +490,11 @@ function checkPositionDiff() {
                   ' internal=' + (state.positionNotional || 0).toFixed(2);
       logWarn(msg);
       
-      // P2修复：TG通知bot-009和bot-001
+      // P2修复：TG通知bot-009和bot-001（9号建议：加runId避免延迟消息误判）
       try {
         if (typeof bridge_tgSend === 'function') {
-          bridge_tgSend('9号', '[告警] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT');
-          bridge_tgSend('1号', '[告警] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT，请关注');
+          bridge_tgSend('9号', '[告警] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('1号', '[告警] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
         }
       } catch (e) {
         logWarn('[P2] tg通知失败: ' + e);
@@ -1104,6 +1111,16 @@ function st_init() {
   state.runId = Date.now();
   state.orderSeq = 0;
   logInfo('[Init] P0: 110072根治 - 新runId=' + state.runId + '，orderLinkId将唯一');
+  
+  // P2修复：初始化initialOffset避免启动时假熔断（9号/鲶鱼建议）
+  if (positionDiffState.initialOffset === 0) {
+    const calculatedOffset = (state.exchangePosition || 0) - (state.positionNotional || 0);
+    if (Math.abs(calculatedOffset) > 100) {
+      // 只有差值>100才设置（避免小误差）
+      positionDiffState.initialOffset = calculatedOffset;
+      logInfo('[Init] P2: 持仓差值监控 - 检测到启动差值，设置initialOffset=' + calculatedOffset.toFixed(2));
+    }
+  }
   
   // P2修复：同步initialOffset到state（用于持久化）
   state.initialOffset = positionDiffState.initialOffset || 0;

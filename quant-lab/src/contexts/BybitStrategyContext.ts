@@ -204,4 +204,18 @@ export class BybitStrategyContext implements StrategyContext {
   async getPositionsAsync(): Promise<Position[]> {
     return this.provider.getPositions();
   }
+
+  /**
+   * P2修复：获取未完成订单（订单闭环对账 - bot-009/鲶鱼建议）
+   */
+  async getOpenOrders(symbol?: string, limit: number = 50): Promise<any[]> {
+    return this.provider.getOpenOrders(symbol, 'linear', limit);
+  }
+
+  /**
+   * P2修复：获取成交记录（订单闭环对账 - bot-009/鲶鱼建议）
+   */
+  async getExecutions(symbol?: string, limit: number = 50, startTime?: number): Promise<any[]> {
+    return this.provider.getExecutions(symbol, 'linear', limit, startTime);
+  }
 }

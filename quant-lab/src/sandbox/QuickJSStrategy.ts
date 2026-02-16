@@ -52,6 +52,9 @@ export class QuickJSStrategy {
   private cachedAccount?: Account;
   private cachedPositions: Map<string, Position> = new Map();
   
+  // P2修复：缓存就绪门闸（bot-009建议）
+  private cacheReady = false;
+  
   // 待处理订单队列（异步执行）
   private pendingOrders: Array<{
     params: any;
@@ -148,6 +151,8 @@ export class QuickJSStrategy {
       } catch (error: any) {
         console.error(`[QuickJSStrategy] [Init] 缓存刷新失败，使用空缓存启动:`, error.message);
         console.error(`[QuickJSStrategy] [Init] 策略将继续运行，onTick会定期重试刷新`);
+        // P2修复：缓存未就绪门闸（bot-009建议）
+        console.error(`[QuickJSStrategy] [Init] [P2 GATE] cacheReady=false，禁止下单直到缓存刷新成功`);
         // 使用空缓存继续（稍后onTick每60心跳会重试）
       }
 
@@ -291,12 +296,24 @@ export class QuickJSStrategy {
 
     // P0 修复：周期性刷新持仓缓存（每60心跳=5分钟）
     if (this.tickCount % 60 === 0) {
+      const wasReady = this.cacheReady;
       try {
         await this.refreshCache(ctx);
         console.log(`[QuickJSStrategy] [Cache Refresh] 持仓缓存已刷新 (tick #${this.tickCount})`);
+        // P2修复：缓存刷新成功后记录门闸状态变化（bot-009建议）
+        if (!wasReady && this.cacheReady) {
+          console.log(`[QuickJSStrategy] [P2 GATE] cacheReady: false → true，允许下单`);
+        }
       } catch (error: any) {
         console.error(`[QuickJSStrategy] [Cache Refresh] 刷新失败:`, error.message);
+        // P2修复：缓存刷新失败后记录门闸状态（bot-009建议）
+        if (wasReady && !this.cacheReady) {
+          console.error(`[QuickJSStrategy] [P2 GATE] cacheReady: true → false，禁止下单`);
+        }
       }
+      
+      // P2修复：订单闭环对账（bot-009/鲶鱼建议）
+      await this.reconcileOrders(ctx);
     }
 
     // 调用 st_heartbeat
@@ -502,10 +519,53 @@ export class QuickJSStrategy {
         
         console.log(`[QuickJSStrategy] 缓存刷新成功: ${account.positions.length} 个持仓`);
       }
+      
+      // P2修复：缓存刷新成功后设置门闸（bot-009建议）
+      this.cacheReady = true;
     } catch (error: any) {
       console.error(`[QuickJSStrategy] 缓存刷新失败:`, error.message);
+      // P2修复：缓存刷新失败时门闸仍为false（bot-009建议）
+      this.cacheReady = false;
       // P0 修复：抛出错误让调用者知道初始化失败
       throw error;
+    }
+  }
+
+  /**
+   * P2修复：订单闭环对账（bot-009/鲶鱼建议）
+   */
+  private async reconcileOrders(ctx: StrategyContext): Promise<void> {
+    try {
+      // 检测 ctx 类型：只有 BybitStrategyContext 有 getOpenOrders/getExecutions
+      const hasOrderAPI = 'getOpenOrders' in ctx && typeof (ctx as any).getOpenOrders === 'function';
+      
+      if (!hasOrderAPI) {
+        // LiveEngine/BacktestEngine 没有这些 API，跳过
+        return;
+      }
+      
+      // 拉取未完成订单
+      const openOrders = await (ctx as any).getOpenOrders();
+      console.log(`[QuickJSStrategy] [Order Reconcile] 未完成订单: ${openOrders.length} 个`);
+      
+      if (openOrders.length > 0) {
+        for (const order of openOrders.slice(0, 5)) {
+          console.log(`[QuickJSStrategy] [Order Reconcile] - orderId=${order.orderId}, orderLinkId=${order.orderLinkId}, symbol=${order.symbol}, side=${order.side}, qty=${order.qty}, price=${order.price}, status=${order.orderStatus}`);
+        }
+      }
+      
+      // 拉取成交记录（最近50条）
+      const executions = await (ctx as any).getExecutions();
+      console.log(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个`);
+      
+      if (executions.length > 0) {
+        for (const exec of executions.slice(0, 5)) {
+          console.log(`[QuickJSStrategy] [Order Reconcile] - execId=${exec.execId}, orderLinkId=${exec.orderLinkId}, symbol=${exec.symbol}, side=${exec.side}, execQty=${exec.execQty}, execPrice=${exec.execPrice}, execTime=${exec.execTime}`);
+        }
+      }
+    } catch (error: any) {
+      console.error(`[QuickJSStrategy] [Order Reconcile] 对账失败:`, error.message);
+      // 不抛出错误，避免影响策略运行
     }
   }
 
@@ -514,6 +574,20 @@ export class QuickJSStrategy {
    */
   private async processPendingOrders(): Promise<void> {
     if (!this.strategyCtx) return;
+    
+    // P2修复：缓存就绪门闸检查（bot-009建议）
+    if (!this.cacheReady) {
+      console.warn(`[QuickJSStrategy] [P2 GATE] 缓存未就绪，禁止下单（pending orders: ${this.pendingOrders.length}）`);
+      console.warn(`[QuickJSStrategy] [P2 GATE] 缓存刷新失败时未知真实仓位，强制拒绝下单避免风险`);
+      
+      // 拒绝所有pending orders
+      const orders = [...this.pendingOrders];
+      this.pendingOrders = [];
+      for (const { reject } of orders) {
+        reject(new Error('PositionCacheMissing: 缓存未就绪，禁止下单'));
+      }
+      return;
+    }
     
     const orders = [...this.pendingOrders];
     this.pendingOrders = [];

@@ -230,6 +230,77 @@ export class BybitProvider {
   }
   
   /**
+   * P2修复：获取未完成订单（订单闭环对账 - bot-009/鲶鱼建议）
+   * @param symbol 交易对
+   * @param category 类别
+   * @param limit 返回数量限制
+   */
+  async getOpenOrders(
+    symbol?: string,
+    category: 'linear' | 'inverse' | 'spot' = 'linear',
+    limit: number = 50
+  ): Promise<any[]> {
+    const params: Record<string, string> = { 
+      category,
+      limit: limit.toString()
+    };
+    if (symbol) {
+      params.symbol = symbol;
+    }
+    
+    const data = await this.signedRequest<any>(
+      'GET',
+      '/v5/order/realtime',
+      params
+    );
+    
+    if (data.retCode !== 0) {
+      throw new AuthError(`Bybit API Error [${data.retCode}]: ${data.retMsg}`);
+    }
+    
+    console.log(`[BybitProvider] getOpenOrders: ${(data.result.list || []).length} 个未完成订单`);
+    return data.result.list || [];
+  }
+
+  /**
+   * P2修复：获取成交记录（订单闭环对账 - bot-009/鲶鱼建议）
+   * @param symbol 交易对
+   * @param category 类别
+   * @param limit 返回数量限制
+   * @param startTime 开始时间（毫秒时间戳）
+   */
+  async getExecutions(
+    symbol?: string,
+    category: 'linear' | 'inverse' | 'spot' = 'linear',
+    limit: number = 50,
+    startTime?: number
+  ): Promise<any[]> {
+    const params: Record<string, string> = { 
+      category,
+      limit: limit.toString()
+    };
+    if (symbol) {
+      params.symbol = symbol;
+    }
+    if (startTime) {
+      params.startTime = startTime.toString();
+    }
+    
+    const data = await this.signedRequest<any>(
+      'GET',
+      '/v5/execution/list',
+      params
+    );
+    
+    if (data.retCode !== 0) {
+      throw new AuthError(`Bybit API Error [${data.retCode}]: ${data.retMsg}`);
+    }
+    
+    console.log(`[BybitProvider] getExecutions: ${(data.result.list || []).length} 个成交记录`);
+    return data.result.list || [];
+  }
+
+  /**
    * 获取最新行情（公开 API，无需签名）
    * @param symbol 交易对，如 BTCUSDT
    * @param category 类别: spot | linear | inverse
@@ -449,10 +520,41 @@ export class BybitProvider {
       
       return JSON.parse(out) as T;
     } catch (error: any) {
-      if (error.message?.includes('timeout')) {
-        throw new NetworkError(`请求超时 (${this.timeout}ms)`);
+      // P2改进：详细错误信息（bot-003建议）
+      const stderr = error.stderr?.toString() || '';
+      const exitCode = error.status || error.code || 'unknown';
+      
+      // 分类错误
+      let errorType = 'unknown';
+      let errorDetail = '';
+      
+      if (error.message?.includes('timeout') || stderr.includes('timeout')) {
+        errorType = 'timeout';
+        errorDetail = `请求超时 (${this.timeout}ms)`;
+      } else if (exitCode === 7 || stderr.includes('Failed to connect') || stderr.includes('Could not resolve proxy')) {
+        errorType = 'proxy';
+        errorDetail = `代理连接失败 (proxy=${this.proxyUrl})`;
+      } else if (exitCode === 35 || stderr.includes('SSL') || stderr.includes('unexpected eof')) {
+        errorType = 'ssl';
+        errorDetail = `SSL连接错误 (exit=${exitCode})`;
+      } else if (exitCode === 28) {
+        errorType = 'timeout';
+        errorDetail = `curl超时 (exit=${exitCode})`;
+      } else if (stderr.includes('503') || stderr.includes('Service Unavailable')) {
+        errorType = 'bybit_503';
+        errorDetail = 'Bybit服务不可用(503)';
+      } else {
+        errorDetail = `未知错误 (exit=${exitCode})`;
       }
-      throw new NetworkError(`Bybit API 请求失败: ${error.message}`, error);
+      
+      console.error(`[BybitProvider] Curl请求失败:`);
+      console.error(`  类型: ${errorType}`);
+      console.error(`  详情: ${errorDetail}`);
+      console.error(`  命令: curl ${args.join(' ')}`);
+      console.error(`  exit code: ${exitCode}`);
+      console.error(`  stderr: ${stderr}`);
+      
+      throw new NetworkError(`Bybit API 请求失败 [${errorType}]: ${errorDetail}`, error);
     }
   }
 
@@ -477,11 +579,46 @@ export class BybitProvider {
 
     args.push(url);
 
-    const out = execFileSync('curl', args, {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    try {
+      const out = execFileSync('curl', args, {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
 
-    return JSON.parse(out) as T;
+      return JSON.parse(out) as T;
+    } catch (error: any) {
+      // P2改进：详细错误信息（bot-003建议）
+      const stderr = error.stderr?.toString() || '';
+      const exitCode = error.status || error.code || 'unknown';
+      
+      // 分类错误
+      let errorType = 'unknown';
+      let errorDetail = '';
+      
+      if (exitCode === 7 || stderr.includes('Failed to connect') || stderr.includes('Could not resolve proxy')) {
+        errorType = 'proxy';
+        errorDetail = `代理连接失败 (proxy=${this.proxyUrl})`;
+      } else if (exitCode === 35 || stderr.includes('SSL') || stderr.includes('unexpected eof')) {
+        errorType = 'ssl';
+        errorDetail = `SSL连接错误 (exit=${exitCode})`;
+      } else if (exitCode === 28) {
+        errorType = 'timeout';
+        errorDetail = `curl超时 (exit=${exitCode})`;
+      } else if (stderr.includes('503') || stderr.includes('Service Unavailable')) {
+        errorType = 'bybit_503';
+        errorDetail = 'Bybit服务不可用(503)';
+      } else {
+        errorDetail = `未知错误 (exit=${exitCode})`;
+      }
+      
+      console.error(`[BybitProvider] Curl请求失败 (signed):`);
+      console.error(`  类型: ${errorType}`);
+      console.error(`  详情: ${errorDetail}`);
+      console.error(`  命令: curl ${args.join(' ')}`);
+      console.error(`  exit code: ${exitCode}`);
+      console.error(`  stderr: ${stderr}`);
+      
+      throw new NetworkError(`Bybit API 请求失败 (signed) [${errorType}]: ${errorDetail}`, error);
+    }
   }
 }
