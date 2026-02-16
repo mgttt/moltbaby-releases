@@ -585,6 +585,58 @@ export class BybitProvider implements TradingProvider {
   }
 
   /**
+   * P2修复：获取未完成订单（订单闭环对账 - bot-009/鲶鱼建议）
+   */
+  async getOpenOrders(
+    symbol?: string,
+    category: 'spot' | 'linear' | 'inverse' = 'linear',
+    limit: number = 50
+  ): Promise<any[]> {
+    try {
+      const params: Record<string, any> = {
+        category,
+        limit,
+      };
+      if (symbol) params.symbol = symbol;
+
+      const result = await this.request('GET', '/v5/order/realtime', params);
+      const list = result.result?.list || [];
+      console.log(`[BybitProvider] getOpenOrders: ${list.length} 个未完成订单`);
+      return list;
+    } catch (error: any) {
+      console.error(`[BybitProvider] getOpenOrders failed: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * P2修复：获取成交记录（订单闭环对账 - bot-009/鲶鱼建议）
+   */
+  async getExecutions(
+    symbol?: string,
+    category: 'spot' | 'linear' | 'inverse' = 'linear',
+    limit: number = 50,
+    startTime?: number
+  ): Promise<any[]> {
+    try {
+      const params: Record<string, any> = {
+        category,
+        limit,
+      };
+      if (symbol) params.symbol = symbol;
+      if (startTime) params.startTime = startTime;
+
+      const result = await this.request('GET', '/v5/execution/list', params);
+      const list = result.result?.list || [];
+      console.log(`[BybitProvider] getExecutions: ${list.length} 个成交记录`);
+      return list;
+    } catch (error: any) {
+      console.error(`[BybitProvider] getExecutions failed: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
    * 发送 REST API 请求（直接使用 curl，避免 CloudFront WAF 拦截）
    */
   private async request(
