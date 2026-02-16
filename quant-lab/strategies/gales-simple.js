@@ -1295,8 +1295,8 @@ function st_heartbeat(tickJson) {
   state.lastPrice = tick.price;
   state.tickCount = (state.tickCount || 0) + 1;
 
-  // P2修复：每tick检查持仓差值（移到st_heartbeat确保不被跳过）
-  checkPositionDiff();
+  // P0止血：临时禁用差值告警（避免噪声）
+  // checkPositionDiff();
 
   // P0 修复：每60心跳更新exchangePosition（从cache读取，cache由QuickJSStrategy.onTick刷新）
   if (state.tickCount % 60 === 0) {
