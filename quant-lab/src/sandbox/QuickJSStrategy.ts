@@ -623,6 +623,9 @@ export class QuickJSStrategy {
         for (const exec of executions.slice(0, 5)) {
           console.log(`[QuickJSStrategy] [Order Reconcile] - execId=${exec.execId}, orderLinkId=${exec.orderLinkId}, symbol=${exec.symbol}, side=${exec.side}, execQty=${exec.execQty}, execPrice=${exec.execPrice}, execTime=${exec.execTime}`);
         }
+        
+        // NOTE: 不在Order Reconcile时处理历史executions，避免重复计算仓位
+        // st_onExecution只在实时成交时通过WebSocket回调调用
       }
     } catch (error: any) {
       console.error(`[QuickJSStrategy] [Order Reconcile] 对账失败:`, error.message);
@@ -855,6 +858,38 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_tgSend', bridge_tgSend);
     bridge_tgSend.dispose();
+
+    // P0修复：bridge_onExecution - 成交明细回调
+    const bridge_onExecution = this.ctx.newFunction('bridge_onExecution', (execJsonHandle) => {
+      const execJson = this.ctx!.getString(execJsonHandle);
+      
+      // 调用策略的st_onExecution函数
+      try {
+        const fnHandle = this.ctx!.getProp(this.ctx!.global, 'st_onExecution');
+        const fnType = this.ctx!.typeof(fnHandle);
+        
+        if (fnType === 'function') {
+          const argHandle = this.ctx!.newString(execJson);
+          const result = this.ctx!.callFunction(fnHandle, this.ctx!.undefined, argHandle);
+          
+          fnHandle.dispose();
+          argHandle.dispose();
+          
+          if (result.error) {
+            result.error.dispose();
+          }
+          result.value.dispose();
+        } else {
+          fnHandle.dispose();
+        }
+      } catch (error: any) {
+        console.error(`[QuickJSStrategy] bridge_onExecution failed:`, error.message);
+      }
+      
+      return this.ctx!.newString('ok');
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_onExecution', bridge_onExecution);
+    bridge_onExecution.dispose();
   }
 
   /**

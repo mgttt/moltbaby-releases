@@ -1192,21 +1192,15 @@ function st_init() {
   state.orderSeq = 0;
   logInfo('[Init] P0: 110072根治 - 新runId=' + state.runId + '，orderLinkId将唯一');
   
-  // P2修复：初始化initialOffset避免启动时假熔断（9号/鲶鱼建议）
-  if (positionDiffState.initialOffset === 0) {
-    const calculatedOffset = (state.exchangePosition || 0) - (state.positionNotional || 0);
-    if (Math.abs(calculatedOffset) > 100) {
-      // 只有差值>100才设置（避免小误差）
-      positionDiffState.initialOffset = calculatedOffset;
-      logInfo('[Init] P2: 持仓差值监控 - 检测到启动差值，设置initialOffset=' + calculatedOffset.toFixed(2));
-    }
-  }
+  // P0修复v5: 新runId强制initialOffset=0，不继承旧值（1号方案）
+  // 原因：旧state中的positionNotional可能已过期，重新对齐持仓
+  positionDiffState.initialOffset = 0;
+  state.initialOffset = 0;
+  logInfo('[Init] P0: 新runId强制initialOffset=0，重新对齐持仓');
   
-  // P2修复：同步initialOffset到state（用于持久化）
-  state.initialOffset = positionDiffState.initialOffset || 0;
-  if (state.initialOffset !== 0) {
-    logInfo('[Init] P2: 持仓差值监控 - initialOffset=' + state.initialOffset);
-  }
+  // 重置positionNotional为0，从当前开始累积（避免旧数据干扰）
+  state.positionNotional = 0;
+  logInfo('[Init] P0: 重置positionNotional=0，从当前开始累积');
   
   // P2修复：检测遗留订单（鲶鱼建议）
   checkLegacyOrders();
