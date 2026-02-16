@@ -611,14 +611,11 @@ export class QuickJSStrategy {
         }
       }
       
-      // 拉取成交记录（过滤startTime=bootTimeMs，避免历史数据）
-      const executions = await (ctx as any).getExecutions(
-        undefined,  // symbol
-        'linear',   // category
-        50,         // limit
-        this.bootTimeMs  // startTime（过滤启动前的历史数据）
-      );
-      console.log(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个 (startTime=${this.bootTimeMs})`);
+      // 拉取成交记录（最近50条）
+      // NOTE: Bybit API对execution/list的startTime有限制，报错"Can't query earlier than 2 years"
+      // 临时回退不传startTime，恢复监控能力（TODO: 研究Bybit API文档找到正确用法）
+      const executions = await (ctx as any).getExecutions();
+      console.log(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个`);
       
       if (executions.length > 0) {
         for (const exec of executions.slice(0, 5)) {
