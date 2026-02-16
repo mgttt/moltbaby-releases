@@ -2,7 +2,7 @@
 // 策略运行时类型定义
 // ============================================================
 
-import type { Kline } from 'quant-lib';
+import type { Kline } from '../../../quant-lib/src';
 
 /**
  * 交易方向

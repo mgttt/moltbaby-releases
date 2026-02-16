@@ -5,8 +5,8 @@
 
 import { QuickJSStrategy } from '../src/sandbox/QuickJSStrategy';
 import { LiveEngine } from '../src/engine/live';
-import { PaperTradingProvider } from '../src/providers/paper-trading';
-import type { Kline } from 'quant-lib';
+import { PaperTradingProvider } from '../../quant-lib/src/providers/paper-trading';
+import type { Kline } from '../../quant-lib/src';
 
 async function main() {
   console.log('='.repeat(70));

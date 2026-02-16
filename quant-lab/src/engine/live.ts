@@ -13,8 +13,8 @@ import type {
   PositionSide,
   Tick,
 } from './types';
-import type { Kline } from 'quant-lib';
-import { KlineDatabase, StreamingIndicators } from 'quant-lib';
+import type { Kline } from '../../../quant-lib/src';
+import { KlineDatabase, StreamingIndicators } from '../../../quant-lib/src';
 
 /**
  * Trading Provider 接口（可选）

@@ -4,7 +4,7 @@
 // 执行单次回测任务，封装在 Worker 接口中供 Pool 调度
 // ============================================================
 
-import { KlineDatabase } from 'quant-lib';
+import { KlineDatabase } from '../../../quant-lib/src';
 import { QuickJSStrategy } from '../sandbox/QuickJSStrategy';
 import { BacktestEngine } from '../engine/backtest';
 import type { BacktestConfig } from '../engine/types';

@@ -3,7 +3,7 @@
 // ============================================================
 
 import type { StrategyContext, Order, Position, Account } from '../engine/types';
-import type { Kline } from 'quant-lib';
+import type { Kline } from '../../../quant-lib/src';
 import type { BybitProvider } from '../../quant-lib/src/providers/bybit';
 
 /**

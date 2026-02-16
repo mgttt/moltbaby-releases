@@ -5,7 +5,7 @@
 // 核心思路：只在价格接近网格档位时挂限价单（磁铁吸附），避免滑点
 // ============================================================
 
-import type { Kline, Tick } from 'quant-lib';
+import type { Kline, Tick } from '../../../quant-lib/src';
 import type { Order, StrategyContext } from '../engine/types';
 
 /**

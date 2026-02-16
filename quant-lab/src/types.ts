@@ -10,7 +10,7 @@ export type {
   StrategyLogger as Logger,
   StrategyContext,
   StrategyResult
-} from 'quant-lib';
+} from '../../../quant-lib/src';
 
 // Import types for local use
 import type { 
@@ -20,7 +20,7 @@ import type {
   OrderParams,
   OrderResult as Order,
   StrategyLogger as Logger
-} from 'quant-lib';
+} from '../../../quant-lib/src';
 
 /**
  * 策略配置

@@ -16,8 +16,8 @@ import {
   PaperTradingProvider,
   type PaperOrder,
   type PaperPosition
-} from 'quant-lib';
-import type { ExchangeAPI } from 'quant-lib';
+} from '../../../quant-lib/src';
+import type { ExchangeAPI } from '../../../quant-lib/src';
 
 /**
  * 账号配置加载器

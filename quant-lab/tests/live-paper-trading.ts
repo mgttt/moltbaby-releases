@@ -5,9 +5,9 @@
  */
 
 import { LiveEngine } from '../src/engine/live';
-import { PaperTradingProvider } from '../src/providers/paper-trading';
+import { PaperTradingProvider } from '../../quant-lib/src/providers/paper-trading';
 import type { Strategy, StrategyContext } from '../src/engine/types';
-import type { Kline } from 'quant-lib';
+import type { Kline } from '../../quant-lib/src';
 
 /**
  * 简单双均线策略

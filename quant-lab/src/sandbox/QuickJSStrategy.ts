@@ -10,7 +10,7 @@ import { join } from 'path';
 import { execSync } from 'child_process';
 import { getQuickJS, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
 import type { QuickJSContext as QuickJSContextType } from 'quickjs-emscripten';
-import type { Kline } from 'quant-lib';
+import type { Kline } from '../../../quant-lib/src';
 import type { StrategyContext, Order, Position, Account } from '../engine/types';
 
 /**

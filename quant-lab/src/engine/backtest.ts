@@ -14,8 +14,8 @@ import type {
   PositionSide,
   OrderStatus,
 } from './types';
-import type { Kline } from 'quant-lib';
-import { KlineDatabase } from 'quant-lib';
+import type { Kline } from '../../../quant-lib/src';
+import { KlineDatabase } from '../../../quant-lib/src';
 
 /**
  * 回测引擎
