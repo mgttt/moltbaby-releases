@@ -455,11 +455,13 @@ function checkPositionDiff() {
       bridge_log('error', '[Gales] ' + msg);  // P0修复：直接用bridge_log
       
       // P2修复：TG通知bot-009、bot-004、bot-001（9号建议：加runId避免延迟消息误判）
+      // P0修复：添加direction标识（区分neutral/short实例）
+      const directionLabel = CONFIG.direction || 'neutral';
       try {
         if (typeof bridge_tgSend === 'function') {
-          bridge_tgSend('9号', '[告急] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
-          bridge_tgSend('4号', '[告急] 持仓差值熔断! 请检查策略代码和quant-lab模块 (runId=' + state.runId + ')');
-          bridge_tgSend('1号', '[告急] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('9号', '[告急][' + directionLabel + '] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('4号', '[告急][' + directionLabel + '] 持仓差值熔断! 请检查策略代码和quant-lab模块 (runId=' + state.runId + ')');
+          bridge_tgSend('1号', '[告急][' + directionLabel + '] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
         }
       } catch (e) {
         logWarn('[P2] tg通知失败: ' + e);
@@ -487,10 +489,12 @@ function checkPositionDiff() {
       logWarn(msg);
       
       // P2修复：TG通知bot-009和bot-001（9号建议：加runId避免延迟消息误判）
+      // P0修复：添加direction标识（区分neutral/short实例）
+      const directionLabel = CONFIG.direction || 'neutral';
       try {
         if (typeof bridge_tgSend === 'function') {
-          bridge_tgSend('9号', '[告警] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
-          bridge_tgSend('1号', '[告警] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('9号', '[告警][' + directionLabel + '] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('1号', '[告警][' + directionLabel + '] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
         }
       } catch (e) {
         logWarn('[P2] tg通知失败: ' + e);
@@ -1084,7 +1088,7 @@ function st_init() {
       logInfo('[Init]   side: ' + position.side);
       logInfo('[Init]   positionNotional: ' + position.positionNotional);
       
-      // 记录交易所持仓（仅用于显示，不覆盖策略内部positionNotional）
+      // P0修复：启动时对齐internal到exchange（风控必须基于实际持仓）
       let exchangePosition = position.positionNotional || 0;
       const isShortSide = position.side === 'Sell' || position.side === 'SHORT' || position.side === 'short';
       if (isShortSide) {
@@ -1092,9 +1096,21 @@ function st_init() {
       }
       state.exchangePosition = exchangePosition;
       
+      // P0修复：对齐internal到exchange（防止风控失效）
+      // neutral模式：直接对齐
+      // long模式：只取正仓（忽略对冲虚仓）
+      // short模式：只取负仓（符号一致）
+      if (CONFIG.direction === 'neutral') {
+        state.positionNotional = exchangePosition;
+      } else if (CONFIG.direction === 'long') {
+        state.positionNotional = Math.max(0, exchangePosition);  // 只取正仓
+      } else if (CONFIG.direction === 'short') {
+        state.positionNotional = Math.min(0, exchangePosition);  // 只取负仓
+      }
+      
       logInfo('[Init]   交易所持仓: ' + state.exchangePosition.toFixed(2));
-      logInfo('[Init]   策略内部持仓: ' + state.positionNotional.toFixed(2));
-      logInfo('[Init] ✅ 注意：应急切换基于策略内部持仓，不基于交易所总持仓');
+      logInfo('[Init]   策略内部持仓(已对齐): ' + state.positionNotional.toFixed(2));
+      logInfo('[Init] ✅ P0修复：internal已对齐exchange，风控基于实际持仓');
     }
     
     saveState();
