@@ -501,6 +501,19 @@ export class QuickJSStrategy {
   }
 
   /**
+   * 通过orderId查找orderLinkId（P1修复：撤单成功后更新状态机）
+   */
+  private findOrderLinkIdByOrderId(orderId: string): string | undefined {
+    const orders = this.orderStateManager.getAllOrders();
+    for (const order of orders) {
+      if (order.orderId === orderId) {
+        return order.orderLinkId;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * 热更新参数（不重启沙箱）
    */
   async updateParams(newParams: Record<string, any>): Promise<void> {
@@ -719,9 +732,12 @@ export class QuickJSStrategy {
       
       if (!exchangeOrder) {
         // 策略有但交易所没有 - 可能已成交或已撤单
+        // P1修复：不再标记ABNORMAL，而是标记为CANCELLED（假设已撤单）
+        // 这是重挂/替换场景的正常情况：旧单被替换为新单(-0→-1)
         if (strategyOrder.state === 'SUBMITTED') {
-          // 延迟检查，避免状态同步延迟导致的误判
-          this.orderStateManager.handleInconsistency(strategyOrder.orderLinkId, 'MISSING');
+          console.warn(`[QuickJSStrategy] 订单在交易所不存在(假设已撤单): ${strategyOrder.orderLinkId}`);
+          console.warn(`  原状态: SUBMITTED → CANCELLED (重挂替换场景)`);
+          this.orderStateManager.updateState(strategyOrder.orderLinkId, 'CANCELLED');
         }
         continue;
       }
@@ -944,6 +960,10 @@ export class QuickJSStrategy {
             this.orderStateManager.updateState(params.orderLinkId, 'SUBMITTED', {
               orderId: result.orderId,
             });
+            // P1修复: 建立orderId到orderLinkId的映射
+            if (result.orderId) {
+              this.orderStateManager.setOrderId(params.orderLinkId, result.orderId);
+            }
           }
         },
         reject: (error) => {
@@ -970,7 +990,15 @@ export class QuickJSStrategy {
 
       // 异步执行撤单
       if (this.strategyCtx) {
-        this.strategyCtx.cancelOrder(orderId).catch((error) => {
+        this.strategyCtx.cancelOrder(orderId).then((result: any) => {
+          console.log(`[QuickJSStrategy] 撤单成功: ${orderId}`);
+          // P1修复：撤单成功后更新状态机
+          // 尝试通过orderId查找orderLinkId
+          const orderLinkId = this.findOrderLinkIdByOrderId(orderId);
+          if (orderLinkId) {
+            this.notifyOrderUpdate({ orderLinkId, orderId, status: 'Cancelled', cumQty: 0 });
+          }
+        }).catch((error: any) => {
           console.error(`[QuickJSStrategy] 撤单失败:`, error.message);
         });
       }

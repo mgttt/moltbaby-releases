@@ -1261,50 +1261,70 @@ function checkLegacyOrders() {
     });
     
     if (legacyOrders.length > 0) {
-      // 构建详细告警信息
-      let details = '[P2告警] 发现' + legacyOrders.length + '个遗留订单来自旧run\n';
-      details += '当前runId: ' + state.runId + '\n';
-      details += '遗留订单详情:\n';
+      // P1修复：去重 - 如果上次已告警过相同的订单列表则不再告警
+      const currentLegacyIds = legacyOrders.map(o => o.orderLinkId).sort().join(',');
+      const lastLegacyIds = state.lastLegacyOrderIds || '';
       
-      // P3修复：补充mark价格和距离百分比（9号建议）
-      const markPrice = state.lastPrice || 0;
-      details += '当前mark价格: ' + markPrice.toFixed(4) + '\n';
+      // 记录本次告警的订单ID
+      state.lastLegacyOrderIds = currentLegacyIds;
       
-      legacyOrders.forEach((o, idx) => {
-        // 鲶鱼建议：交易所返回string需转为Number再toFixed
-        const orderPrice = Number(o.price || 0);
-        const qty = Number(o.qty || 0);
-        const parts = o.orderLinkId.split('-');
-        const oldRunId = parts[1] || 'unknown';
-        const distancePct = markPrice > 0 ? ((orderPrice - markPrice) / markPrice * 100).toFixed(2) : 'N/A';
+      // 如果与上次相同则跳过告警
+      if (currentLegacyIds === lastLegacyIds && lastLegacyIds !== '') {
+        logDebug('[P2] 遗留订单与上次相同，跳过重复告警');
+      } else {
+        // 构建详细告警信息
+        let details = '[P2告警] 发现' + legacyOrders.length + '个遗留订单来自旧run\n';
+        details += '当前runId: ' + state.runId + '\n';
+        details += '遗留订单详情:\n';
         
-        details += (idx + 1) + '. orderId=' + (o.orderId || 'unknown') + '\n';
-        details += '   orderLinkId=' + o.orderLinkId + '\n';
-        details += '   旧runId=' + oldRunId + '\n';
-        details += '   side=' + (o.side || 'Unknown') + ' price=' + orderPrice.toFixed(4) + ' qty=' + qty.toFixed(4) + '\n';
-        details += '   status=' + (o.status || 'Unknown') + '\n';
-        details += '   距离mark: ' + distancePct + '% (mark=' + markPrice.toFixed(4) + ')\n';
-      });
-      
-      details += '建议操作: 请手动检查上述订单是否仍需保留，如不需要请手动撤单';
-      
-      logWarn(details);
-      state.legacyOrdersAtStartup = legacyOrders.length;
-      
-      // TG通知bot-009
-      try {
-        if (typeof bridge_tgSend === 'function') {
-          const summary = '[告警] 遗留订单: ' + legacyOrders.length + '个来自旧run，请检查是否手动处理';
-          bridge_tgSend('9号', summary);
+        // P3修复：补充mark价格和距离百分比（9号建议）
+        const markPrice = state.lastPrice || 0;
+        details += '当前mark价格: ' + markPrice.toFixed(4) + '\n';
+        
+        legacyOrders.forEach((o, idx) => {
+          // 鲶鱼建议：交易所返回string需转为Number再toFixed
+          const orderPrice = Number(o.price || 0);
+          const qty = Number(o.qty || 0);
+          const parts = o.orderLinkId.split('-');
+          const oldRunId = parts[1] || 'unknown';
+          const distancePct = markPrice > 0 ? ((orderPrice - markPrice) / markPrice * 100).toFixed(2) : 'N/A';
+          
+          details += (idx + 1) + '. orderId=' + (o.orderId || 'unknown') + '\n';
+          details += '   orderLinkId=' + o.orderLinkId + '\n';
+          details += '   旧runId=' + oldRunId + '\n';
+          details += '   side=' + (o.side || 'Unknown') + ' price=' + orderPrice.toFixed(4) + ' qty=' + qty.toFixed(4) + '\n';
+          details += '   status=' + (o.status || 'Unknown') + '\n';
+          details += '   距离mark: ' + distancePct + '% (mark=' + markPrice.toFixed(4) + ')\n';
+        });
+        
+        details += '建议操作: 请手动检查上述订单是否仍需保留，如不需要请手动撤单';
+        
+        logWarn(details);
+        
+        // TG通知bot-009（仅首次告警）
+        try {
+          if (typeof bridge_tgSend === 'function') {
+            const summary = '[告警] 遗留订单: ' + legacyOrders.length + '个来自旧run，请检查是否手动处理';
+            bridge_tgSend('9号', summary);
+          }
+        } catch (e) {
+          logWarn('[P2] tg通知失败: ' + e);
         }
-      } catch (e) {
-        logWarn('[P2] tg通知失败: ' + e);
       }
+      
+      state.legacyOrdersAtStartup = legacyOrders.length;
     } else {
       logInfo('[P2] 未检测到遗留订单');
     }
   } catch (e) {
-    logWarn('[P2] 检测遗留订单失败: ' + e);
+    // 添加详细调试信息
+    let debugInfo = '[P2] 检测遗留订单失败: ' + e;
+    try {
+      debugInfo += ' | typeof e: ' + typeof e;
+      debugInfo += ' | e.message: ' + (e.message || 'N/A');
+      debugInfo += ' | String(e): ' + String(e).slice(0, 100);
+    } catch (debugErr) {}
+    logWarn(debugInfo);
   }
 }
 

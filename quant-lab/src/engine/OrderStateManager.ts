@@ -19,6 +19,7 @@ export type OrderStateEnum =
 
 export interface OrderState {
   orderLinkId: string;
+  orderId?: string;       // 交易所返回的订单ID（如MYXUSDT:xxx）
   state: OrderStateEnum;
   strategyId: string;
   product: string;
@@ -47,7 +48,8 @@ export interface AbnormalOrderAlert {
 }
 
 export class OrderStateManager {
-  private orders = new Map<string, OrderState>();
+  private orders = new Map<string, OrderState>();  // orderLinkId -> OrderState
+  private orderIdToLinkId = new Map<string, string>();  // orderId -> orderLinkId
   private checkInterval?: NodeJS.Timeout;
   private alertCallbacks: ((alert: AbnormalOrderAlert) => void)[] = [];
   
@@ -132,6 +134,34 @@ export class OrderStateManager {
     }
     
     console.log(`[OrderStateManager] 状态更新: ${orderLinkId} [${oldState} -> ${newState}]`);
+    return true;
+  }
+
+  /**
+   * P1修复: 通过orderId更新订单状态
+   */
+  updateStateByOrderId(orderId: string, newState: OrderStateEnum, updates?: Partial<OrderState>): boolean {
+    const orderLinkId = this.orderIdToLinkId.get(orderId);
+    if (!orderLinkId) {
+      console.warn(`[OrderStateManager] orderId未找到映射: ${orderId}`);
+      return false;
+    }
+    return this.updateState(orderLinkId, newState, updates);
+  }
+
+  /**
+   * P1修复: 设置orderId并建立映射
+   */
+  setOrderId(orderLinkId: string, orderId: string): boolean {
+    const order = this.orders.get(orderLinkId);
+    if (!order) {
+      console.warn(`[OrderStateManager] 订单不存在: ${orderLinkId}`);
+      return false;
+    }
+    
+    order.orderId = orderId;
+    this.orderIdToLinkId.set(orderId, orderLinkId);
+    console.log(`[OrderStateManager] orderId映射: ${orderId} -> ${orderLinkId}`);
     return true;
   }
 
