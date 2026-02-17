@@ -1,7 +1,8 @@
 # Quant-Lab 开发路线图
 
-> **版本**: v3.0 (2026-02-10)  
+> **版本**: v3.1 (2026-02-17)
 > **架构**: Strategy Interface + Backtest/Live Engines
+> **当前优先级**: 订单状态机P1 + ndtsdb集成规划
 
 ---
 
@@ -17,8 +18,10 @@
 | **策略池化** | ⏳ 0% | workerpool-lib 集成 **← 等订单状态机P0完成后** |
 | **参数-波动率结构研究** | ⏳ 0% | 研究gales参数与波动率的最佳结构形式（不做网格搜索/遗传算法）**← 2026-02-17 总裁指示** |
 | **Provider 生态** | ⏳ 40% | Paper ✅ / Binance 📝 / Bybit 📝 |
+| **ndtsdb集成** | ⏳ 0% | 时序数据库 **← 2026-02-17 总裁指示：等系统稳定后开始** |
 | **测试覆盖** | ⏳ 30% | 基础测试已有，待完善 |
 | **文档** | ✅ 80% | README + Provider 指南已有 |
+| **订单状态机** | 🔥 P1 | 异常单检测已完成，STATE_MISMATCH=0 **← 2026-02-17 完成** |
 
 ---
 
@@ -105,11 +108,10 @@
 ---
 
 #### 2. 策略池化（workerpool-lib 集成）🔥 **P1 - 最高优先级**
-**目标**：并行运行多策略实例，支持参数网格搜索
+**目标**：并行运行多策略实例
 
 **核心价值**：
 - 🚀 **并行回测**（100 组参数同时跑 → 8x 加速）
-- 🎯 **参数优化**（网格搜索/遗传算法自动寻优）
 - 🔧 **资源隔离**（每个策略独立 Worker）
 - 📊 **结果聚合**（自动找最优参数 + 排行榜）
 
@@ -120,10 +122,6 @@
 - [ ] StrategyScheduler（基于 workerpool-lib Pool）
   - [ ] runParallelBacktests()（并行提交任务）
   - [ ] 结果收集与排序
-- [ ] ParamOptimizer（参数优化器）
-  - [ ] gridSearch()（网格搜索）
-  - [ ] generateCombinations()（笛卡尔积）
-  - [ ] 指标选择（sharpe/sortino/calmar）
 - [ ] LiveSwitcher（自动切换实盘参数）
   - [ ] switchParams()（撤单 + 暂停 + 更新 + 恢复）
   - [ ] autoSwitch()（定期优化 + 阈值触发）
@@ -134,37 +132,16 @@
 
 ---
 
-#### 3. 参数优化器 🔥 **P2 - 高优先级**
-**目标**：自动寻找最优策略参数
-
-**使用场景**：
-```typescript
-// 网格搜索
-const optimizer = new ParamOptimizer({ strategy: 'gales' });
-const result = await optimizer.gridSearch({
-  gridCount: [5, 10, 15, 20],
-  gridSpacing: [0.005, 0.01, 0.015],
-  magnetDistance: [0.001, 0.002, 0.003]
-});
-// 4×3×3 = 36 组参数，并行回测
-
-// 自动切换实盘参数（P0 已支持）
-await liveEngine.strategy.updateParams(result.bestParams);
-```
-
-**算法支持**：
-- [ ] 网格搜索（Grid Search）
-- [ ] 随机搜索（Random Search）
-- [ ] 遗传算法（Genetic Algorithm）
-- [ ] 贝叶斯优化（Bayesian Optimization）
-
-**预估工期**：2-3 天  
-**依赖**：策略池化（P1）
-
 ---
 
-#### 4. ndtsdb 数据持久化 ⏸️ 延后
-**目标**：订单事件 + 盈亏分析 + 回测验证
+#### 4. ndtsdb 数据持久化 🔥 **等系统稳定后开始**
+**目标**：用更专业的时序数据库替代JSON文件存储
+
+**总裁指示（2026-02-17）**：
+- 等策略交易系统稳定后开始应用
+- 目的：更专业（当前全部JSON文件，ndtsdb 8.9M ticks/s更适合时序数据）
+- 渐进迁移：JSON状态文件并行保留一个阶段
+- 优先迁移：tick数据/K线/成交历史/回测数据
 
 **实现任务**：
 - [ ] 订单事件写入（gales-event → ndtsdb）
@@ -172,8 +149,8 @@ await liveEngine.strategy.updateParams(result.bestParams);
 - [ ] 盈亏分析查询（SQL 聚合）
 - [ ] 回测数据对比（paper vs backtest）
 
-**预估工期**：1 天  
-**状态**：待 QuickJS 集成完成后推进
+**预估工期**：2-3 天  
+**当前状态**：ndtsdb v0.9.0就绪，quant-lab全部JSON文件存储
 
 **参考**：
 - `ndtsdb/` - 时序数据库
