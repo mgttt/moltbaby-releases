@@ -30,6 +30,7 @@ import { QuickJSStrategy } from '../src/sandbox/QuickJSStrategy';
 import { BybitProvider } from '../../quant-lib/src/providers/bybit';
 import { BybitStrategyContext } from '../src/contexts/BybitStrategyContext';
 import { existsSync } from 'fs';
+import { hotReloadAPI } from '../src/api/hot-reload-api';
 
 // ================================
 // 参数解析
@@ -205,7 +206,7 @@ async function main() {
     params,
     maxRetries: 3,
     retryDelayMs: 5000,
-    hotReload: true,  // Day1: 启用实盘热更新
+    hotReload: false,  // Day2: 默认禁用自动watch，热更新通过显式API触发
   });
 
   // 4. 创建 BybitStrategyContext 并初始化策略
@@ -222,6 +223,20 @@ async function main() {
   console.log('[QuickJS] 初始化沙箱...');
   await strategy.onInit(context);
   console.log('[QuickJS] 策略初始化完成\n');
+
+  // Day2: 启动热更新HTTP API服务
+  const apiPort = parseInt(process.env.RELOAD_API_PORT || '9090');
+  try {
+    hotReloadAPI.registerStrategy(`gales-${symbol}-${direction}`, strategy);
+    await hotReloadAPI.start(apiPort);
+    console.log(`[HotReloadAPI] 热更新服务已启动: http://127.0.0.1:${apiPort}`);
+    console.log(`[HotReloadAPI] 可用命令:`);
+    console.log(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/reload -H "Content-Type: application/json" -d '{"strategyId":"gales-${symbol}-${direction}","target":"strategy"}'`);
+    console.log(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/rollback -H "Content-Type: application/json" -d '{"strategyId":"gales-${symbol}-${direction}"}'`);
+  } catch (error: any) {
+    console.warn(`[HotReloadAPI] 启动失败: ${error.message}`);
+  }
+  console.log('');
 
   if (liveMode && !isDryRun) {
     console.log('🔴 [实盘模式] 订单将发送到交易所\n');
@@ -311,6 +326,10 @@ async function main() {
     clearInterval(heartbeatInterval);
 
     try {
+      // Day2: 停止热更新HTTP API服务
+      await hotReloadAPI.stop();
+      console.log('[HotReloadAPI] 服务已停止');
+      
       await strategy.onStop(context);
       console.log('[QuickJS] 策略已停止');
     } catch (e) {
@@ -326,6 +345,10 @@ async function main() {
     clearInterval(heartbeatInterval);
 
     try {
+      // Day2: 停止热更新HTTP API服务
+      await hotReloadAPI.stop();
+      console.log('[HotReloadAPI] 服务已停止');
+      
       await strategy.onStop(context);
       console.log('[QuickJS] 策略已停止');
     } catch (e) {
@@ -339,13 +362,14 @@ async function main() {
   process.on('SIGUSR1', async () => {
     console.log(`\n[QuickJS] [SIGUSR1] 收到热更新信号，触发热重载...`);
     try {
-      // 热更新策略层
-      await (strategy as any).reload();
-      // 热更新Provider层
-      if (provider && typeof provider.reload === 'function') {
-        await provider.reload();
+      // 热更新策略层（使用新的reload方法）
+      const result = await (strategy as any).reload('SIGUSR1');
+      if (result.success) {
+        console.log(`[QuickJS] [SIGUSR1] 热更新完成 ✅ (${result.duration}ms)`);
+        console.log(`[QuickJS] [SIGUSR1] hash: ${result.oldHash} → ${result.newHash}`);
+      } else {
+        console.error(`[QuickJS] [SIGUSR1] 热更新失败: ${result.error}`);
       }
-      console.log('[QuickJS] 热更新完成 ✅');
     } catch (e) {
       console.error('[QuickJS] 热更新失败:', e);
     }

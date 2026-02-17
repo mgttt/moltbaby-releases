@@ -212,15 +212,32 @@ export class QuickJSStrategy {
    * 热重载监听
    */
   /**
-   * 手动触发热重载（Day 1实现）
+   * 手动触发热重载（Day 2增强版）
+   * 
+   * 日志输出：策略ID/旧hash→新hash/触发人/时间戳
    */
-  async reload(): Promise<void> {
-    console.log(`[QuickJSStrategy] 开始手动热重载: ${this.config.strategyFile}`);
+  async reload(triggeredBy: string = 'manual'): Promise<{ success: boolean; oldHash: string; newHash: string; duration: number; error?: string }> {
+    const startTime = Date.now();
+    const timestamp = new Date().toISOString();
+    
+    // 计算旧版本hash
+    const oldHash = this.calculateFileHash();
+    
+    console.log(`[QuickJSStrategy] [RELOAD] =========================================`);
+    console.log(`[QuickJSStrategy] [RELOAD] 开始热重载`);
+    console.log(`[QuickJSStrategy] [RELOAD] 策略ID: ${this.config.strategyId}`);
+    console.log(`[QuickJSStrategy] [RELOAD] 触发人: ${triggeredBy}`);
+    console.log(`[QuickJSStrategy] [RELOAD] 时间戳: ${timestamp}`);
+    console.log(`[QuickJSStrategy] [RELOAD] 旧hash: ${oldHash}`);
 
     try {
-      // 1. 保存完整状态快照
+      // 1. 保存完整状态快照（用于回滚）
       const snapshot = this.createSnapshot();
-      console.log(`[QuickJSStrategy] 状态快照已创建`);
+      snapshot.previousHash = oldHash;
+      snapshot.triggeredBy = triggeredBy;
+      snapshot.timestamp = Date.now();
+      this.saveSnapshotForRollback(snapshot);
+      console.log(`[QuickJSStrategy] [RELOAD] 状态快照已创建`);
 
       // 2. 调用st_stop清理旧策略
       if (this.ctx && this.initialized) {
@@ -239,26 +256,163 @@ export class QuickJSStrategy {
       this.initialized = false;
       await this.initializeSandbox();
 
-      // 5. 恢复状态快照
+      // 5. 计算新版本hash
+      const newHash = this.calculateFileHash();
+      console.log(`[QuickJSStrategy] [RELOAD] 新hash: ${newHash}`);
+
+      // 6. 恢复状态快照
       await this.restoreSnapshot(snapshot);
 
-      // 6. 标记热重载模式（通过全局标志）
+      // 7. 标记热重载模式（通过全局标志）
       if (this.ctx) {
         const hotReloadFlag = this.ctx.newNumber(1);
         this.ctx.setProp(this.ctx.global, '_hotReload', hotReloadFlag);
         hotReloadFlag.dispose();
       }
 
-      // 7. 调用st_init（策略可检查_hotReload标志）
+      // 8. 调用st_init（策略可检查_hotReload标志）
       if (this.strategyCtx) {
         await this.callStrategyFunction('st_init', this.strategyCtx);
       }
 
-      console.log(`[QuickJSStrategy] 热重载完成 ✅`);
+      const duration = Date.now() - startTime;
+      
+      console.log(`[QuickJSStrategy] [RELOAD] 热重载完成 ✅ (${duration}ms)`);
+      console.log(`[QuickJSStrategy] [RELOAD] hash变化: ${oldHash} → ${newHash}`);
+      console.log(`[QuickJSStrategy] [RELOAD] =========================================`);
+
+      return { success: true, oldHash, newHash, duration };
     } catch (error: any) {
-      console.error(`[QuickJSStrategy] 热重载失败:`, error.message);
+      const duration = Date.now() - startTime;
+      console.error(`[QuickJSStrategy] [RELOAD] 热重载失败 ❌ (${duration}ms)`);
+      console.error(`[QuickJSStrategy] [RELOAD] 错误:`, error.message);
+      console.error(`[QuickJSStrategy] [RELOAD] =========================================`);
       throw error;
     }
+  }
+
+  /**
+   * 计算策略文件hash
+   */
+  private calculateFileHash(): string {
+    try {
+      const content = readFileSync(this.config.strategyFile, 'utf-8');
+      // 简单hash：取内容的前8位md5-like值
+      let hash = 0;
+      for (let i = 0; i < content.length; i++) {
+        const char = content.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32bit integer
+      }
+      return Math.abs(hash).toString(16).substring(0, 8);
+    } catch (error) {
+      return 'unknown';
+    }
+  }
+
+  /**
+   * 保存快照用于回滚
+   */
+  private saveSnapshotForRollback(snapshot: any): void {
+    const snapshotDir = join(homedir(), '.quant-lab', 'snapshots');
+    if (!existsSync(snapshotDir)) {
+      mkdirSync(snapshotDir, { recursive: true });
+    }
+    
+    const filename = `${this.config.strategyId}-${snapshot.timestamp}.json`;
+    const filepath = join(snapshotDir, filename);
+    
+    writeFileSync(filepath, JSON.stringify(snapshot, null, 2));
+    console.log(`[QuickJSStrategy] 快照已保存: ${filepath}`);
+  }
+
+  /**
+   * 回滚到上一版本
+   */
+  async rollback(): Promise<{ success: boolean; restoredHash?: string; error?: string; rto: number }> {
+    const startTime = Date.now();
+    console.log(`[QuickJSStrategy] [ROLLBACK] =========================================`);
+    console.log(`[QuickJSStrategy] [ROLLBACK] 开始回滚`);
+    console.log(`[QuickJSStrategy] [ROLLBACK] 策略ID: ${this.config.strategyId}`);
+    
+    try {
+      // 获取上一版快照
+      const snapshot = this.getPreviousSnapshot();
+      if (!snapshot) {
+        throw new Error('没有找到上一版快照');
+      }
+      
+      console.log(`[QuickJSStrategy] [ROLLBACK] 目标hash: ${snapshot.previousHash || 'unknown'}`);
+      
+      // 1. 调用st_stop清理当前策略
+      if (this.ctx && this.initialized) {
+        await this.callStrategyFunction('st_stop').catch((err) => {
+          console.warn(`[QuickJSStrategy] st_stop失败:`, err.message);
+        });
+      }
+
+      // 2. 释放旧QuickJS VM
+      if (this.ctx) {
+        this.ctx.dispose();
+        this.ctx = undefined;
+      }
+
+      // 3. 恢复上一版策略文件（从快照中的源代码）
+      if (snapshot.sourceCode) {
+        writeFileSync(this.config.strategyFile, snapshot.sourceCode);
+        console.log(`[QuickJSStrategy] [ROLLBACK] 策略文件已恢复`);
+      }
+
+      // 4. 重新初始化
+      this.initialized = false;
+      await this.initializeSandbox();
+
+      // 5. 恢复状态
+      await this.restoreSnapshot(snapshot);
+
+      // 6. 调用st_init
+      if (this.strategyCtx) {
+        await this.callStrategyFunction('st_init', this.strategyCtx);
+      }
+
+      const duration = Date.now() - startTime;
+      const rto = duration; // RTO = 实际恢复时间
+      
+      console.log(`[QuickJSStrategy] [ROLLBACK] 回滚完成 ✅ (${duration}ms)`);
+      console.log(`[QuickJSStrategy] [ROLLBACK] RTO: ${rto}ms`);
+      console.log(`[QuickJSStrategy] [ROLLBACK] =========================================`);
+
+      return { success: true, restoredHash: snapshot.previousHash, rto };
+    } catch (error: any) {
+      const duration = Date.now() - startTime;
+      console.error(`[QuickJSStrategy] [ROLLBACK] 回滚失败 ❌ (${duration}ms)`);
+      console.error(`[QuickJSStrategy] [ROLLBACK] 错误:`, error.message);
+      console.error(`[QuickJSStrategy] [ROLLBACK] =========================================`);
+      return { success: false, error: error.message, rto: duration };
+    }
+  }
+
+  /**
+   * 获取上一版快照
+   */
+  private getPreviousSnapshot(): any | null {
+    const snapshotDir = join(homedir(), '.quant-lab', 'snapshots');
+    if (!existsSync(snapshotDir)) {
+      return null;
+    }
+    
+    const files = require('fs').readdirSync(snapshotDir)
+      .filter((f: string) => f.startsWith(`${this.config.strategyId}-`) && f.endsWith('.json'))
+      .sort()
+      .reverse();
+    
+    if (files.length < 2) {
+      return null;
+    }
+    
+    // 返回倒数第二个（上一版）
+    const path = join(snapshotDir, files[1]);
+    return JSON.parse(readFileSync(path, 'utf-8'));
   }
 
   private startHotReload(): void {
@@ -1140,9 +1294,17 @@ export class QuickJSStrategy {
   }
 
   /**
-   * 创建策略状态快照（用于热更新）
+   * 创建策略状态快照（用于热更新和回滚）
    */
-  createSnapshot(): StrategySnapshot {
+  createSnapshot(): StrategySnapshot & { sourceCode?: string; previousHash?: string; triggeredBy?: string } {
+    // 保存当前策略文件源代码（用于回滚）
+    let sourceCode: string | undefined;
+    try {
+      sourceCode = readFileSync(this.config.strategyFile, 'utf-8');
+    } catch (error) {
+      console.warn(`[QuickJSStrategy] 无法读取策略文件源代码:`, error);
+    }
+
     return {
       timestamp: Date.now(),
       strategyId: this.config.strategyId,
@@ -1153,6 +1315,7 @@ export class QuickJSStrategy {
       tickCount: this.tickCount,
       lastPrice: this.lastPrice,
       lastBar: this.lastBar,
+      sourceCode,  // 保存源代码用于回滚
     };
   }
 
