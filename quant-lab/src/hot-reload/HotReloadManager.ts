@@ -19,10 +19,14 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 import { AlertManager } from './AlertManager';
 import { StrategyReloader } from './StrategyReloader';
 import { ModuleReloader } from './ModuleReloader';
+
+// 兼容获取home目录
+function getHomeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || '/tmp';
+}
 
 // ================================
 // 类型定义
@@ -95,7 +99,7 @@ export class HotReloadManager {
   private moduleReloader: ModuleReloader;
 
   constructor() {
-    const baseDir = join(homedir(), '.quant-lab');
+    const baseDir = join(getHomeDir(), '.quant-lab');
     this.lockDir = join(baseDir, 'locks');
     this.snapshotDir = join(baseDir, 'snapshots');
     this.auditDir = join(baseDir, 'audit');
@@ -262,7 +266,7 @@ export class HotReloadManager {
     const checks: GateCheck[] = [];
 
     // A项修复：真实检查，基于状态文件
-    const stateFile = join(homedir(), '.quant-lab/state', `${strategyId}.json`);
+    const stateFile = join(getHomeDir(), '.quant-lab/state', `${strategyId}.json`);
     let state: any = null;
 
     try {
@@ -475,7 +479,7 @@ export class HotReloadManager {
    */
   async snapshot(strategyId: string): Promise<StateSnapshot> {
     // B项修复：从状态文件读取真实状态
-    const stateFile = join(homedir(), '.quant-lab/state', `${strategyId}.json`);
+    const stateFile = join(getHomeDir(), '.quant-lab/state', `${strategyId}.json`);
     let state: Record<string, any> = {};
     
     try {
@@ -534,7 +538,7 @@ export class HotReloadManager {
     console.log(`[HotReload] 回滚到快照: ${new Date(snapshot.timestamp).toISOString()}`);
 
     // B项修复：恢复状态文件
-    const stateFile = join(homedir(), '.quant-lab/state', `${strategyId}.json`);
+    const stateFile = join(getHomeDir(), '.quant-lab/state', `${strategyId}.json`);
     
     try {
       if (snapshot.state && Object.keys(snapshot.state).length > 0) {

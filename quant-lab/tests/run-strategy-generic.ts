@@ -224,17 +224,44 @@ async function main() {
   await strategy.onInit(context);
   console.log('[QuickJS] 策略初始化完成\n');
 
-  // Day2: 启动热更新HTTP API服务
-  const apiPort = parseInt(process.env.RELOAD_API_PORT || '9090');
-  try {
-    hotReloadAPI.registerStrategy(`gales-${symbol}-${direction}`, strategy);
-    await hotReloadAPI.start(apiPort);
-    console.log(`[HotReloadAPI] 热更新服务已启动: http://127.0.0.1:${apiPort}`);
-    console.log(`[HotReloadAPI] 可用命令:`);
-    console.log(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/reload -H "Content-Type: application/json" -d '{"strategyId":"gales-${symbol}-${direction}","target":"strategy"}'`);
-    console.log(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/rollback -H "Content-Type: application/json" -d '{"strategyId":"gales-${symbol}-${direction}"}'`);
-  } catch (error: any) {
-    console.warn(`[HotReloadAPI] 启动失败: ${error.message}`);
+  // P1修复: 热更新HTTP API端口分配策略
+  // - RELOAD_API_PORT=0: 禁用HTTP server（live默认）
+  // - RELOAD_API_PORT未设置: live模式禁用，paper模式启用动态端口
+  // - RELOAD_API_PORT显式指定: 使用指定端口
+  const strategyId = `gales-${symbol}-${direction}`;
+  let apiPort: number;
+  
+  if (process.env.RELOAD_API_PORT === '0') {
+    // 显式禁用
+    apiPort = 0;
+    console.log('[HotReloadAPI] HTTP服务已禁用 (RELOAD_API_PORT=0)');
+  } else if (process.env.RELOAD_API_PORT) {
+    // 显式指定端口
+    apiPort = parseInt(process.env.RELOAD_API_PORT);
+  } else if (liveMode && !isDryRun) {
+    // Live模式默认禁用（避免端口冲突）
+    apiPort = 0;
+    console.log('[HotReloadAPI] Live模式默认禁用HTTP服务（避免端口冲突）');
+    console.log('[HotReloadAPI] 如需启用，请设置 RELOAD_API_PORT=<port>');
+  } else {
+    // Paper模式: 使用策略派生端口（避免冲突）
+    // 端口范围: 10000-65535，基于strategyId哈希
+    const hash = strategyId.split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0);
+    apiPort = 10000 + (Math.abs(hash) % 55535);
+  }
+  
+  if (apiPort > 0) {
+    try {
+      hotReloadAPI.registerStrategy(strategyId, strategy);
+      await hotReloadAPI.start(apiPort);
+      console.log(`[HotReloadAPI] 热更新服务已启动: http://127.0.0.1:${apiPort}`);
+      console.log(`[HotReloadAPI] 策略ID: ${strategyId}`);
+      console.log(`[HotReloadAPI] 可用命令:`);
+      console.log(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/reload -H "Content-Type: application/json" -d '{"strategyId":"${strategyId}","target":"strategy"}'`);
+      console.log(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/rollback -H "Content-Type: application/json" -d '{"strategyId":"${strategyId}"}'`);
+    } catch (error: any) {
+      console.warn(`[HotReloadAPI] 启动失败: ${error.message}`);
+    }
   }
   console.log('');
 

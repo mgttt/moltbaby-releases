@@ -9,6 +9,11 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, watchFile, unwatchF
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { getQuickJS, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
+
+// 兼容获取home目录
+function getHomeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || '/tmp';
+}
 import type { QuickJSContext as QuickJSContextType } from 'quickjs-emscripten';
 import type { Kline } from '../../../quant-lib/src';
 import type { StrategyContext, Order, Position, Account } from '../engine/types';
@@ -314,7 +319,7 @@ export class QuickJSStrategy {
    * 保存快照用于回滚
    */
   private saveSnapshotForRollback(snapshot: any): void {
-    const snapshotDir = join(homedir(), '.quant-lab', 'snapshots');
+    const snapshotDir = join(getHomeDir(), '.quant-lab', 'snapshots');
     if (!existsSync(snapshotDir)) {
       mkdirSync(snapshotDir, { recursive: true });
     }
@@ -396,7 +401,7 @@ export class QuickJSStrategy {
    * 获取上一版快照
    */
   private getPreviousSnapshot(): any | null {
-    const snapshotDir = join(homedir(), '.quant-lab', 'snapshots');
+    const snapshotDir = join(getHomeDir(), '.quant-lab', 'snapshots');
     if (!existsSync(snapshotDir)) {
       return null;
     }

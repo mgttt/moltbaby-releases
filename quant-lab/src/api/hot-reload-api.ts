@@ -17,8 +17,12 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
-import { HotReloadManager } from '../src/hot-reload/HotReloadManager';
+import { HotReloadManager } from '../hot-reload/HotReloadManager';
+
+// 兼容获取home目录
+function getHomeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || '/tmp';
+}
 
 // ================================
 // 类型定义
@@ -59,7 +63,7 @@ interface AuditLog {
 // ================================
 
 function writeAuditLog(log: AuditLog) {
-  const auditDir = join(homedir(), '.quant-lab', 'audit');
+  const auditDir = join(getHomeDir(), '.quant-lab', 'audit');
   const logFile = join(auditDir, 'reload-api.log');
   
   try {
@@ -350,7 +354,7 @@ class HotReloadAPI {
    */
   private handleListSnapshots(request: { strategyId: string }): any {
     const { strategyId } = request;
-    const snapshotDir = join(homedir(), '.quant-lab', 'snapshots');
+    const snapshotDir = join(getHomeDir(), '.quant-lab', 'snapshots');
     
     const snapshots: any[] = [];
     
@@ -409,7 +413,7 @@ class HotReloadAPI {
    * 加载快照
    */
   private loadSnapshot(snapshotId: string): any {
-    const snapshotDir = join(homedir(), '.quant-lab', 'snapshots');
+    const snapshotDir = join(getHomeDir(), '.quant-lab', 'snapshots');
     const path = join(snapshotDir, `${snapshotId}.json`);
     
     if (!existsSync(path)) {
@@ -423,7 +427,7 @@ class HotReloadAPI {
    * 获取上一版本快照
    */
   private getPreviousSnapshot(strategyId: string): any {
-    const snapshotDir = join(homedir(), '.quant-lab', 'snapshots');
+    const snapshotDir = join(getHomeDir(), '.quant-lab', 'snapshots');
     
     if (!existsSync(snapshotDir)) {
       return null;
