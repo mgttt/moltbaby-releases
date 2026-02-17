@@ -205,7 +205,7 @@ async function main() {
     params,
     maxRetries: 3,
     retryDelayMs: 5000,
-    hotReload: !liveMode,  // P2修复：live模式禁用热重载（鲶鱼建议）
+    hotReload: true,  // Day1: 启用实盘热更新
   });
 
   // 4. 创建 BybitStrategyContext 并初始化策略
@@ -322,7 +322,7 @@ async function main() {
 
   process.on('SIGTERM', async () => {
     const runtime = Math.floor((Date.now() - startTime) / 1000);
-    console.log(`\n[QuickJS] [SIGTERM] 收到 SIGTERM 信号，停止策略... tickCount=${tickCount}, runtime=${runtime}s`);
+    console.log(`\nQuickJS] [SIGTERM] 收到 SIGTERM 信号，停止策略... tickCount=${tickCount}, runtime=${runtime}s`);
     clearInterval(heartbeatInterval);
 
     try {
@@ -333,6 +333,22 @@ async function main() {
     }
 
     process.exit(0);
+  });
+
+  // Day2: 热更新signal处理
+  process.on('SIGUSR1', async () => {
+    console.log(`\n[QuickJS] [SIGUSR1] 收到热更新信号，触发热重载...`);
+    try {
+      // 热更新策略层
+      await (strategy as any).reload();
+      // 热更新Provider层
+      if (provider && typeof provider.reload === 'function') {
+        await provider.reload();
+      }
+      console.log('[QuickJS] 热更新完成 ✅');
+    } catch (e) {
+      console.error('[QuickJS] 热更新失败:', e);
+    }
   });
 }
 

@@ -341,7 +341,15 @@ function checkCircuitBreaker() {
         circuitBreakerState.reason = '';
         circuitBreakerState.recoveryTickCount = 0;
         circuitBreakerState.blockedSide = '';
-        logInfo('[熔断恢复] 仓位回落，恢复交易');
+        // P1修复：恢复时重置highWaterMark为当前仓位，避免震荡循环
+        circuitBreakerState.highWaterMark = effectivePos;
+        // P1-debug: 打印详细恢复信息
+        logInfo('[熔断恢复] 仓位回落，恢复交易' +
+                ' | positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
+                ' | effectivePos=' + effectivePos.toFixed(2) +
+                ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
+                ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2) +
+                ' | highWaterMark=' + circuitBreakerState.highWaterMark.toFixed(2));
         return false;
       }
     } else {
@@ -381,7 +389,12 @@ function checkCircuitBreaker() {
       circuitBreakerState.reason = '回撤熔断';
       circuitBreakerState.tripAt = now;
       
-      logWarn('[熔断触发] 回撤熔断 drawdown=' + (drawdown * 100).toFixed(2) + '%');
+      // P1-debug: 打印详细熔断信息
+      logWarn('[熔断触发-回撤] drawdown=' + (drawdown * 100).toFixed(2) + '%' +
+              ' | highWaterMark=' + circuitBreakerState.highWaterMark.toFixed(2) +
+              ' | effectivePosition=' + effectivePosition.toFixed(2) +
+              ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
+              ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2));
       
       // 撤销所有订单
       cancelAllOrders();
@@ -403,7 +416,12 @@ function checkCircuitBreaker() {
     if (timeElapsed >= 60000 || ratioDiff >= 0.002) {
       circuitBreakerState.lastPositionWarnAt = now;
       circuitBreakerState.lastPositionWarnRatio = positionRatio;
-      logWarn('[熔断触发] 仓位熔断（告警only，不撤单）positionRatio=' + (positionRatio * 100).toFixed(2) + '%');
+      // P1-debug: 打印详细仓位熔断信息
+      logWarn('[熔断触发-仓位] positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
+              ' | effectivePosition=' + effectivePosition.toFixed(2) +
+              ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
+              ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2) +
+              ' | maxPosition=' + CONFIG.maxPosition);
     }
     
     // 不触发熔断停止，继续交易
@@ -418,7 +436,11 @@ function checkCircuitBreaker() {
       circuitBreakerState.reason = '价格偏离熔断';
       circuitBreakerState.tripAt = now;
       
-      logWarn('[熔断触发] 价格偏离熔断 drift=' + (drift * 100).toFixed(2) + '%');
+      // P1-debug: 打印详细价格偏离熔断信息
+      logWarn('[熔断触发-价格偏离] drift=' + (drift * 100).toFixed(2) + '%' +
+              ' | centerPrice=' + state.centerPrice.toFixed(4) +
+              ' | lastPrice=' + state.lastPrice.toFixed(4) +
+              ' | effectivePosition=' + effectivePosition.toFixed(2));
       
       // 不撤单（价格可能快速恢复），但停止新下单
       return true;

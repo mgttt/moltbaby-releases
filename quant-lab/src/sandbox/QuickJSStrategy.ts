@@ -12,6 +12,7 @@ import { getQuickJS, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
 import type { QuickJSContext as QuickJSContextType } from 'quickjs-emscripten';
 import type { Kline } from '../../../quant-lib/src';
 import type { StrategyContext, Order, Position, Account } from '../engine/types';
+import { OrderStateManager, globalOrderManager } from '../engine/OrderStateManager';
 
 /**
  * QuickJS 策略配置
@@ -81,6 +82,9 @@ export class QuickJSStrategy {
 
   // 错误隔离
   private errorCount = 0;
+
+  // P0: 订单状态管理器
+  private orderStateManager: OrderStateManager;
   private lastError?: Error;
   private fileLastModified = 0;
 
@@ -106,6 +110,12 @@ export class QuickJSStrategy {
     if (existsSync(this.config.strategyFile)) {
       this.fileLastModified = statSync(this.config.strategyFile).mtimeMs;
     }
+
+    // P0: 初始化订单状态管理器
+    this.orderStateManager = new OrderStateManager();
+    this.orderStateManager.onAlert((alert) => {
+      console.error(`[QuickJSStrategy] 订单异常告警:`, alert);
+    });
   }
 
   /**
@@ -447,9 +457,46 @@ export class QuickJSStrategy {
       } else {
         console.log(`[QuickJSStrategy] notifyOrderUpdate 执行成功`);
         result.value.dispose();
+        
+        // P0: 更新订单状态
+        this.updateOrderStateFromNotification(orderUpdate);
       }
     } catch (error: any) {
       console.error(`[QuickJSStrategy] notifyOrderUpdate 调用异常:`, error.message);
+    }
+  }
+
+  /**
+   * P0: 根据通知更新订单状态
+   */
+  private updateOrderStateFromNotification(orderUpdate: { 
+    orderId: string; 
+    orderLinkId?: string;
+    status?: string; 
+    cumQty?: number;
+  }): void {
+    const orderLinkId = orderUpdate.orderLinkId || orderUpdate.orderId;
+    if (!orderLinkId) return;
+    
+    const order = this.orderStateManager.getOrder(orderLinkId);
+    if (!order) return;
+    
+    // 根据状态更新
+    switch (orderUpdate.status) {
+      case 'Filled':
+        this.orderStateManager.updateState(orderLinkId, 'FILLED', {
+          filledQty: orderUpdate.cumQty || order.qty,
+        });
+        break;
+      case 'Cancelled':
+      case 'Canceled':
+        this.orderStateManager.updateState(orderLinkId, 'CANCELLED', {
+          filledQty: orderUpdate.cumQty || 0,
+        });
+        break;
+      case 'PartiallyFilled':
+        this.orderStateManager.updateFill(orderLinkId, orderUpdate.cumQty || 0);
+        break;
     }
   }
 
@@ -619,17 +666,83 @@ export class QuickJSStrategy {
       const executions = await (ctx as any).getExecutions();
       console.log(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个`);
       
-      if (executions.length > 0) {
-        for (const exec of executions.slice(0, 5)) {
+      // P1修复：过滤只处理本策略的executions（gales-前缀或orderLinkId匹配）
+      const strategyId = this.config.strategyId || '';
+      const myExecutions = executions.filter((exec: any) => {
+        // 过滤条件：orderLinkId以gales-开头
+        if (exec.orderLinkId && exec.orderLinkId.startsWith('gales-')) {
+          return true;
+        }
+        // 过滤条件：本策略的orderLinkId
+        if (exec.orderLinkId && strategyId && exec.orderLinkId.includes(strategyId.split('-').slice(0, 2).join('-'))) {
+          return true;
+        }
+        // 拒绝：orderLinkId为空或非本策略的executions
+        return false;
+      });
+      console.log(`[QuickJSStrategy] [Order Reconcile] 本策略成交: ${myExecutions.length} 个 (过滤后)`);
+      
+      if (myExecutions.length > 0) {
+        for (const exec of myExecutions.slice(0, 5)) {
           console.log(`[QuickJSStrategy] [Order Reconcile] - execId=${exec.execId}, orderLinkId=${exec.orderLinkId}, symbol=${exec.symbol}, side=${exec.side}, execQty=${exec.execQty}, execPrice=${exec.execPrice}, execTime=${exec.execTime}`);
         }
         
         // NOTE: 不在Order Reconcile时处理历史executions，避免重复计算仓位
         // st_onExecution只在实时成交时通过WebSocket回调调用
       }
+      
+      // P0: 订单状态一致性检查
+      this.checkOrderStateConsistency(openOrders);
+      
+      // P0: 启动异常单检测（首次调用）
+      if (!this.orderStateManager['checkInterval']) {
+        this.orderStateManager.startDetection(30000); // 30秒检测一次
+      }
+      
     } catch (error: any) {
       console.error(`[QuickJSStrategy] [Order Reconcile] 对账失败:`, error.message);
       // 不抛出错误，避免影响策略运行
+    }
+  }
+  
+  /**
+   * P0: 检查订单状态一致性
+   */
+  private checkOrderStateConsistency(exchangeOrders: any[]): void {
+    const strategyOrders = this.orderStateManager.getActiveOrders();
+    
+    for (const strategyOrder of strategyOrders) {
+      // 在交易所订单中查找
+      const exchangeOrder = exchangeOrders.find(
+        (e: any) => e.orderLinkId === strategyOrder.orderLinkId
+      );
+      
+      if (!exchangeOrder) {
+        // 策略有但交易所没有 - 可能已成交或已撤单
+        if (strategyOrder.state === 'SUBMITTED') {
+          // 延迟检查，避免状态同步延迟导致的误判
+          this.orderStateManager.handleInconsistency(strategyOrder.orderLinkId, 'MISSING');
+        }
+        continue;
+      }
+      
+      // 检查状态是否一致
+      const check = this.orderStateManager.checkStateConsistency(
+        strategyOrder,
+        exchangeOrder.orderStatus
+      );
+      
+      if (!check.consistent) {
+        console.warn(`[QuickJSStrategy] 订单状态不一致: ${strategyOrder.orderLinkId}`);
+        console.warn(`  策略状态: ${strategyOrder.state}`);
+        console.warn(`  交易所状态: ${exchangeOrder.orderStatus}`);
+        
+        // 延迟处理，给状态同步时间
+        this.orderStateManager.handleInconsistency(
+          strategyOrder.orderLinkId,
+          exchangeOrder.orderStatus
+        );
+      }
     }
   }
 
@@ -805,6 +918,20 @@ export class QuickJSStrategy {
       console.log(`[QuickJSStrategy] bridge_placeOrder 解析后 params:`, params);
       console.log(`[QuickJSStrategy] [P0 DEBUG] gridId=${params.gridId}, orderLinkId=${params.orderLinkId}`);
 
+      // P0: 注册订单到状态管理器
+      if (params.orderLinkId) {
+        this.orderStateManager.registerOrder({
+          orderLinkId: params.orderLinkId,
+          state: 'SUBMITTING',
+          strategyId: this.config.strategyId,
+          product: params.symbol,
+          side: params.side,
+          price: params.price,
+          qty: params.qty,
+          filledQty: 0,
+        });
+      }
+
       // 加入待处理队列（下次 tick 时执行）
       const tempId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
       
@@ -812,9 +939,21 @@ export class QuickJSStrategy {
         params,
         resolve: (result) => {
           console.log(`[QuickJSStrategy] 下单成功:`, result);
+          // P0: 更新订单状态为已提交
+          if (params.orderLinkId) {
+            this.orderStateManager.updateState(params.orderLinkId, 'SUBMITTED', {
+              orderId: result.orderId,
+            });
+          }
         },
         reject: (error) => {
           console.error(`[QuickJSStrategy] 下单失败:`, error.message);
+          // P0: 更新订单状态为提交失败
+          if (params.orderLinkId) {
+            this.orderStateManager.updateState(params.orderLinkId, 'SUBMIT_FAILED', {
+              error: error.message,
+            });
+          }
         },
       });
 

@@ -64,6 +64,12 @@ export class BybitProvider implements TradingProvider {
   private isConnecting = false;
   private shuttingDown = false;
   
+  // P2: curl错误计数和连续错误检测
+  private curlErrorCount = 0;
+  private curlError35Count = 0;
+  private lastCurlErrorTime = 0;
+  private consecutiveCurlErrors = 0;
+  
   constructor(config: BybitProviderConfig) {
     this.config = config;
     this.category = config.category || 'linear';
@@ -127,6 +133,45 @@ export class BybitProvider implements TradingProvider {
     });
     
     await this.connectWebSocket(topics);
+  }
+  
+  /**
+   * 热更新：重建连接
+   * 保留订阅的回调，重新连接WebSocket
+   */
+  async reload(): Promise<void> {
+    console.log('[BybitProvider] 热更新：重建连接...');
+    
+    // 保存当前订阅
+    const subscribedTickers = Array.from(this.tickCallbacks.keys());
+    const subscribedKlines = Array.from(this.klineCallbacks.keys());
+    
+    // 关闭旧连接
+    if (this.ws) {
+      this.ws.close();
+      this.ws = undefined;
+    }
+    
+    // 清除定时器
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
+    
+    // 重新连接
+    try {
+      if (subscribedTickers.length > 0) {
+        await this.subscribeTickers(subscribedTickers, (tick) => {
+          this.tickCallbacks.forEach(cb => cb(tick));
+        });
+      }
+      if (subscribedKlines.length > 0) {
+        // K线需要interval参数，这里简化处理
+        console.log('[BybitProvider] 热更新：K线订阅需手动重新订阅');
+      }
+      console.log('[BybitProvider] 热更新完成 ✅');
+    } catch (e) {
+      console.error('[BybitProvider] 热更新失败:', e);
+      throw e;
+    }
   }
   
   /**
@@ -745,38 +790,112 @@ export class BybitProvider implements TradingProvider {
       args.push('--data', body);
     }
 
+    // P2: 记录请求开始时间
+    const requestStartTime = Date.now();
+
     // 显式pipe stderr（鲶鱼建议1）
     const result = spawnSync('curl', args, { 
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'], // stdin, stdout, stderr
     });
 
+    // P2: 计算请求耗时
+    const requestDuration = Date.now() - requestStartTime;
+
     const out = result.stdout || '';
     const err = result.stderr || '';
 
-    // 成功但stderr非空：打结构化日志（鲶鱼建议2）
-    if (result.status === 0 && err.trim()) {
-      console.warn(
-        `[BybitProvider] Curl success with stderr: ` +
+    // P2: curl exit code 35 (SSL error) 特殊处理
+    if (result.status === 35) {
+      this.curlError35Count++;
+      this.curlErrorCount++;
+      this.consecutiveCurlErrors++;
+      this.lastCurlErrorTime = Date.now();
+      
+      // 连续发生升级为warning
+      const isConsecutiveWarning = this.consecutiveCurlErrors >= 3;
+      const logLevel = isConsecutiveWarning ? 'error' : 'warn';
+      const logPrefix = isConsecutiveWarning ? '[WARNING]' : '';
+      
+      console[logLevel](
+        `[BybitProvider] ${logPrefix} Curl SSL error (exit 35): ` +
         `method=${method} | ` +
         `url=${url} | ` +
+        `duration=${requestDuration}ms | ` +
+        `error35Count=${this.curlError35Count} | ` +
+        `consecutiveErrors=${this.consecutiveCurlErrors} | ` +
         `stderr="${err.trim().slice(0, 150)}"`,
       );
-      // TODO: 计入netErr/阈值告警（鲶鱼建议3）
+      
+      throw new Error(`Bybit API SSL error (curl exit 35, count=${this.curlError35Count}): ${err.trim()}`);
+    }
+
+    // 成功但stderr非空：打结构化日志（鲶鱼建议2）
+    // P2修复：同时检测stderr中是否包含(35) SSL error或SSL routines unexpected eof
+    const hasSSL35InStderr = err.trim().includes('(35)') || err.trim().includes('SSL routines::unexpected eof');
+    if (result.status === 0 && (err.trim() || hasSSL35InStderr)) {
+      // 如果stderr包含(35)，也计入curlError35Count
+      if (hasSSL35InStderr) {
+        this.curlError35Count++;
+        this.consecutiveCurlErrors++;
+        console.warn(
+          `[BybitProvider] [WARNING] Curl success but SSL error in stderr: ` +
+          `method=${method} | ` +
+          `url=${url} | ` +
+          `duration=${requestDuration}ms | ` +
+          `error35Count=${this.curlError35Count} | ` +
+          `consecutiveErrors=${this.consecutiveCurlErrors}`,
+        );
+      } else {
+        console.warn(
+          `[BybitProvider] Curl success with stderr: ` +
+          `method=${method} | ` +
+          `url=${url} | ` +
+          `duration=${requestDuration}ms | ` +
+          `stderr="${err.trim().slice(0, 150)}"`,
+        );
+      }
     }
 
     // curl失败（非0退出码）
     if (result.status !== 0) {
+      this.curlErrorCount++;
+      this.consecutiveCurlErrors++;
+      this.lastCurlErrorTime = Date.now();
+      
+      // 连续发生升级为warning
+      const isConsecutiveWarning = this.consecutiveCurlErrors >= 3;
+      const logLevel = isConsecutiveWarning ? 'error' : 'warn';
+      const logPrefix = isConsecutiveWarning ? '[WARNING]' : '';
+      
       const errorMsg = err.trim() || result.error?.message || 'Unknown curl error';
-      console.error(
-        `[BybitProvider] Curl failed: ` +
+      console[logLevel](
+        `[BybitProvider] ${logPrefix} Curl failed: ` +
         `method=${method} | ` +
         `url=${url} | ` +
         `status=${result.status} | ` +
+        `duration=${requestDuration}ms | ` +
+        `errorCount=${this.curlErrorCount} | ` +
+        `consecutiveErrors=${this.consecutiveCurlErrors} | ` +
         `stderr="${errorMsg.slice(0, 150)}"`,
       );
       console.error(`[BybitProvider] Command: curl ${args.join(' ')}`);
-      throw new Error(`Bybit API request failed (curl): ${errorMsg}`);
+      throw new Error(`Bybit API request failed (curl exit ${result.status}): ${errorMsg}`);
+    }
+
+    // P2: 成功请求重置连续错误计数
+    if (this.consecutiveCurlErrors > 0) {
+      this.consecutiveCurlErrors = 0;
+    }
+
+    // P2: 慢请求警告（超过5秒）
+    if (requestDuration > 5000) {
+      console.warn(
+        `[BybitProvider] Slow request warning: ` +
+        `method=${method} | ` +
+        `url=${url} | ` +
+        `duration=${requestDuration}ms`,
+      );
     }
 
     const text = (out || '').trim();
