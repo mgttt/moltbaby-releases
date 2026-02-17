@@ -1231,13 +1231,14 @@ function st_init() {
 // P2修复：检测遗留订单并告警
 function checkLegacyOrders() {
   try {
-    // 检查bridge_getOpenOrders是否存在
-    if (typeof bridge_getOpenOrders !== 'function') {
+    // P2修复：更强判断，避免刷屏
+    const fn = globalThis.bridge_getOpenOrders;
+    if (typeof fn !== 'function') {
       logDebug('[P2] bridge_getOpenOrders未定义，跳过遗留订单检测');
       return;
     }
     
-    const ordersJson = bridge_getOpenOrders(CONFIG.symbol);
+    const ordersJson = fn(CONFIG.symbol);
     if (!ordersJson || ordersJson === 'null' || ordersJson === '[]') {
       return; // 无挂单
     }
@@ -1270,15 +1271,17 @@ function checkLegacyOrders() {
       details += '当前mark价格: ' + markPrice.toFixed(4) + '\n';
       
       legacyOrders.forEach((o, idx) => {
+        // 鲶鱼建议：交易所返回string需转为Number再toFixed
+        const orderPrice = Number(o.price || 0);
+        const qty = Number(o.qty || 0);
         const parts = o.orderLinkId.split('-');
         const oldRunId = parts[1] || 'unknown';
-        const orderPrice = o.price || 0;
         const distancePct = markPrice > 0 ? ((orderPrice - markPrice) / markPrice * 100).toFixed(2) : 'N/A';
         
-        details += (idx + 1) + '. orderId=' + o.orderId + '\n';
+        details += (idx + 1) + '. orderId=' + (o.orderId || 'unknown') + '\n';
         details += '   orderLinkId=' + o.orderLinkId + '\n';
         details += '   旧runId=' + oldRunId + '\n';
-        details += '   side=' + o.side + ' price=' + orderPrice.toFixed(4) + ' qty=' + (o.qty || 0).toFixed(4) + '\n';
+        details += '   side=' + (o.side || 'Unknown') + ' price=' + orderPrice.toFixed(4) + ' qty=' + qty.toFixed(4) + '\n';
         details += '   status=' + (o.status || 'Unknown') + '\n';
         details += '   距离mark: ' + distancePct + '% (mark=' + markPrice.toFixed(4) + ')\n';
       });
