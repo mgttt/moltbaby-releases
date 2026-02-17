@@ -1228,19 +1228,29 @@ function st_init() {
   checkLegacyOrders();
 }
 
-// P2修复：检测遗留订单并告警
+// ================================
+// 遗留订单检测 v3 (dedup+语义分流)
+// ================================
+// A) dedup: key=symbol+orderLinkId，窗口30min可配，跨runId持久化
+// B) 语义分流: reduceOnly/止盈/长期挂单 → 低频监控(不发TG除非超阈值)
+//    reduceOnly=false旧run订单 → P2告警但受dedup降频
+// C) 全部操作写日志可追溯
+
+const LEGACY_DEDUP_WINDOW_MS = 30 * 60 * 1000; // 30分钟 dedup窗口（可配）
+const LEGACY_MONITOR_AGE_THRESHOLD_H = 24;      // 长期挂单age阈值(小时)，超过才升级告警
+const LEGACY_MONITOR_COUNT_THRESHOLD = 5;        // 长期挂单数量阈值，超过才告警0号
+
 function checkLegacyOrders() {
   try {
-    // P2修复：更强判断，避免刷屏
     const fn = globalThis.bridge_getOpenOrders;
     if (typeof fn !== 'function') {
-      logDebug('[P2] bridge_getOpenOrders未定义，跳过遗留订单检测');
+      logDebug('[Legacy] bridge_getOpenOrders未定义，跳过');
       return;
     }
     
     const ordersJson = fn(CONFIG.symbol);
     if (!ordersJson || ordersJson === 'null' || ordersJson === '[]') {
-      return; // 无挂单
+      return;
     }
     
     const orders = JSON.parse(ordersJson);
@@ -1249,81 +1259,149 @@ function checkLegacyOrders() {
     }
     
     // 筛选遗留订单（orderLinkId以gales-开头但runId不匹配）
-    const legacyOrders = orders.filter(o => {
+    const legacyOrders = orders.filter(function(o) {
       if (o.orderLinkId && o.orderLinkId.startsWith('gales-')) {
-        const parts = o.orderLinkId.split('-');
+        var parts = o.orderLinkId.split('-');
         if (parts.length >= 2) {
-          const orderRunId = parts[1];
-          return orderRunId !== String(state.runId);
+          return parts[1] !== String(state.runId);
         }
       }
       return false;
     });
     
-    if (legacyOrders.length > 0) {
-      // P1修复：去重 - 如果上次已告警过相同的订单列表则不再告警
-      const currentLegacyIds = legacyOrders.map(o => o.orderLinkId).sort().join(',');
-      const lastLegacyIds = state.lastLegacyOrderIds || '';
-      
-      // 记录本次告警的订单ID
-      state.lastLegacyOrderIds = currentLegacyIds;
-      
-      // 如果与上次相同则跳过告警
-      if (currentLegacyIds === lastLegacyIds && lastLegacyIds !== '') {
-        logDebug('[P2] 遗留订单与上次相同，跳过重复告警');
-      } else {
-        // 构建详细告警信息
-        let details = '[P2告警] 发现' + legacyOrders.length + '个遗留订单来自旧run\n';
-        details += '当前runId: ' + state.runId + '\n';
-        details += '遗留订单详情:\n';
-        
-        // P3修复：补充mark价格和距离百分比（9号建议）
-        const markPrice = state.lastPrice || 0;
-        details += '当前mark价格: ' + markPrice.toFixed(4) + '\n';
-        
-        legacyOrders.forEach((o, idx) => {
-          // 鲶鱼建议：交易所返回string需转为Number再toFixed
-          const orderPrice = Number(o.price || 0);
-          const qty = Number(o.qty || 0);
-          const parts = o.orderLinkId.split('-');
-          const oldRunId = parts[1] || 'unknown';
-          const distancePct = markPrice > 0 ? ((orderPrice - markPrice) / markPrice * 100).toFixed(2) : 'N/A';
-          
-          details += (idx + 1) + '. orderId=' + (o.orderId || 'unknown') + '\n';
-          details += '   orderLinkId=' + o.orderLinkId + '\n';
-          details += '   旧runId=' + oldRunId + '\n';
-          details += '   side=' + (o.side || 'Unknown') + ' price=' + orderPrice.toFixed(4) + ' qty=' + qty.toFixed(4) + '\n';
-          details += '   status=' + (o.status || 'Unknown') + '\n';
-          details += '   距离mark: ' + distancePct + '% (mark=' + markPrice.toFixed(4) + ')\n';
-        });
-        
-        details += '建议操作: 请手动检查上述订单是否仍需保留，如不需要请手动撤单';
-        
-        logWarn(details);
-        
-        // TG通知bot-009（仅首次告警）
-        try {
-          if (typeof bridge_tgSend === 'function') {
-            const summary = '[告警] 遗留订单: ' + legacyOrders.length + '个来自旧run，请检查是否手动处理';
-            bridge_tgSend('9号', summary);
-          }
-        } catch (e) {
-          logWarn('[P2] tg通知失败: ' + e);
-        }
+    if (legacyOrders.length === 0) {
+      logInfo('[Legacy] 未检测到遗留订单');
+      return;
+    }
+    
+    // --- dedup: 加载持久化记录（跨runId） ---
+    var now = Date.now();
+    var dedupRecord = {};
+    try {
+      var saved = bridge_stateGet('legacyDedupRecord', 'null');
+      if (saved && saved !== 'null') {
+        dedupRecord = JSON.parse(saved);
+      }
+    } catch (e) {}
+    
+    // 清理过期记录
+    for (var dk in dedupRecord) {
+      if (now - dedupRecord[dk] > LEGACY_DEDUP_WINDOW_MS) {
+        delete dedupRecord[dk];
+      }
+    }
+    
+    // --- 语义分流 ---
+    var p2Alerts = [];     // reduceOnly=false旧run订单 → P2
+    var monitorOnly = [];  // reduceOnly/止盈/长期挂单 → 低频监控
+    
+    legacyOrders.forEach(function(o) {
+      var isReduceOnly = o.reduceOnly === true || o.reduceOnly === 'true';
+      // 止盈单判断：side与策略方向相反 或 reduceOnly
+      var isTakeProfit = isReduceOnly;
+      if (!isTakeProfit && CONFIG.direction === 'short' && o.side === 'Buy') {
+        isTakeProfit = true;
+      }
+      if (!isTakeProfit && CONFIG.direction === 'long' && o.side === 'Sell') {
+        isTakeProfit = true;
       }
       
-      state.legacyOrdersAtStartup = legacyOrders.length;
-    } else {
-      logInfo('[P2] 未检测到遗留订单');
+      if (isReduceOnly || isTakeProfit) {
+        monitorOnly.push(o);
+      } else {
+        p2Alerts.push(o);
+      }
+    });
+    
+    // --- 处理P2告警（受dedup降频） ---
+    var newP2 = [];
+    p2Alerts.forEach(function(o) {
+      var dedupKey = CONFIG.symbol + ':' + o.orderLinkId;
+      if (!dedupRecord[dedupKey]) {
+        newP2.push(o);
+        dedupRecord[dedupKey] = now;
+        logInfo('[Legacy][P2] 首次告警: ' + o.orderLinkId + ' dedup_key=' + dedupKey);
+      } else {
+        logDebug('[Legacy][P2] dedup命中/skip send: ' + o.orderLinkId + ' (cached=' + Math.round((now - dedupRecord[dedupKey]) / 1000) + 's ago)');
+      }
+    });
+    
+    // P2 TG告警（仅新的，受dedup）
+    if (newP2.length > 0 && typeof bridge_tgSend === 'function') {
+      var markPrice = state.lastPrice || 0;
+      var oldRunIds = [];
+      newP2.forEach(function(o) {
+        var parts = o.orderLinkId.split('-');
+        var rid = parts[1] || 'unknown';
+        if (oldRunIds.indexOf(rid) === -1) oldRunIds.push(rid);
+      });
+      
+      var summary = '[P2告警] 遗留订单' + newP2.length + '个（旧runId=' + oldRunIds.join(',') + '）runId=' + state.runId;
+      newP2.forEach(function(o, idx) {
+        var orderPrice = Number(o.price || 0);
+        var qty = Number(o.qty || 0);
+        var distPct = markPrice > 0 ? ((orderPrice - markPrice) / markPrice * 100).toFixed(2) : 'N/A';
+        summary += '\n' + (idx + 1) + '. ' + o.orderLinkId + ' ' + (o.side || '?') + ' ' + orderPrice.toFixed(4) + '×' + qty.toFixed(4) + ' dist=' + distPct + '%';
+      });
+      summary += '\n建议: 检查是否需保留，不需要请撤单';
+      
+      try {
+        bridge_tgSend('9号', summary);
+        logInfo('[Legacy][P2] bridge_tgSend→9号: ' + newP2.length + '个新告警');
+      } catch (e) {
+        logWarn('[Legacy][P2] tg通知失败: ' + e);
+      }
+    } else if (p2Alerts.length > 0 && newP2.length === 0) {
+      logDebug('[Legacy][P2] 全部' + p2Alerts.length + '个P2订单dedup命中，skip send');
     }
-  } catch (e) {
-    // 添加详细调试信息
-    let debugInfo = '[P2] 检测遗留订单失败: ' + e;
+    
+    // --- 长期挂单监控（低频，默认不打扰） ---
+    if (monitorOnly.length > 0) {
+      // 记录日志（始终）
+      monitorOnly.forEach(function(o) {
+        var orderPrice = Number(o.price || 0);
+        var isRO = o.reduceOnly === true || o.reduceOnly === 'true';
+        logDebug('[Legacy][Monitor] ' + o.orderLinkId + ' reduceOnly=' + isRO + ' side=' + (o.side || '?') + ' price=' + orderPrice.toFixed(4) + ' (旧run止盈/减仓单)');
+      });
+      
+      // 仅当数量超阈值 或 有超长存活订单时才升级告警
+      var needEscalate = monitorOnly.length >= LEGACY_MONITOR_COUNT_THRESHOLD;
+      // 注：age判断需要订单创建时间，如交易所不返回createdTime则跳过age检查
+      
+      if (needEscalate) {
+        var monitorDedupKey = CONFIG.symbol + ':monitor-batch:' + monitorOnly.length;
+        if (!dedupRecord[monitorDedupKey]) {
+          dedupRecord[monitorDedupKey] = now;
+          var msg = '[监控] ' + monitorOnly.length + '个旧run止盈/减仓单仍在挂（超阈值' + LEGACY_MONITOR_COUNT_THRESHOLD + '）';
+          monitorOnly.forEach(function(o, idx) {
+            msg += '\n' + (idx + 1) + '. ' + o.orderLinkId + ' ' + (o.side || '?') + ' ' + Number(o.price || 0).toFixed(4);
+          });
+          logWarn(msg);
+          if (typeof bridge_tgSend === 'function') {
+            try {
+              bridge_tgSend('9号', msg);
+              logInfo('[Legacy][Monitor] 升级告警→9号（数量超阈值）');
+            } catch (e) {}
+          }
+        } else {
+          logDebug('[Legacy][Monitor] 升级告警dedup命中/skip send（' + monitorOnly.length + '个）');
+        }
+      } else {
+        logDebug('[Legacy][Monitor] ' + monitorOnly.length + '个止盈/减仓单（<阈值' + LEGACY_MONITOR_COUNT_THRESHOLD + '），仅记录不告警');
+      }
+    }
+    
+    // --- 保存dedup记录 ---
     try {
-      debugInfo += ' | typeof e: ' + typeof e;
-      debugInfo += ' | e.message: ' + (e.message || 'N/A');
-      debugInfo += ' | String(e): ' + String(e).slice(0, 100);
-    } catch (debugErr) {}
+      bridge_stateSet('legacyDedupRecord', JSON.stringify(dedupRecord));
+    } catch (e) {}
+    
+    state.legacyOrdersAtStartup = legacyOrders.length;
+    logInfo('[Legacy] 总计: ' + legacyOrders.length + '个遗留(P2=' + p2Alerts.length + ' monitor=' + monitorOnly.length + ') 新P2告警=' + newP2.length);
+    
+  } catch (e) {
+    var debugInfo = '[Legacy] 检测失败: ' + e;
+    try { debugInfo += ' | ' + String(e).slice(0, 100); } catch (de) {}
     logWarn(debugInfo);
   }
 }
