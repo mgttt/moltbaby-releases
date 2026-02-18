@@ -1,5 +1,5 @@
 // ============================================================
-// QuickJS -> ndtsdb 绑定层 (MVP)
+// lib-ndtsdb-qjs: QuickJS -> ndtsdb 绑定层 (MVP)
 // ============================================================
 
 #include <stdio.h>
@@ -8,9 +8,8 @@
 #include "ndtsdb.h"
 #include "quickjs.h"
 
-/**
- * ndtsdb.open(path) -> db handle
- */
+static JSClassID js_ndtsdb_class_id = 0;
+
 static JSValue js_ndtsdb_open(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
     const char *path = JS_ToCString(ctx, argv[0]);
@@ -24,44 +23,41 @@ static JSValue js_ndtsdb_open(JSContext *ctx, JSValueConst this_val,
     return JS_NewUint32(ctx, (uint32_t)(uintptr_t)db);
 }
 
-/**
- * ndtsdb.close(db)
- */
 static JSValue js_ndtsdb_close(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
-    uint32_t db_handle = JS_ValueToUint32(ctx, argv[0]);
+    uint32_t db_handle;
+    JS_ToUint32(ctx, &db_handle, argv[0]);
     NDTSDB *db = (NDTSDB *)(uintptr_t)db_handle;
     ndtsdb_close(db);
     return JS_UNDEFINED;
 }
 
-/**
- * ndtsdb.insert(db, symbol, interval, row)
- * row: {timestamp, open, high, low, close, volume}
- */
 static JSValue js_ndtsdb_insert(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
-    uint32_t db_handle = JS_ValueToUint32(ctx, argv[0]);
+    uint32_t db_handle;
+    JS_ToUint32(ctx, &db_handle, argv[0]);
     NDTSDB *db = (NDTSDB *)(uintptr_t)db_handle;
     
     const char *symbol = JS_ToCString(ctx, argv[1]);
     const char *interval = JS_ToCString(ctx, argv[2]);
     
-    // 解析 row 对象
-    JSValue timestamp_val = JS_GetPropertyStr(ctx, argv[3], "timestamp");
-    JSValue open_val = JS_GetPropertyStr(ctx, argv[3], "open");
-    JSValue high_val = JS_GetPropertyStr(ctx, argv[3], "high");
-    JSValue low_val = JS_GetPropertyStr(ctx, argv[3], "low");
-    JSValue close_val = JS_GetPropertyStr(ctx, argv[3], "close");
-    JSValue volume_val = JS_GetPropertyStr(ctx, argv[3], "volume");
+    JSValue obj = argv[3];
+    
+    double timestamp, open_val, high, low, close_val, volume;
+    JS_ToFloat64(ctx, &timestamp, JS_GetPropertyStr(ctx, obj, "timestamp"));
+    JS_ToFloat64(ctx, &open_val, JS_GetPropertyStr(ctx, obj, "open"));
+    JS_ToFloat64(ctx, &high, JS_GetPropertyStr(ctx, obj, "high"));
+    JS_ToFloat64(ctx, &low, JS_GetPropertyStr(ctx, obj, "low"));
+    JS_ToFloat64(ctx, &close_val, JS_GetPropertyStr(ctx, obj, "close"));
+    JS_ToFloat64(ctx, &volume, JS_GetPropertyStr(ctx, obj, "volume"));
     
     KlineRow row = {
-        .timestamp = (int64_t)JS_ValueToInt64(ctx, timestamp_val),
-        .open = JS_ValueToFloat64(ctx, open_val),
-        .high = JS_ValueToFloat64(ctx, high_val),
-        .low = JS_ValueToFloat64(ctx, low_val),
-        .close = JS_ValueToFloat64(ctx, close_val),
-        .volume = JS_ValueToFloat64(ctx, volume_val),
+        .timestamp = (int64_t)timestamp,
+        .open = open_val,
+        .high = high,
+        .low = low,
+        .close = close_val,
+        .volume = volume,
         .flags = 0
     };
     
@@ -73,28 +69,30 @@ static JSValue js_ndtsdb_insert(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt32(ctx, result);
 }
 
-/**
- * ndtsdb.query(db, symbol, interval, startTime, endTime, limit)
- */
 static JSValue js_ndtsdb_query(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
-    uint32_t db_handle = JS_ValueToUint32(ctx, argv[0]);
+    uint32_t db_handle;
+    JS_ToUint32(ctx, &db_handle, argv[0]);
     NDTSDB *db = (NDTSDB *)(uintptr_t)db_handle;
     
     const char *symbol = JS_ToCString(ctx, argv[1]);
     const char *interval = JS_ToCString(ctx, argv[2]);
     
+    double startTime, endTime, limit;
+    JS_ToFloat64(ctx, &startTime, argv[3]);
+    JS_ToFloat64(ctx, &endTime, argv[4]);
+    JS_ToFloat64(ctx, &limit, argv[5]);
+    
     Query q = {
         .symbol = symbol,
         .interval = interval,
-        .startTime = JS_ValueToInt64(ctx, argv[3]),
-        .endTime = JS_ValueToInt64(ctx, argv[4]),
-        .limit = (uint32_t)JS_ValueToInt64(ctx, argv[5])
+        .startTime = (int64_t)startTime,
+        .endTime = (int64_t)endTime,
+        .limit = (uint32_t)limit
     };
     
     QueryResult *r = ndtsdb_query(db, &q);
     
-    // 转换为 JS 数组
     JSValue arr = JS_NewArray(ctx);
     for (uint32_t i = 0; i < r->count; i++) {
         JSValue row = JS_NewObject(ctx);
@@ -114,12 +112,10 @@ static JSValue js_ndtsdb_query(JSContext *ctx, JSValueConst this_val,
     return arr;
 }
 
-/**
- * ndtsdb.getLatestTimestamp(db, symbol, interval)
- */
 static JSValue js_ndtsdb_get_latest_timestamp(JSContext *ctx, JSValueConst this_val,
                                                int argc, JSValueConst *argv) {
-    uint32_t db_handle = JS_ValueToUint32(ctx, argv[0]);
+    uint32_t db_handle;
+    JS_ToUint32(ctx, &db_handle, argv[0]);
     NDTSDB *db = (NDTSDB *)(uintptr_t)db_handle;
     const char *symbol = JS_ToCString(ctx, argv[1]);
     const char *interval = JS_ToCString(ctx, argv[2]);
@@ -132,20 +128,18 @@ static JSValue js_ndtsdb_get_latest_timestamp(JSContext *ctx, JSValueConst this_
     return JS_NewInt64(ctx, ts);
 }
 
-/**
- * 模块初始化
- */
+static const JSCFunctionListEntry js_ndtsdb_funcs[] = {
+    JS_CFUNC_DEF("open", 1, js_ndtsdb_open),
+    JS_CFUNC_DEF("close", 1, js_ndtsdb_close),
+    JS_CFUNC_DEF("insert", 3, js_ndtsdb_insert),
+    JS_CFUNC_DEF("query", 6, js_ndtsdb_query),
+    JS_CFUNC_DEF("getLatestTimestamp", 3, js_ndtsdb_get_latest_timestamp),
+};
+
 static int js_ndtsdb_init(JSContext *ctx, JSModuleDef *m) {
-    JSValue ndtsdb = JS_NewObject(ctx);
-    
-    JS_SetPropertyStr(ctx, ndtsdb, "open", JS_NewCFunction(ctx, js_ndtsdb_open, "open", 1));
-    JS_SetPropertyStr(ctx, ndtsdb, "close", JS_NewCFunction(ctx, js_ndtsdb_close, "close", 1));
-    JS_SetPropertyStr(ctx, ndtsdb, "insert", JS_NewCFunction(ctx, js_ndtsdb_insert, "insert", 3));
-    JS_SetPropertyStr(ctx, ndtsdb, "query", JS_NewCFunction(ctx, js_ndtsdb_query, "query", 6));
-    JS_SetPropertyStr(ctx, ndtsdb, "getLatestTimestamp", JS_NewCFunction(ctx, js_ndtsdb_get_latest_timestamp, "getLatestTimestamp", 3));
-    
-    JS_SetModuleExportList(ctx, m, &ndtsdb, 5);
-    return 0;
+    return JS_SetModuleExportList(ctx, m, js_ndtsdb_funcs, 5);
 }
 
-JS_MODULE_INIT(js_ndtsdb_init)
+int js_ndtsdb_module_init(JSContext *ctx, JSModuleDef *m) {
+    return js_ndtsdb_init(ctx, m);
+}

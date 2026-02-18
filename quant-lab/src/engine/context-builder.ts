@@ -22,29 +22,91 @@ import type { ExchangeAPI } from '../../../quant-lib/src';
 /**
  * 账号配置加载器
  * 从 ~/env.jsonl 加载账号配置
+ *
+ * env.jsonl 兼容两种形态：
+ * - 严格 JSONL：{"wjcgm@bbt-demo": {...}, ...}
+ * - legacy：[{"name":"wjcgm@bbt-demo", ...}]
+ * 以及字段兼容：key/secret 或 BYBIT_API_KEY/BYBIT_API_SECRET
  */
+function normalizeBybitAccountConfig(raw: any, accountName: string): AccountConfig {
+  const cfg: any = {
+    ...raw,
+    name: raw.name || accountName,
+    proxy: raw.proxy,
+    readonly: raw.readonly ?? false,
+    BYBIT_ENV: raw.BYBIT_ENV,
+    maxPositionUsd: raw.maxPositionUsd,
+  };
+
+  // 兼容旧字段
+  const apiKey = raw.BYBIT_API_KEY || raw.apiKey || raw.key;
+  const apiSecret = raw.BYBIT_API_SECRET || raw.apiSecret || raw.secret;
+
+  if (!apiKey || !apiSecret) {
+    throw new Error(`[Accounts] Account missing apiKey/apiSecret: ${accountName}`);
+  }
+
+  cfg.BYBIT_API_KEY = apiKey;
+  cfg.BYBIT_API_SECRET = apiSecret;
+
+  return cfg as AccountConfig;
+}
+
 export async function loadAccountConfig(accountName: string): Promise<AccountConfig> {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
   const envPath = `${homeDir}/env.jsonl`;
-  
+
   try {
     const fs = await import('node:fs/promises');
     const content = await fs.readFile(envPath, 'utf-8');
-    
-    // 解析 JSONL 格式（每行一个 JSON 对象）
-    const lines = content.split('\n').filter(line => line.trim());
-    
+
+    // 先尝试加载为严格 JSONL（每行一个对象）
+    const lines = content
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line);
+
+    // 快速路径：逐行 JSON 对象匹配键值
     for (const line of lines) {
       try {
-        const config = JSON.parse(line);
-        if (config.name === accountName) {
-          return config as AccountConfig;
+        const block = JSON.parse(line);
+        if (block[accountName]) {
+          return normalizeBybitAccountConfig(block[accountName], accountName);
         }
-      } catch (e) {
-        // 跳过无效行
+      } catch {
+        // 非 JSON 行略过
       }
     }
-    
+
+    // 兼容 legacy: 一些行本身是 {name:"...", ...}
+    for (const line of lines) {
+      try {
+        const block = JSON.parse(line);
+        if (typeof block === 'object' && block && block.name === accountName) {
+          return normalizeBybitAccountConfig(block, accountName);
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    // 兼容 env.jsonl 存成单个大 object（已通过历史脚本支持）
+    try {
+      const merged = JSON.parse(content);
+      if (merged && typeof merged === 'object') {
+        if (merged[accountName]) {
+          return normalizeBybitAccountConfig(merged[accountName], accountName);
+        }
+        for (const v of Object.values(merged)) {
+          if (v && typeof v === 'object' && (v as any).name === accountName) {
+            return normalizeBybitAccountConfig(v as any, accountName);
+          }
+        }
+      }
+    } catch {
+      // ignore, fallthrough
+    }
+
     throw new Error(`Account "${accountName}" not found in ${envPath}`);
   } catch (error: any) {
     if (error.code === 'ENOENT') {
