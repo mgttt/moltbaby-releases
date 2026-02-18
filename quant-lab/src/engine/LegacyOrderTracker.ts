@@ -195,35 +195,36 @@ export class LegacyOrderTracker {
       result.push(alert);
     }
     
-    // 4. 对 ACTIVE 遗留订单检查是否需要发送告警（首次发现时）
+    // 4. 对 ACTIVE 遗留订单检查是否需要发送告警
+    // P2修复：同单键永久去重（一旦告警则不再重复告警，除非显式标记为需要再次告警）
     for (const [orderLinkId, info] of Array.from(this.legacyOrders.entries())) {
       if (info.state !== 'ACTIVE') continue;
       
-      // 检查去重
-      const lastAlert = this.lastAlertTime.get(orderLinkId) || 0;
-      if (now - lastAlert < this.dedupWindowMs) continue;
+      // 检查是否已经告警过（永久去重）
+      if (this.lastAlertTime.has(orderLinkId)) {
+        // 已经告警过的订单，不再重复告警（避免同一旧单日内多次告警）
+        continue;
+      }
       
       // 分类：reduceOnly 走低频 Info 通道，其他走告警通道
       const alertType = info.isReduceOnly ? 'LONG_LIVED_INFO' : 'LEGACY_ALERT';
       
       // 首次告警
-      if (!this.lastAlertTime.has(orderLinkId)) {
-        this.lastAlertTime.set(orderLinkId, now);
-        
-        const alert: LegacyOrderAlert = {
-          type: alertType,
-          orderLinkId: orderLinkId,
-          message: info.isReduceOnly 
-            ? `[LongLived][Info] ${orderLinkId} | reduceOnly=true | firstSeenAt=${new Date(info.firstSeenAt).toISOString()}`
-            : `[LegacyOrder][Alert] ${orderLinkId} | firstSeenAt=${new Date(info.firstSeenAt).toISOString()}`,
-          timestamp: now,
-          details: {
-            firstSeenAt: info.firstSeenAt,
-            lastSeenAt: info.lastSeenAt,
-          },
-        };
-        result.push(alert);
-      }
+      this.lastAlertTime.set(orderLinkId, now);
+      
+      const alert: LegacyOrderAlert = {
+        type: alertType,
+        orderLinkId: orderLinkId,
+        message: info.isReduceOnly 
+          ? `[LongLived][Info] ${orderLinkId} | reduceOnly=true | firstSeenAt=${new Date(info.firstSeenAt).toISOString()}`
+          : `[LegacyOrder][Alert] ${orderLinkId} | firstSeenAt=${new Date(info.firstSeenAt).toISOString()}`,
+        timestamp: now,
+        details: {
+          firstSeenAt: info.firstSeenAt,
+          lastSeenAt: info.lastSeenAt,
+        },
+      };
+      result.push(alert);
     }
     
     return result;
