@@ -53,6 +53,49 @@ export class TradingViewProvider extends WebSocketDataProvider {
   private auth: TradingViewAuth | null;
   private isAnonymous: boolean;
   private sessionId: string;
+  
+  /**
+   * 从配置文件创建 Provider（支持登录模式）
+   */
+  static async fromAuthFile(authFile: string = `${process.env.HOME}/.config/quant-lib/tradingview-auth.json`, config: Omit<TradingViewProviderConfig, 'auth'> = {}): Promise<TradingViewProvider> {
+    const { existsSync } = await import('fs');
+    
+    if (!existsSync(authFile)) {
+      console.log('⚠️ 未找到 TV Cookie 文件，使用匿名模式');
+      return new TradingViewProvider(config);
+    }
+    
+    try {
+      const content = await Bun.file(authFile).text();
+      const saved = JSON.parse(content);
+      
+      // 检查过期
+      if (saved.expires_at && new Date(saved.expires_at) < new Date()) {
+        console.log('⚠️ TV Cookie 已过期，使用匿名模式');
+        return new TradingViewProvider(config);
+      }
+      
+      const auth: TradingViewAuth = {
+        sessionHash: saved.session_hash,
+      };
+      
+      // 构建 cookies
+      if (saved.sessionid) {
+        auth.cookies = {
+          sessionid: saved.sessionid,
+          ...(saved.tv_ecuid && { tv_ecuid: saved.tv_ecuid }),
+          ...(saved.etg && { etg: saved.etg }),
+          ...(saved.png && { png: saved.png }),
+        };
+      }
+      
+      console.log(`✅ 已加载 TV Cookie（${saved.expires_at ? '过期: ' + new Date(saved.expires_at).toLocaleDateString() : '无过期时间'}）`);
+      return new TradingViewProvider({ ...config, auth });
+    } catch (e) {
+      console.log('⚠️ 读取 TV Cookie 失败，使用匿名模式:', (e as Error).message);
+      return new TradingViewProvider(config);
+    }
+  }
   private chartSessions: Map<string, string> = new Map();
   private pendingRequests: Map<string, {
     resolve: (klines: Kline[]) => void;
