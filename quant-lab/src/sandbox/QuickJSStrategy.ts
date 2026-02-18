@@ -129,7 +129,7 @@ export class QuickJSStrategy {
     // 先加载状态，确保 strategyState 已填充
     this.loadState();
     const runId = this.strategyState.get('runId')?.toString() || Date.now().toString();
-    this.legacyOrderTracker = new LegacyOrderTracker(runId);
+    this.legacyOrderTracker = new LegacyOrderTracker(runId, this.config.strategyId);
     console.log(`[QuickJSStrategy] 遗留订单追踪器已初始化, runId=${runId}`);
   }
 
@@ -201,6 +201,29 @@ export class QuickJSStrategy {
 
       // 7. 调用 st_init
       await this.callStrategyFunction('st_init');
+      
+      // P1紧急修复：st_init生成新runId后，同步更新LegacyOrderTracker
+      // 从QuickJS ctx.global.state获取最新runId
+      if (this.legacyOrderTracker && this.ctx) {
+        try {
+          const stateHandle = this.ctx.getProp(this.ctx.global, 'state');
+          const runIdHandle = this.ctx.getProp(stateHandle, 'runId');
+          // runId在QuickJS中可能是number，先转number再转string
+          const newRunId = this.ctx.toString(runIdHandle);
+          // 如果是[object Object]，尝试用Number转换
+          const finalRunId = newRunId.includes('object') 
+            ? String(this.ctx.getNumber(runIdHandle)) 
+            : newRunId;
+          if (finalRunId && finalRunId !== 'undefined' && finalRunId !== 'NaN') {
+            this.legacyOrderTracker.updateRunId(finalRunId);
+            console.log(`[QuickJSStrategy] st_init后同步tracker runId: ${finalRunId}`);
+          }
+          stateHandle.dispose();
+          runIdHandle.dispose();
+        } catch (e) {
+          console.log(`[QuickJSStrategy] st_init后同步tracker runId失败: ${e}`);
+        }
+      }
 
       this.initialized = true;
       this.errorCount = 0;
@@ -288,6 +311,26 @@ export class QuickJSStrategy {
       // 8. 调用st_init（策略可检查_hotReload标志）
       if (this.strategyCtx) {
         await this.callStrategyFunction('st_init', this.strategyCtx);
+      }
+      
+      // P1紧急修复：热更新st_init后同步tracker runId
+      if (this.legacyOrderTracker && this.ctx) {
+        try {
+          const stateHandle = this.ctx.getProp(this.ctx.global, 'state');
+          const runIdHandle = this.ctx.getProp(stateHandle, 'runId');
+          const newRunId = this.ctx.toString(runIdHandle);
+          const finalRunId = newRunId.includes('object') 
+            ? String(this.ctx.getNumber(runIdHandle)) 
+            : newRunId;
+          if (finalRunId && finalRunId !== 'undefined' && finalRunId !== 'NaN') {
+            this.legacyOrderTracker.updateRunId(finalRunId);
+            console.log(`[QuickJSStrategy] [RELOAD] 热更新后同步tracker runId: ${finalRunId}`);
+          }
+          stateHandle.dispose();
+          runIdHandle.dispose();
+        } catch (e) {
+          console.log(`[QuickJSStrategy] [RELOAD] 热更新同步tracker runId失败: ${e}`);
+        }
       }
 
       const duration = Date.now() - startTime;

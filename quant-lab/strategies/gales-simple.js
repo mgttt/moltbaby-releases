@@ -1909,8 +1909,9 @@ function placeOrder(grid) {
     : (CONFIG.orderSizeUp !== null ? CONFIG.orderSizeUp : CONFIG.orderSize);
 
   const quantity = orderSize / orderPrice;
-  // P0修复：110072根治 - 使用runId+序列号生成唯一orderLinkId
-  const orderLinkId = 'gales-' + state.runId + '-' + (state.orderSeq++) + '-' + grid.side;
+  // P1修复：110072根治 - orderLinkId加入direction防止跨策略误报
+  const directionLabel = CONFIG.direction || 'neutral';
+  const orderLinkId = 'gales-' + directionLabel + '-' + state.runId + '-' + (state.orderSeq++) + '-' + grid.side;
 
   // 记录"有下单行为"（用于 autoRecenter 判断）
   state.lastPlaceTick = state.tickCount || 0;

@@ -36,6 +36,7 @@ export interface LegacyOrderAlert {
 export class LegacyOrderTracker {
   // 配置
   private currentRunId: string;
+  private strategyId: string; // P1修复：按策略隔离
   private dedupWindowMs = 2 * 60 * 60 * 1000; // 2小时
   private resolveThreshold = 3; // 连续 3 次检测不到则消警
   
@@ -46,8 +47,10 @@ export class LegacyOrderTracker {
   // 通知目标
   private tgTarget = 'bot-000';
   
-  constructor(currentRunId: string, config?: { dedupWindowMs?: number; resolveThreshold?: number; tgTarget?: string }) {
+  constructor(currentRunId: string, strategyId: string, config?: { dedupWindowMs?: number; resolveThreshold?: number; tgTarget?: string }) {
     this.currentRunId = currentRunId;
+    this.strategyId = strategyId;
+    console.log(`[LegacyOrderTracker] 初始化: strategyId=${strategyId}, runId=${currentRunId}`);
     if (config) {
       if (config.dedupWindowMs) this.dedupWindowMs = config.dedupWindowMs;
       if (config.resolveThreshold) this.resolveThreshold = config.resolveThreshold;
@@ -56,21 +59,52 @@ export class LegacyOrderTracker {
   }
   
   /**
-   * 判断是否为遗留订单（runId 前缀不同）
+   * 判断是否为遗留订单（先检查direction，再检查runId）
+   * P1修复：orderLinkId格式 gales-{direction}-{runId}-{seq}-{side}
+   * strategyId可能是 'gales-MYXUSDT-neutral' 或 'neutral'，需要兼容处理
    */
   isLegacyOrder(orderLinkId: string): boolean {
-    // orderLinkId 格式: gales-{runId}-{seq}-{side}
+    // 新格式: gales-{direction}-{runId}-{seq}-{side}
     const parts = orderLinkId.split('-');
-    if (parts.length < 2) return false;
+    if (parts.length < 3) return false; // 不符合格式则忽略
     
-    const orderRunId = parts[1];
-    return orderRunId !== this.currentRunId;
+    // 先检查direction是否匹配
+    const orderDirection = parts[1]; // neutral/short
+    
+    // 从 strategyId 提取 direction (可能是 'gales-MYXUSDT-neutral' -> 'neutral')
+    let strategyDirection = this.strategyId;
+    if (strategyDirection.includes('-')) {
+      strategyDirection = strategyDirection.split('-').pop() || strategyDirection;
+    }
+    
+    if (orderDirection !== strategyDirection) {
+      // direction不同，说明是其他策略的订单，直接忽略（不是本策略的遗留单）
+      return false;
+    }
+    
+    // P1紧急修复：direction匹配后，再检查runId是否为本策略当前runId
+    const orderRunId = parts[2];
+    const isCurrentRunId = orderRunId === this.currentRunId;
+    
+    // P1调试日志
+    console.log(`[LegacyOrderTracker] 订单检查: orderLinkId=${orderLinkId}, direction=${orderDirection}==${strategyDirection}, orderRunId=${orderRunId} vs currentRunId=${this.currentRunId}, isLegacy=${!isCurrentRunId}`);
+    
+    return !isCurrentRunId; // 只有runId不同才算遗留
   }
   
   /**
-   * 从 orderLinkId 提取 runId
+   * 从 orderLinkId 提取 runId（新格式: gales-{direction}-{runId}-{seq}-{side}）
    */
   extractRunId(orderLinkId: string): string | null {
+    const parts = orderLinkId.split('-');
+    if (parts.length < 3) return null;
+    return parts[2];
+  }
+  
+  /**
+   * 从 orderLinkId 提取 direction
+   */
+  extractDirection(orderLinkId: string): string | null {
     const parts = orderLinkId.split('-');
     if (parts.length < 2) return null;
     return parts[1];
