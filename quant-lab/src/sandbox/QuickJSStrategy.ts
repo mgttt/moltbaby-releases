@@ -203,23 +203,18 @@ export class QuickJSStrategy {
       await this.callStrategyFunction('st_init');
       
       // P1紧急修复：st_init生成新runId后，同步更新LegacyOrderTracker
-      // 从QuickJS ctx.global.state获取最新runId
-      if (this.legacyOrderTracker && this.ctx) {
+      // 使用bridge_stateGet直接获取state中的runId
+      if (this.legacyOrderTracker) {
         try {
-          const stateHandle = this.ctx.getProp(this.ctx.global, 'state');
-          const runIdHandle = this.ctx.getProp(stateHandle, 'runId');
-          // runId在QuickJS中可能是number，先转number再转string
-          const newRunId = this.ctx.toString(runIdHandle);
-          // 如果是[object Object]，尝试用Number转换
-          const finalRunId = newRunId.includes('object') 
-            ? String(this.ctx.getNumber(runIdHandle)) 
-            : newRunId;
-          if (finalRunId && finalRunId !== 'undefined' && finalRunId !== 'NaN') {
-            this.legacyOrderTracker.updateRunId(finalRunId);
-            console.log(`[QuickJSStrategy] st_init后同步tracker runId: ${finalRunId}`);
+          const stateJson = this.strategyState.get('state');
+          if (stateJson && typeof stateJson === 'object') {
+            const jsState = stateJson as any;
+            const newRunId = jsState.runId?.toString();
+            if (newRunId) {
+              this.legacyOrderTracker.updateRunId(newRunId);
+              console.log(`[QuickJSStrategy] st_init后同步tracker runId: ${newRunId}`);
+            }
           }
-          stateHandle.dispose();
-          runIdHandle.dispose();
         } catch (e) {
           console.log(`[QuickJSStrategy] st_init后同步tracker runId失败: ${e}`);
         }
@@ -314,20 +309,17 @@ export class QuickJSStrategy {
       }
       
       // P1紧急修复：热更新st_init后同步tracker runId
-      if (this.legacyOrderTracker && this.ctx) {
+      if (this.legacyOrderTracker) {
         try {
-          const stateHandle = this.ctx.getProp(this.ctx.global, 'state');
-          const runIdHandle = this.ctx.getProp(stateHandle, 'runId');
-          const newRunId = this.ctx.toString(runIdHandle);
-          const finalRunId = newRunId.includes('object') 
-            ? String(this.ctx.getNumber(runIdHandle)) 
-            : newRunId;
-          if (finalRunId && finalRunId !== 'undefined' && finalRunId !== 'NaN') {
-            this.legacyOrderTracker.updateRunId(finalRunId);
-            console.log(`[QuickJSStrategy] [RELOAD] 热更新后同步tracker runId: ${finalRunId}`);
+          const stateJson = this.strategyState.get('state');
+          if (stateJson && typeof stateJson === 'object') {
+            const jsState = stateJson as any;
+            const newRunId = jsState.runId?.toString();
+            if (newRunId) {
+              this.legacyOrderTracker.updateRunId(newRunId);
+              console.log(`[QuickJSStrategy] [RELOAD] 热更新后同步tracker runId: ${newRunId}`);
+            }
           }
-          stateHandle.dispose();
-          runIdHandle.dispose();
         } catch (e) {
           console.log(`[QuickJSStrategy] [RELOAD] 热更新同步tracker runId失败: ${e}`);
         }
