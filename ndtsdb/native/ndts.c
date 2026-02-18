@@ -893,3 +893,129 @@ void ohlcv_aggregate(
         }
     }
 }
+
+// ============================================================
+// ndtsdb 高级 API 实现 (MVP)
+// ============================================================
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "ndtsdb.h"
+
+// 简化版数据库结构
+struct NDTSDB {
+    char path[256];
+    // TODO: 后续添加文件句柄、索引等
+};
+
+// 简化版内存存储（MVP用，后续优化）
+#define MAX_SYMBOLS 100
+#define MAX_KLINES_PER_SYMBOL 10000
+
+typedef struct {
+    char symbol[32];
+    char interval[16];
+    KlineRow klines[MAX_KLINES_PER_SYMBOL];
+    uint32_t count;
+} SymbolData;
+
+static SymbolData g_symbols[MAX_SYMBOLS];
+static uint32_t g_symbol_count = 0;
+
+static SymbolData* find_or_create_symbol(const char* symbol, const char* interval) {
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        if (strcmp(g_symbols[i].symbol, symbol) == 0 && 
+            strcmp(g_symbols[i].interval, interval) == 0) {
+            return &g_symbols[i];
+        }
+    }
+    if (g_symbol_count >= MAX_SYMBOLS) return NULL;
+    
+    SymbolData* sd = &g_symbols[g_symbol_count++];
+    strncpy(sd->symbol, symbol, sizeof(sd->symbol) - 1);
+    strncpy(sd->interval, interval, sizeof(sd->interval) - 1);
+    sd->count = 0;
+    return sd;
+}
+
+NDTSDB* ndtsdb_open(const char* path) {
+    NDTSDB* db = (NDTSDB*)malloc(sizeof(NDTSDB));
+    if (!db) return NULL;
+    
+    strncpy(db->path, path, sizeof(db->path) - 1);
+    db->path[sizeof(db->path) - 1] = '\0';
+    
+    return db;
+}
+
+void ndtsdb_close(NDTSDB* db) {
+    if (db) free(db);
+}
+
+int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const KlineRow* row) {
+    (void)db;
+    SymbolData* sd = find_or_create_symbol(symbol, interval);
+    if (!sd) return -1;
+    if (sd->count >= MAX_KLINES_PER_SYMBOL) return -1;
+    
+    sd->klines[sd->count++] = *row;
+    return 0;
+}
+
+int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, const KlineRow* rows, uint32_t n) {
+    (void)db;
+    SymbolData* sd = find_or_create_symbol(symbol, interval);
+    if (!sd) return -1;
+    
+    uint32_t inserted = 0;
+    for (uint32_t i = 0; i < n && sd->count < MAX_KLINES_PER_SYMBOL; i++) {
+        sd->klines[sd->count++] = rows[i];
+        inserted++;
+    }
+    return (int)inserted;
+}
+
+QueryResult* ndtsdb_query(NDTSDB* db, const Query* q) {
+    (void)db;
+    SymbolData* sd = find_or_create_symbol(q->symbol, q->interval);
+    if (!sd || sd->count == 0) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 简单过滤：时间范围
+    uint32_t capacity = q->limit > 0 ? q->limit : sd->count;
+    KlineRow* rows = (KlineRow*)malloc(capacity * sizeof(KlineRow));
+    uint32_t count = 0;
+    
+    for (uint32_t i = 0; i < sd->count && count < capacity; i++) {
+        if (sd->klines[i].timestamp >= q->startTime && 
+            sd->klines[i].timestamp <= q->endTime) {
+            rows[count++] = sd->klines[i];
+        }
+    }
+    
+    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+    r->rows = rows;
+    r->count = count;
+    r->capacity = capacity;
+    return r;
+}
+
+void ndtsdb_free_result(QueryResult* r) {
+    if (r) {
+        if (r->rows) free(r->rows);
+        free(r);
+    }
+}
+
+int64_t ndtsdb_get_latest_timestamp(NDTSDB* db, const char* symbol, const char* interval) {
+    (void)db;
+    SymbolData* sd = find_or_create_symbol(symbol, interval);
+    if (!sd || sd->count == 0) return -1;
+    return sd->klines[sd->count - 1].timestamp;
+}
