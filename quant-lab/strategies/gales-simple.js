@@ -129,6 +129,18 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
 // 状态
 // ================================
 
+// P1修复：多策略共享账户时账本隔离 - 生成唯一stateKey
+function getStateKey() {
+  // 使用symbol + direction作为唯一标识
+  const strategyId = CONFIG.symbol + ':' + CONFIG.direction;
+  return 'state:' + strategyId;
+}
+
+function getDedupKey() {
+  const strategyId = CONFIG.symbol + ':' + CONFIG.direction;
+  return 'dedup:' + strategyId;
+}
+
 let state = {
   initialized: false,
   centerPrice: 0,
@@ -185,7 +197,7 @@ let circuitBreakerState = {
 // 加载状态
 function loadState() {
   try {
-    const saved = bridge_stateGet('state', 'null');
+    const saved = bridge_stateGet(getStateKey(), 'null');
     if (saved && saved !== 'null') {
       const obj = JSON.parse(saved);
       if (obj && typeof obj === 'object') {
@@ -221,7 +233,7 @@ function loadState() {
 
 // 保存状态
 function saveState() {
-  bridge_stateSet('state', JSON.stringify(state));
+  bridge_stateSet(getStateKey(), JSON.stringify(state));
 }
 
 // ================================
@@ -1283,7 +1295,7 @@ function checkLegacyOrders() {
     var now = Date.now();
     var dedupRecord = {};
     try {
-      var saved = bridge_stateGet('legacyDedupRecord', 'null');
+      var saved = bridge_stateGet(getDedupKey(), 'null');
       if (saved && saved !== 'null') {
         dedupRecord = JSON.parse(saved);
       }
@@ -1398,7 +1410,7 @@ function checkLegacyOrders() {
     
     // --- 保存dedup记录 ---
     try {
-      bridge_stateSet('legacyDedupRecord', JSON.stringify(dedupRecord));
+      bridge_stateSet(getDedupKey(), JSON.stringify(dedupRecord));
     } catch (e) {}
     
     state.legacyOrdersAtStartup = legacyOrders.length;

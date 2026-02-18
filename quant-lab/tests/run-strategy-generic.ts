@@ -27,7 +27,7 @@
  */
 
 import { QuickJSStrategy } from '../src/sandbox/QuickJSStrategy';
-import { BybitProvider } from '../../quant-lib/src/providers/bybit';
+import { BybitProvider } from '../src/providers/bybit.js';
 import { BybitStrategyContext } from '../src/contexts/BybitStrategyContext';
 import { existsSync } from 'fs';
 import { hotReloadAPI } from '../src/api/hot-reload-api';
