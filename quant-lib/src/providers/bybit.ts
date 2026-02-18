@@ -805,28 +805,44 @@ export class BybitProvider implements TradingProvider {
     const out = result.stdout || '';
     const err = result.stderr || '';
 
-    // P2: curl exit code 35 (SSL error) 特殊处理
+    // P1: curl exit code 35 (SSL error / unexpected EOF) 退避 + 阈值熔断
     if (result.status === 35) {
       this.curlError35Count++;
       this.curlErrorCount++;
       this.consecutiveCurlErrors++;
       this.lastCurlErrorTime = Date.now();
-      
-      // 连续发生升级为warning
-      const isConsecutiveWarning = this.consecutiveCurlErrors >= 3;
-      const logLevel = isConsecutiveWarning ? 'error' : 'warn';
-      const logPrefix = isConsecutiveWarning ? '[WARNING]' : '';
-      
-      console[logLevel](
-        `[BybitProvider] ${logPrefix} Curl SSL error (exit 35): ` +
-        `method=${method} | ` +
-        `url=${url} | ` +
-        `duration=${requestDuration}ms | ` +
-        `error35Count=${this.curlError35Count} | ` +
-        `consecutiveErrors=${this.consecutiveCurlErrors} | ` +
-        `stderr="${err.trim().slice(0, 150)}"`,
+
+      // 1) 自动 backoff（轻量，默认不真正 sleep；由上层决定是否等待）
+      // - backoffMs: 250ms * 2^(consecutive-1), capped at 5000ms
+      // - 连续错误恢复条件：一次成功请求会把 consecutiveCurlErrors 重置为0（见下方成功分支）
+      const backoffMs = Math.min(5000, 250 * Math.pow(2, Math.max(0, this.consecutiveCurlErrors - 1)));
+      console.warn(
+        `[BybitProvider] [BACKOFF] curl exit35 detected → backoff=${backoffMs}ms | ` +
+          `recoverOn=next_success | ` +
+          `method=${method} | url=${url} | duration=${requestDuration}ms | ` +
+          `error35Count=${this.curlError35Count} | consecutiveErrors=${this.consecutiveCurlErrors}`,
       );
-      
+
+      // 2) 阈值熔断：15min内exit35>=3 或 consecutiveErrors>=3 → 触发 CIRCUIT_BREAK
+      // 说明：这里没有 wall-clock 时间窗统计（需要外部注入或更重的状态）。
+      // 当前实现：以 consecutiveErrors>=3 作为可验收代理阈值，并明确打点日志。
+      // 15min窗口统计建议后续在更上层（策略进程）做限流聚合。
+      if (this.consecutiveCurlErrors >= 3) {
+        const pauseMinutes = 3;
+        console.error(
+          `[BybitProvider] [P0][CIRCUIT_BREAK] exit35 threshold hit → pauseOrders=${pauseMinutes}m | ` +
+            `reason=consecutiveExit35>=3 | ` +
+            `method=${method} | url=${url} | ` +
+            `error35Count=${this.curlError35Count} | consecutiveErrors=${this.consecutiveCurlErrors}`,
+        );
+        throw new Error(
+          `Bybit CIRCUIT_BREAK (exit35): pauseOrders=${pauseMinutes}m | ` +
+            `error35Count=${this.curlError35Count} | consecutiveErrors=${this.consecutiveCurlErrors} | ` +
+            `${err.trim()}`,
+        );
+      }
+
+      // 非熔断：仍抛错给上层（上层可选择重试/退避等待）
       throw new Error(`Bybit API SSL error (curl exit 35, count=${this.curlError35Count}): ${err.trim()}`);
     }
 
