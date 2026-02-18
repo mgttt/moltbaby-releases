@@ -18,6 +18,7 @@ import type { QuickJSContext as QuickJSContextType } from 'quickjs-emscripten';
 import type { Kline } from '../../../quant-lib/src';
 import type { StrategyContext, Order, Position, Account } from '../engine/types';
 import { OrderStateManager, globalOrderManager } from '../engine/OrderStateManager';
+import { LegacyOrderTracker } from '../engine/LegacyOrderTracker';
 
 /**
  * QuickJS 策略配置
@@ -90,6 +91,8 @@ export class QuickJSStrategy {
 
   // P0: 订单状态管理器
   private orderStateManager: OrderStateManager;
+  // P1: 遗留订单追踪器（自动消警）
+  private legacyOrderTracker?: LegacyOrderTracker;
   private lastError?: Error;
   private fileLastModified = 0;
 
@@ -121,6 +124,13 @@ export class QuickJSStrategy {
     this.orderStateManager.onAlert((alert) => {
       console.error(`[QuickJSStrategy] 订单异常告警:`, alert);
     });
+    
+    // P1: 初始化遗留订单追踪器（从 state 恢复 runId）
+    // 先加载状态，确保 strategyState 已填充
+    this.loadState();
+    const runId = this.strategyState.get('runId')?.toString() || Date.now().toString();
+    this.legacyOrderTracker = new LegacyOrderTracker(runId);
+    console.log(`[QuickJSStrategy] 遗留订单追踪器已初始化, runId=${runId}`);
   }
 
   /**
@@ -866,6 +876,18 @@ export class QuickJSStrategy {
       // P0: 订单状态一致性检查
       this.checkOrderStateConsistency(openOrders);
       
+      // P1: 遗留订单追踪（自动消警）
+      if (this.legacyOrderTracker) {
+        const alerts = this.legacyOrderTracker.check(openOrders);
+        for (const alert of alerts) {
+          console.log(`[QuickJSStrategy] ${alert.message}`);
+          // 发送 Telegram 告警（异步不阻塞）
+          this.legacyOrderTracker.sendAlert(alert).catch(err => 
+            console.error(`[QuickJSStrategy] 遗留订单告警发送失败:`, err)
+          );
+        }
+      }
+      
       // P0: 启动异常单检测（首次调用）
       if (!this.orderStateManager['checkInterval']) {
         this.orderStateManager.startDetection(30000); // 30秒检测一次
@@ -1348,6 +1370,11 @@ export class QuickJSStrategy {
     this.tickCount = snapshot.tickCount;
     this.lastPrice = snapshot.lastPrice;
     this.lastBar = snapshot.lastBar;
+
+    // P1: 更新遗留订单追踪器的 runId（热更新后可能有新 runId）
+    if (this.legacyOrderTracker && snapshot.state.runId) {
+      this.legacyOrderTracker.updateRunId(snapshot.state.runId.toString());
+    }
 
     console.log(`[QuickJSStrategy] 快照恢复完成: ${Object.keys(snapshot.state).length} 个状态键`);
   }
