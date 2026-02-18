@@ -1,11 +1,14 @@
 /**
  * 数据提供者统一导出
+ * 
+ * 注意：BinanceProvider/BybitProvider已迁移到quant-lab/src/providers/
+ * 请从quant-lab导入：
+ *   import { BybitProvider } from '../../quant-lab/src/providers/bybit.js';
+ *   import { BinanceProvider } from '../../quant-lab/src/providers/binance.js';
  */
 
 export { DataProvider, RestDataProvider, WebSocketDataProvider } from './base.js';
-export { BinanceProvider } from './binance.js';
 export { BinanceCurlProvider } from './binance-curl.js';
-export { BybitProvider } from './bybit.js';
 export { BybitCurlProvider } from './bybit-curl.js';
 export { TradingViewProvider } from './tradingview.js';
 
@@ -13,15 +16,7 @@ export { TradingViewProvider } from './tradingview.js';
 // Import it directly only in environments that have that dependency.
 // export { FutuProvider } from './futu.js';
 
-export { 
-  PaperTradingProvider,
-  type PaperTradingConfig,
-  type PaperOrder,
-  type PaperPosition,
-  type PaperTrade,
-  type PaperAccountState,
-  type PlaceOrderParams,
-  type PlaceOrderResult,
-  type EquityPoint,
-  type PaperStats
-} from './paper-trading.js';
+// 已迁移到quant-lab的Provider（保留重导出以兼容历史代码）
+// export { BinanceProvider } from './binance.js'; // → quant-lab/src/providers/binance.ts
+// export { BybitProvider } from './bybit.js';     // → quant-lab/src/providers/bybit.ts
+// export { PaperTradingProvider } from './paper-trading.js'; // → quant-lab/src/providers/paper-trading.ts

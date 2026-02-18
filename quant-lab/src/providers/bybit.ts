@@ -159,7 +159,7 @@ export class BybitProvider implements TradingProvider {
     // 重新连接
     try {
       if (subscribedTickers.length > 0) {
-        await this.subscribeTickers(subscribedTickers, (tick) => {
+        await this.subscribeTicks(subscribedTickers, (tick) => {
           this.tickCallbacks.forEach(cb => cb(tick));
         });
       }
@@ -971,16 +971,18 @@ export class BybitProvider implements TradingProvider {
   /**
    * 解析订单状态
    */
-  private parseOrderStatus(status: string): 'PENDING' | 'FILLED' | 'CANCELLED' {
+  private parseOrderStatus(status: string): 'PENDING' | 'PARTIAL' | 'FILLED' | 'CANCELED' | 'REJECTED' {
     switch (status) {
       case 'New':
-      case 'PartiallyFilled':
         return 'PENDING';
+      case 'PartiallyFilled':
+        return 'PARTIAL';
       case 'Filled':
         return 'FILLED';
       case 'Cancelled':
+        return 'CANCELED';
       case 'Rejected':
-        return 'CANCELLED';
+        return 'REJECTED';
       default:
         return 'PENDING';
     }

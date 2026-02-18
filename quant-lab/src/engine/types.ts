@@ -75,6 +75,7 @@ export interface Position {
 export interface Account {
   balance: number;          // 账户余额
   equity: number;           // 账户净值（余额 + 未实现盈亏）
+  availableMargin?: number; // 可用保证金（可选，用于杠杆交易）
   positions: Position[];    // 持仓列表
   totalRealizedPnl: number; // 总已实现盈亏
   totalUnrealizedPnl: number; // 总未实现盈亏

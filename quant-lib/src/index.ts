@@ -13,28 +13,30 @@ export { KlineDatabase } from './storage/database.js';
 export { StreamingIndicators } from './indicators/streaming-indicators';
 export type { IndicatorConfig, IndicatorResult } from './indicators/streaming-indicators';
 
-// Providers
-export { 
-  BinanceProvider,
-  TradingViewProvider,
-  BybitProvider,
-  PaperTradingProvider
+// Providers (基础数据Provider，交易Provider已迁移到quant-lab)
+export {
+  TradingViewProvider
 } from './providers/index.js';
-export type { 
-  BybitProviderConfig, 
-  AccountOverview, 
-  Position, 
-  CoinBalance,
-  PaperTradingConfig,
-  PaperOrder,
-  PaperPosition,
-  PaperTrade,
-  PaperAccountState,
-  PlaceOrderParams,
-  PlaceOrderResult,
-  EquityPoint,
-  PaperStats
-} from './providers/index.js';
+// 注意：以下Provider已迁移到quant-lab/src/providers/（依赖quant-lab/engine）
+// - BinanceProvider
+// - BybitProvider  
+// - PaperTradingProvider
+// 请从quant-lab导入：import { BybitProvider } from '../../quant-lab/src/providers/bybit.js';
+// export type { 
+//   BybitProviderConfig, 
+//   AccountOverview, 
+//   Position, 
+//   CoinBalance,
+//   PaperTradingConfig,
+//   PaperOrder,
+//   PaperPosition,
+//   PaperTrade,
+//   PaperAccountState,
+//   PlaceOrderParams,
+//   PlaceOrderResult,
+//   EquityPoint,
+//   PaperStats
+// } from './providers/index.js';
 
 // NOTE: FUTU provider depends on a futu-trader native client that is not present in this repo.
 // Import it directly only in environments that have that dependency.
