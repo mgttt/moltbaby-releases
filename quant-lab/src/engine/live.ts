@@ -2,6 +2,7 @@
 // 实盘引擎
 // ============================================================
 
+import { join } from 'node:path';
 import type {
   Strategy,
   StrategyContext,
@@ -15,6 +16,7 @@ import type {
 } from './types';
 import type { Kline } from '../../../quant-lib/src';
 import { KlineDatabase, StreamingIndicators } from '../../../quant-lib/src';
+import { NdtsdbRpcKlineStore } from '../storage/ndtsdb-rpc-store';
 
 /**
  * Trading Provider 接口（可选）
@@ -39,7 +41,7 @@ export interface TradingProvider {
 export class LiveEngine {
   private strategy: Strategy;
   private config: LiveConfig;
-  private db?: KlineDatabase;
+  private db?: KlineDatabase | NdtsdbRpcKlineStore;
   private provider?: TradingProvider;
   
   // 运行状态
@@ -74,7 +76,20 @@ export class LiveEngine {
     
     // 如果配置了数据库，则初始化
     if (config.dbPath) {
-      this.db = new KlineDatabase({ path: config.dbPath });
+      if (config.dbPath.startsWith('rpc://')) {
+        const url = new URL(config.dbPath);
+        const binaryPath = url.searchParams.get('binary') || undefined;
+        this.db = new NdtsdbRpcKlineStore({
+          dbPath: url.pathname || join(process.cwd(), 'runtime/quant-lab/rpc-ndtsdb'),
+          binaryPath,
+          requestTimeoutMs: Number(url.searchParams.get('requestTimeoutMs') || '3000'),
+          maxRetries: Number(url.searchParams.get('retries') || '3'),
+          retryDelayMs: Number(url.searchParams.get('retryDelayMs') || '120'),
+          fallbackEnabled: url.searchParams.get('fallback') !== 'false',
+        });
+      } else {
+        this.db = new KlineDatabase({ path: config.dbPath });
+      }
     }
     
     // 初始化指标管理器

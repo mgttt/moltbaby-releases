@@ -12,6 +12,8 @@ wasm/target/
 # OS
 .DS_Store
 
+docs/poc/qjs-ndtsdb-rpc
+
 # Debug/link artifacts
 *.pdb
 *.lib

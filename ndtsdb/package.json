@@ -14,6 +14,7 @@
     "test:smoke": "bun tests/smoke-test.ts",
     "test:suite": "bun tests/test-suite.ts",
     "test:all": "bun tests/smoke-test.ts && bun tests/test-suite.ts",
+    "test:qjs-rpc": "./scripts/build-qjs-rpc.sh && bun test tests/ndtsdb-rpc.test.ts",
     "benchmark": "bun tests/benchmark.ts",
     "benchmark:3000": "bun tests/benchmark-3000.ts --full",
     "example": "bun tests/example.ts"
