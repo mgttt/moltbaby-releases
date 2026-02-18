@@ -1214,6 +1214,11 @@ function st_init() {
   state.orderSeq = 0;
   logInfo('[Init] P0: 110072根治 - 新runId=' + state.runId + '，orderLinkId将唯一');
   
+  // P1修复：立即通知bridge新runId（确保tracker同步）
+  if (typeof bridge_onRunIdChange === 'function') {
+    bridge_onRunIdChange(state.runId);
+  }
+  
   // P0修复v5: 新runId强制initialOffset=0，不继承旧值（1号方案）
   // 原因：旧state中的positionNotional可能已过期，重新对齐持仓
   positionDiffState.initialOffset = 0;
