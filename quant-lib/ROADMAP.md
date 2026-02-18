@@ -35,25 +35,40 @@
 
 ## 📋 Phase 2: 完善数据提供者
 
-### TradingView Provider
-- [ ] `providers/tradingview.ts`
-  - [ ] WebSocket 客户端基础
-  - [ ] 登录模式支持
-  - [ ] 匿名模式支持（免登录）
-  - [ ] 双模式自动 fallback
-  - [ ] 实时订阅功能
-  - [ ] 协议消息解析
+### 外部数据源现状（阻塞中）
 
-**迁移来源**: `tv-iv-collector/src/tradingview/client.ts`
+| Provider | 状态 | 阻塞原因 |
+|----------|------|----------|
+| **TradingView** | ⏸️ 登录模式阻塞 | 2FA 短信发送至香港手机号，接收不稳定，预计 2026-03-04 恢复 |
+| **Futu** | ⏸️ 功能受限 | 1000 产品/月上限，无数字货币历史数据 |
+| **Binance** | ✅ 可用 | 仅限加密货币，部分地区需代理 |
+
+**应对策略**: 开发 **Virtual Market Generator**（虚拟市场数据生成器），用模拟数据测试 ndtsdb 和策略系统。
+
+### TradingView Provider
+- [x] `providers/tradingview.ts`
+  - [x] WebSocket 客户端基础 ✅
+  - [x] 登录模式支持 ✅（代码就绪，2FA 阻塞）
+  - [x] 匿名模式支持（免登录）✅
+  - [x] 双模式自动 fallback ✅
+  - [x] 实时订阅功能 ✅
+  - [x] 协议消息解析 ✅
 
 ### Investing.com Provider
-- [ ] `providers/investing.ts`
-  - [ ] ProPicks 数据采集
-  - [ ] Fair Value 数据采集
-  - [ ] TradingView Screener 集成
-  - [ ] 认证 Cookie 管理
+- [ ] `providers/investing.ts` ⏸️ 低优先级
 
-**迁移来源**: `investing-pro-collector/fetch-propicks-api.ts`
+### Virtual Market Generator（新增）
+- [ ] `providers/virtual-market.ts`
+  - [ ] 模拟真实市场特征（趋势、波动、跳空、成交量）
+  - [ ] 多币种生成（BTC、ETH 等虚拟产品）
+  - [ ] 可调参数（波动率、趋势强度、均值回归）
+  - [ ] 历史数据批量生成（支撑回测）
+  - [ ] 实时流模拟（支撑实时策略）
+
+**目标**: 
+- 测试 ndtsdb 压缩率、性能、SQL 接口
+- 为策略回测提供数据基础
+- 不依赖外部 API，随时可用
 
 ---
 

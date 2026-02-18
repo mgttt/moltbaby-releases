@@ -3,6 +3,8 @@
 高性能、统一的加密货币市场数据采集与分析工具库
 
 > ⚠️ **Binance API 地区限制**: 如遇 HTTP 451 错误，请查看 [PROXY_SETUP.md](./PROXY_SETUP.md) 配置代理或使用 TradingView/FUTU Provider
+> 
+> ⚠️ **TradingView 登录模式**: Pro账号(wjhk2020@icloud.com) 2FA短信当前接收不稳定，预计 2026-03-04 后恢复测试。暂用匿名模式。
 
 ## 🎯 项目特点
 

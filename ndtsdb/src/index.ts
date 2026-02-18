@@ -82,6 +82,9 @@ export {
   StreamingMin,
   StreamingMax,
   StreamingAggregator,
+  StreamingRSI,
+  StreamingMACD,
+  StreamingBollingerBands,
 } from './stream.js';
 export { SymbolTable } from './symbol.js';
 export { WAL } from './wal.js';

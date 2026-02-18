@@ -85,16 +85,15 @@ export function macd(
     return fast - slowEMA[i];
   });
   
-  // 信号线 = MACD 的 EMA
-  const signalLine = ema(macdLine.filter(x => !isNaN(x)), signalPeriod);
+  // 信号线 = MACD 的 EMA（跳过开头的 NaN）
+  const validMacdStart = macdLine.findIndex(x => !isNaN(x));
+  const validMacd = macdLine.slice(validMacdStart);
+  const signalLineValid = ema(validMacd, signalPeriod);
   
-  // 填充 signalLine（与 macdLine 长度一致）
+  // 填充 signalLine（与 data 长度一致）
   const fullSignal: number[] = new Array(data.length).fill(NaN);
-  let signalIndex = 0;
-  for (let i = 0; i < macdLine.length; i++) {
-    if (!isNaN(macdLine[i])) {
-      fullSignal[i] = signalLine[signalIndex++];
-    }
+  for (let i = 0; i < signalLineValid.length; i++) {
+    fullSignal[validMacdStart + i] = signalLineValid[i];
   }
   
   // 柱状图 = MACD - 信号线
