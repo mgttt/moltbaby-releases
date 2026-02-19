@@ -1484,8 +1484,9 @@ function rebuildAccountingFromExecutions() {
       seenExec[execId] = true;
 
       // P0修复：严格匹配本策略成交（使用ownerStrategy/state key过滤）
-      // ownerStrategy = 'state:MYXUSDT:short' -> 匹配 'gales-MYXUSDT:short-...'
-      const expectedPrefix = getStateKey().replace('state:', 'gales-');
+      // orderLinkId格式: 'gales-MYXUSDT-short-SESSION_ID-runId-seq-side'
+      // getStateKey() = 'state:MYXUSDT:short' -> 需要匹配 'gales-MYXUSDT-short-'
+      const expectedPrefix = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-';
       const isOwnOrder = orderLinkId && orderLinkId.startsWith(expectedPrefix);
       
       if (!isOwnOrder) continue;
