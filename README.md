@@ -65,5 +65,4 @@ MIT License
 
 ---
 
-⚠️ **注意**: 此仓库为自动发布仓库，不接受 PR。
-有需求请在主仓库提 issue：https://github.com/mgttt/moltbaby/issues
+⚠️ **注意**: 此仓库为自动发布，不接受 PR，有需求请在提 issue
