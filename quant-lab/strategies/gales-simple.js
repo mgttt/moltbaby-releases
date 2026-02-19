@@ -129,10 +129,15 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
 // 状态
 // ================================
 
+// P0修复：锁定CONFIG关键字段（初始化后不可变）
+let LOCKED_SYMBOL = '';
+let LOCKED_DIRECTION = '';
+let SESSION_ID = '';
+
 // P1修复：多策略共享账户时账本隔离 - 生成唯一stateKey
 function getStateKey() {
-  // 使用symbol + direction作为唯一标识
-  const strategyId = CONFIG.symbol + ':' + CONFIG.direction;
+  // P0修复：使用锁定后的字段，确保不可变
+  const strategyId = LOCKED_SYMBOL + ':' + LOCKED_DIRECTION;
   return 'state:' + strategyId;
 }
 
@@ -1267,10 +1272,12 @@ function logRiskMetrics() {
   const strategyGap = accountGap;
   
   // P0修复：ownerStrategy必须使用state中锁定的值（禁止任何运行时重算）
-  const ownerStrategy = state.ownerStrategy;
-  if (!ownerStrategy) {
-    logWarn('[风险指标] ownerStrategy未初始化，使用CONFIG回退');
+  // 初始化守卫：如果ownerStrategy未设置，记录错误并返回
+  if (!state.ownerStrategy) {
+    logError('[风险指标] 致命错误：ownerStrategy未初始化，st_init可能未执行');
+    return; // 禁止输出不完整的风险指标
   }
+  const ownerStrategy = state.ownerStrategy;
   
   // P0修复：将计算值存回riskMetrics（避免NA）
   m.accountingPosition = accountingPos;
@@ -1278,7 +1285,7 @@ function logRiskMetrics() {
   m.accountGap = accountGap;
   m.strategyGap = strategyGap;
   // P0修复：ownerStrategy必须与实例state key一致，禁止覆盖
-  m.ownerStrategy = state.ownerStrategy || ('state:' + CONFIG.symbol + ':' + CONFIG.direction);
+  m.ownerStrategy = ownerStrategy;
   
   // P0修复：强制格式化（禁止NA）
   const fmtNum = (v, d) => {
@@ -1438,8 +1445,9 @@ function alignAccountingFromExchange() {
  * 保留用于校验，但主要依赖alignAccountingFromExchange
  */
 function rebuildAccountingFromExecutions() {
-  const directionLabel = (CONFIG.direction || 'neutral').toLowerCase();
-  const strategyPrefix = 'gales-' + directionLabel + '-';
+  // P0修复：使用锁定后的字段，确保不可变
+  const directionLabel = LOCKED_DIRECTION.toLowerCase() || 'neutral';
+  const strategyPrefix = 'gales-' + LOCKED_SYMBOL + '-' + directionLabel + '-';
 
   if (typeof bridge_getExecutions !== 'function') {
     logWarn('[账本重建] bridge_getExecutions 不可用，跳过回放');
@@ -1525,11 +1533,18 @@ function rebuildAccountingFromExecutions() {
  */
 function st_init() {
   logDebug('[DEBUG] st_init called');
+  
+  // P0修复：锁定CONFIG关键字段（初始化后不可变）
+  LOCKED_SYMBOL = CONFIG.symbol;
+  LOCKED_DIRECTION = CONFIG.direction;
+  SESSION_ID = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+  
   logInfo('策略初始化...');
-  logInfo('Symbol: ' + CONFIG.symbol);
+  logInfo('Symbol: ' + LOCKED_SYMBOL + ' [已锁定]');
   logInfo('GridCount: ' + CONFIG.gridCount);
-  logInfo('Direction: ' + CONFIG.direction);
+  logInfo('Direction: ' + LOCKED_DIRECTION + ' [已锁定]');
   logInfo('SimMode: ' + CONFIG.simMode);
+  logInfo('SessionId: ' + SESSION_ID);
 
   loadState();
 
@@ -1577,9 +1592,10 @@ function st_init() {
   state.orderSeq = 0;
   logInfo('[Init] P0: 110072根治 - 新runId=' + state.runId + '，orderLinkId将唯一');
   
-  // P0修复：ownerStrategy与实例state key强绑定，禁止运行时覆盖
-  state.ownerStrategy = getStateKey(); // 'state:MYXUSDT:short'
-  logInfo('[Init] P0: ownerStrategy锁定=' + state.ownerStrategy + '（与state key强绑定）');
+  // P0修复：ownerStrategy与锁定后的CONFIG强绑定，确保不可变
+  // 使用 LOCKED_SYMBOL + LOCKED_DIRECTION + SESSION_ID 确保唯一性
+  state.ownerStrategy = 'state:' + LOCKED_SYMBOL + ':' + LOCKED_DIRECTION + ':' + SESSION_ID;
+  logInfo('[Init] P0: ownerStrategy锁定=' + state.ownerStrategy + '（不可变）');
   
   // P1修复：立即通知bridge新runId（确保tracker同步）
   if (typeof bridge_onRunIdChange === 'function') {
@@ -2332,8 +2348,8 @@ function placeOrder(grid) {
   const quantity = orderSize / orderPrice;
   // P1修复：110072根治 - orderLinkId加入direction防止跨策略误报
   const directionLabel = CONFIG.direction || 'neutral';
-  // P0修复：orderLinkId包含ownerStrategy(state key)，确保唯一性
-  const orderLinkId = getStateKey().replace('state:', 'gales-') + '-' + state.runId + '-' + (state.orderSeq++) + '-' + grid.side;
+  // P0修复：orderLinkId使用锁定后的字段，确保唯一性
+  const orderLinkId = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-' + SESSION_ID + '-' + state.runId + '-' + (state.orderSeq++) + '-' + grid.side;
 
   // 记录"有下单行为"（用于 autoRecenter 判断）
   state.lastPlaceTick = state.tickCount || 0;
