@@ -107,6 +107,23 @@
 
 ---
 
+#### 1.5 运行隔离稳健性（gateway/systemd 边界）🔥 **P0 - 新增**
+**背景**：2026-02-19 出现 gales 进程残留在 `openclaw-gateway.service` cgroup，gateway 生命周期触发 SIGTERM，导致策略被误杀重启。
+
+**目标**：实盘策略进程只允许由 `systemd --user` 管理，彻底隔离 gateway 执行链路影响。
+
+**实现任务**：
+- [ ] 明确禁令：禁止通过 gateway exec 启停 gales（文档 + runbook + 命令封装）
+- [ ] 启动入口收敛：仅保留 `systemctl --user start/restart gales-*` 路径
+- [ ] cgroup 归属巡检：新增守护检查（发现 gales 不在各自 service cgroup 即告警）
+- [ ] 残留进程清理机制：重启前后自动扫描并回收 orphan bun 策略进程
+- [ ] 故障证据链标准化：固定输出 SIGTERM 时间线、PID/cgroup 对照、restart counter 变化
+
+**验收标准**：
+- [ ] 连续 24h 内 gateway reload/restart 不影响 gales 持续运行
+- [ ] 无“gateway cgroup 残留 gales 进程”
+- [ ] gales 重启均可追溯到明确操作者或 systemd 指令
+
 #### 2. 策略池化（workerpool-lib 集成）🔥 **P1 - 最高优先级**
 **目标**：并行运行多策略实例
 
@@ -376,5 +393,5 @@
 
 ---
 
-*最后更新: 2026-02-10*  
+*最后更新: 2026-02-19*  
 *维护者: OpenClaw 🦀*

@@ -165,6 +165,20 @@ let state = {
   
   // P2修复：持仓差值监控
   initialOffset: 0,        // 初始差值/历史遗留仓基准
+  ledgerRebuildDone: false,
+  ledgerRebuildLastTick: 0,
+
+  // 2026-02-19: 风险观测指标（策略内 + 账户级）
+  riskMetrics: {
+    accountingPosition: 0,                 // 策略记账持仓（USDT notional）
+    accountingPnl: 0,                      // 策略记账盈亏（若无账本口径则回退0）
+    galesLevel: 0,                         // 当前gales层数（基于网格状态估算）
+    exchangePosition: 0,                   // 交易所持仓（该symbol）
+    accountTotalPositionNotional: null,    // 账户总持仓（占位，待账户聚合接入）
+    accountNetEquity: null,                // 账户净值（占位，待账户聚合接入）
+    accountLeverageRatio: null,            // 杠杆比=总持仓/净值
+    updatedAt: 0,
+  },
 };
 
 // 运行时状态（不持久化）
@@ -213,6 +227,20 @@ function loadState() {
         if (!state.runId) state.runId = 0;
         if (!state.orderSeq) state.orderSeq = 0;
         if (!state.exchangePosition) state.exchangePosition = 0;
+        if (!state.riskMetrics) {
+          state.riskMetrics = {
+            accountingPosition: 0,
+            accountingPnl: 0,
+            galesLevel: 0,
+            exchangePosition: 0,
+            accountTotalPositionNotional: null,
+            accountNetEquity: null,
+            accountLeverageRatio: null,
+            updatedAt: 0,
+          };
+        }
+        if (obj.ledgerRebuildDone === undefined) state.ledgerRebuildDone = false;
+        if (obj.ledgerRebuildLastTick === undefined) state.ledgerRebuildLastTick = 0;
         // P2修复：加载initialOffset
         if (obj.initialOffset !== undefined) {
           positionDiffState.initialOffset = obj.initialOffset;
@@ -1088,6 +1116,114 @@ function st_onExecution(execJson) {
 }
 
 /**
+ * 估算当前 gales 层数（策略内调参指标）
+ * 口径：非 IDLE 网格数量；若无则返回0。
+ */
+function getCurrentGalesLevel() {
+  if (!state.gridLevels || state.gridLevels.length === 0) return 0;
+  let active = 0;
+  for (let i = 0; i < state.gridLevels.length; i++) {
+    if (state.gridLevels[i] && state.gridLevels[i].state && state.gridLevels[i].state !== 'IDLE') active++;
+  }
+  return active;
+}
+
+function fmtRisk(v, digits) {
+  if (v === null || v === undefined) return 'NA';
+  if (typeof v !== 'number' || !isFinite(v)) return 'NA';
+  return v.toFixed(digits || 2);
+}
+
+/**
+ * 更新风险观测指标（策略内 + 账户级）
+ * 说明：positionRatio(策略口径)已停用为主风控，仅保留历史代码；
+ * 当前优先输出可解释指标，后续接入账户聚合口径再升级熔断。
+ */
+function updateRiskMetrics(tick) {
+  if (!state.riskMetrics) state.riskMetrics = {};
+
+  // 策略内指标
+  state.riskMetrics.accountingPosition = state.positionNotional || 0;
+  state.riskMetrics.accountingPnl = (state.totalProfit !== undefined) ? (state.totalProfit || 0) : 0; // TODO: 接入统一账本PnL
+  state.riskMetrics.galesLevel = getCurrentGalesLevel();
+  state.riskMetrics.exchangePosition = state.exchangePosition || 0;
+  const accPos = Math.abs(state.riskMetrics.accountingPosition || 0);
+  const exPos = Math.abs(state.riskMetrics.exchangePosition || 0);
+  state.riskMetrics.ledgerStatus = (exPos > 1 && accPos < 1) ? 'mismatch' : 'ok';
+
+  // 账户级指标（优先从tick读取；其次尝试bridge；否则NA）
+  let accountPos = null;
+  let accountEq = null;
+  if (tick && typeof tick === 'object') {
+    if (tick.accountTotalPositionNotional !== undefined) accountPos = Number(tick.accountTotalPositionNotional);
+    if (tick.accountNetEquity !== undefined) accountEq = Number(tick.accountNetEquity);
+  }
+
+  // 账户信息桥接：兼容 equity/netEquity 命名
+  if ((accountPos === null || !isFinite(accountPos) || accountEq === null || !isFinite(accountEq)) && typeof bridge_getAccount === 'function') {
+    try {
+      const accountJson = bridge_getAccount();
+      if (accountJson && accountJson !== 'null') {
+        const account = JSON.parse(accountJson);
+        if (accountPos === null && account && account.totalPositionNotional !== undefined) accountPos = Number(account.totalPositionNotional);
+        if (accountEq === null && account) {
+          if (account.netEquity !== undefined) accountEq = Number(account.netEquity);
+          else if (account.equity !== undefined) accountEq = Number(account.equity);
+          else if (account.balance !== undefined) accountEq = Number(account.balance);
+        }
+      }
+    } catch (e) {
+      // 静默降级，不影响交易主流程
+    }
+  }
+
+  // 账户总持仓口径：优先直接字段；否则用全部持仓汇总 |positionNotional|
+  if ((accountPos === null || !isFinite(accountPos)) && typeof bridge_getAllPositions === 'function') {
+    try {
+      const allPosJson = bridge_getAllPositions();
+      if (allPosJson && allPosJson !== 'null') {
+        const allPos = JSON.parse(allPosJson);
+        if (allPos && allPos.length !== undefined) {
+          let total = 0;
+          for (let i = 0; i < allPos.length; i++) {
+            const p = allPos[i] || {};
+            const n = Number(p.positionNotional);
+            if (isFinite(n)) total += Math.abs(n);
+          }
+          accountPos = total;
+        }
+      }
+    } catch (e) {
+      // 静默降级
+    }
+  }
+
+  state.riskMetrics.accountTotalPositionNotional = (accountPos !== null && isFinite(accountPos)) ? accountPos : null;
+  state.riskMetrics.accountNetEquity = (accountEq !== null && isFinite(accountEq)) ? accountEq : null;
+  if (state.riskMetrics.accountNetEquity && state.riskMetrics.accountNetEquity !== 0 && state.riskMetrics.accountTotalPositionNotional !== null) {
+    state.riskMetrics.accountLeverageRatio = state.riskMetrics.accountTotalPositionNotional / state.riskMetrics.accountNetEquity;
+  } else {
+    state.riskMetrics.accountLeverageRatio = null;
+  }
+  state.riskMetrics.updatedAt = Date.now();
+}
+
+/**
+ * 统一风险观测日志（默认60秒一次）
+ */
+function logRiskMetrics() {
+  const m = state.riskMetrics || {};
+  logInfo('[风险指标] 策略(accountingPos=' + fmtRisk(m.accountingPosition, 2) +
+          ', accountingPnl=' + fmtRisk(m.accountingPnl, 2) +
+          ', galesLevel=' + fmtRisk(m.galesLevel, 0) +
+          ', exchangePos=' + fmtRisk(m.exchangePosition, 2) +
+          ', ledger=' + (m.ledgerStatus || 'NA') +
+          ') | 账户(totalPos=' + fmtRisk(m.accountTotalPositionNotional, 2) +
+          ', netEq=' + fmtRisk(m.accountNetEquity, 2) +
+          ', lev=' + fmtRisk(m.accountLeverageRatio, 4) + ')');
+}
+
+/**
  * 心跳日志（每 10 次输出一次）
  */
 function logHeartbeat() {
@@ -1172,6 +1308,89 @@ function printGridStatus() {
 // ================================
 
 /**
+ * 按策略前缀回放成交，重建策略独立账本（审计日志）
+ */
+function rebuildAccountingFromExecutions() {
+  const directionLabel = (CONFIG.direction || 'neutral').toLowerCase();
+  const strategyPrefix = 'gales-' + directionLabel + '-';
+
+  if (typeof bridge_getExecutions !== 'function') {
+    logWarn('[账本重建] bridge_getExecutions 不可用，跳过回放');
+    return { rebuilt: false, matched: 0, total: 0 };
+  }
+
+  try {
+    const executionsJson = bridge_getExecutions();
+    if (!executionsJson || executionsJson === 'null') {
+      logWarn('[账本重建] 无成交缓存，跳过回放');
+      return { rebuilt: false, matched: 0, total: 0 };
+    }
+
+    const executions = JSON.parse(executionsJson);
+    if (!Array.isArray(executions) || executions.length === 0) {
+      logInfo('[账本重建] 成交列表为空，保持现有账本');
+      return { rebuilt: false, matched: 0, total: 0 };
+    }
+
+    // 时间升序回放，确保累计过程可审计
+    executions.sort(function(a, b) { return Number(a.execTime || 0) - Number(b.execTime || 0); });
+
+    let rebuiltNotional = 0;
+    let matched = 0;
+    const seenExec = {};
+
+    for (let i = 0; i < executions.length; i++) {
+      const exec = executions[i] || {};
+      const execId = exec.execId;
+      const orderLinkId = exec.orderLinkId || '';
+      const symbol = exec.symbol || '';
+
+      if (!execId || seenExec[execId]) continue;
+      seenExec[execId] = true;
+
+      // 关键修复：只回放本策略前缀，避免把同symbol其他策略成交算进来
+      if (!orderLinkId || orderLinkId.indexOf(strategyPrefix) !== 0) continue;
+      if (symbol && CONFIG.symbol && symbol !== CONFIG.symbol) continue;
+
+      const side = exec.side;
+      const execQty = Number(exec.execQty || 0);
+      const execPrice = Number(exec.execPrice || 0);
+      const notional = execQty * execPrice;
+      if (!isFinite(notional) || notional <= 0) continue;
+
+      if (CONFIG.direction === 'long') {
+        if (side === 'Buy') rebuiltNotional += notional;
+      } else if (CONFIG.direction === 'short') {
+        if (side === 'Sell') rebuiltNotional -= notional;
+        else rebuiltNotional += notional;
+      } else {
+        if (side === 'Buy') rebuiltNotional += notional;
+        else rebuiltNotional -= notional;
+      }
+
+      matched++;
+      logInfo('[账本重建] runId=' + state.runId + ' execId=' + execId + ' side=' + side +
+              ' qty=' + execQty.toFixed(4) + ' px=' + execPrice.toFixed(4) +
+              ' cum=' + rebuiltNotional.toFixed(2));
+    }
+
+    if (matched > 0) {
+      state.positionNotional = rebuiltNotional;
+      logInfo('[账本重建完成] runId=' + state.runId + ' matched=' + matched + '/' + executions.length +
+              ' positionNotional=' + state.positionNotional.toFixed(2) +
+              ' prefix=' + strategyPrefix);
+      return { rebuilt: true, matched: matched, total: executions.length };
+    }
+
+    logWarn('[账本重建] 未匹配到本策略成交（prefix=' + strategyPrefix + '），保留现有账本=' + (state.positionNotional || 0).toFixed(2));
+    return { rebuilt: false, matched: 0, total: executions.length };
+  } catch (e) {
+    logWarn('[账本重建失败] ' + e);
+    return { rebuilt: false, matched: 0, total: 0 };
+  }
+}
+
+/**
  * 初始化
  */
 function st_init() {
@@ -1233,15 +1452,18 @@ function st_init() {
     bridge_onRunIdChange(state.runId);
   }
   
-  // P0修复v5: 新runId强制initialOffset=0，不继承旧值（1号方案）
-  // 原因：旧state中的positionNotional可能已过期，重新对齐持仓
+  // 差值监控基线保留为0（不影响账本本身）
   positionDiffState.initialOffset = 0;
   state.initialOffset = 0;
-  logInfo('[Init] P0: 新runId强制initialOffset=0，重新对齐持仓');
-  
-  // 重置positionNotional为0，从当前开始累积（避免旧数据干扰）
-  state.positionNotional = 0;
-  logInfo('[Init] P0: 重置positionNotional=0，从当前开始累积');
+  logInfo('[Init] 差值监控initialOffset=0（账本由回放重建）');
+
+  // P1结构修复：启动时按策略前缀回放成交重建账本，不再强制清零
+  const rebuildResult = rebuildAccountingFromExecutions();
+  state.ledgerRebuildDone = !!rebuildResult.rebuilt;
+  state.ledgerRebuildLastTick = 0;
+  if (!rebuildResult.rebuilt && Math.abs(state.exchangePosition || 0) > 1 && Math.abs(state.positionNotional || 0) < 1) {
+    logWarn('[Init][口径告警] accountingPos≈0 但 exchangePos有量，等待后续成交回放/对齐');
+  }
   
   // P2修复：检测遗留订单（鲶鱼建议）
   checkLegacyOrders();
@@ -1459,6 +1681,21 @@ function st_heartbeat(tickJson) {
     } catch (e) {
       logWarn('[Position Refresh] 读取失败: ' + e);
     }
+  }
+
+  // 启动后异步对账完成前，周期性重试账本重建（依赖bridge缓存成交）
+  if (!state.ledgerRebuildDone && state.tickCount - (state.ledgerRebuildLastTick || 0) >= 12) {
+    state.ledgerRebuildLastTick = state.tickCount;
+    const rr = rebuildAccountingFromExecutions();
+    if (rr.rebuilt) {
+      state.ledgerRebuildDone = true;
+    }
+  }
+
+  // 更新风险指标（不影响主交易流程）
+  updateRiskMetrics(tick);
+  if (state.tickCount % 12 === 0) { // 约60秒（默认5秒心跳）
+    logRiskMetrics();
   }
 
   // 首次初始化网格

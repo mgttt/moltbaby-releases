@@ -75,6 +75,7 @@ export class QuickJSStrategy {
   private cachedAccount?: Account;
   private cachedPositions: Map<string, Position> = new Map();
   private cachedOpenOrders: any[] = [];  // P2修复：缓存openOrders（遗留订单检测）
+  private cachedExecutions: any[] = [];  // P1修复：缓存成交记录（策略账本重建）
   
   // P2修复：缓存就绪门闸（bot-009建议）
   private cacheReady = false;
@@ -848,21 +849,16 @@ export class QuickJSStrategy {
       // NOTE: Bybit API对execution/list的startTime有限制，报错"Can't query earlier than 2 years"
       // 临时回退不传startTime，恢复监控能力（TODO: 研究Bybit API文档找到正确用法）
       const executions = await (ctx as any).getExecutions();
+      this.cachedExecutions = executions;
       console.log(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个`);
       
-      // P1修复：过滤只处理本策略的executions（gales-前缀或orderLinkId匹配）
+      // P1修复：过滤只处理本策略execution（按策略方向前缀）
       const strategyId = this.config.strategyId || '';
+      const direction = strategyId.split('-').pop() || 'neutral';
+      const strategyPrefix = `gales-${direction}-`;
       const myExecutions = executions.filter((exec: any) => {
-        // 过滤条件：orderLinkId以gales-开头
-        if (exec.orderLinkId && exec.orderLinkId.startsWith('gales-')) {
-          return true;
-        }
-        // 过滤条件：本策略的orderLinkId
-        if (exec.orderLinkId && strategyId && exec.orderLinkId.includes(strategyId.split('-').slice(0, 2).join('-'))) {
-          return true;
-        }
-        // 拒绝：orderLinkId为空或非本策略的executions
-        return false;
+        if (!exec.orderLinkId) return false;
+        return exec.orderLinkId.startsWith(strategyPrefix);
       });
       console.log(`[QuickJSStrategy] [Order Reconcile] 本策略成交: ${myExecutions.length} 个 (过滤后)`);
       
@@ -1100,6 +1096,13 @@ export class QuickJSStrategy {
     this.ctx.setProp(this.ctx.global, 'bridge_getPosition', bridge_getPosition);
     bridge_getPosition.dispose();
 
+    // bridge_getAllPositions - 获取账户全部持仓（用于账户级风险指标）
+    const bridge_getAllPositions = this.ctx.newFunction('bridge_getAllPositions', () => {
+      return this.ctx!.newString(JSON.stringify(Array.from(this.cachedPositions.values())));
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getAllPositions', bridge_getAllPositions);
+    bridge_getAllPositions.dispose();
+
     // P2修复：bridge_getOpenOrders - 获取未完成订单（遗留订单检测）
     const bridge_getOpenOrders = this.ctx.newFunction('bridge_getOpenOrders', () => {
       console.log(`[QuickJSStrategy] bridge_getOpenOrders: cached=${this.cachedOpenOrders.length} orders`);
@@ -1107,6 +1110,13 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_getOpenOrders', bridge_getOpenOrders);
     bridge_getOpenOrders.dispose();
+
+    // P1修复：bridge_getExecutions - 获取最近成交（策略账本重建）
+    const bridge_getExecutions = this.ctx.newFunction('bridge_getExecutions', () => {
+      return this.ctx!.newString(JSON.stringify(this.cachedExecutions || []));
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getExecutions', bridge_getExecutions);
+    bridge_getExecutions.dispose();
 
     // bridge_placeOrder - 下单（队列化异步执行）
     const bridge_placeOrder = this.ctx.newFunction('bridge_placeOrder', (paramsHandle) => {
