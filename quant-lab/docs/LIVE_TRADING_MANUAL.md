@@ -380,6 +380,13 @@ bun tests/run-simulated-strategy.ts ./strategies/gales-simple.js --scenario sine
 | `long` | 实际下单 | 仅记账 | 只计 Buy | 看涨 |
 | `short` | 仅记账 | 实际下单 | 只计 Sell | 看跌 |
 
+### 6.3.1 口径约束（2026-02-19）
+
+- 分策略汇报 **暂不显示 uPnL**（当前交易所返回的是账户级 symbol 总未实现盈亏，非策略级归因）。
+- 分策略固定输出：`accountingPos(带方向) + gales层数 + 熔断状态 + 异常`。
+- 账户层输出：`exchange总仓 + netEq + lev (+ account uPnL 可选)`。
+- 若需策略级浮盈，必须先完成 roadmap 中“策略级 uPnL 归因”任务再启用显示。
+
 ### 6.4 关键参数速查
 
 | 参数 | 默认值 | 作用 | 波动率高时 |
