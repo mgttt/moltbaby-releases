@@ -1340,7 +1340,67 @@ function printGridStatus() {
 // ================================
 
 /**
+ * P1修复：账本对齐（从交易所持仓反推initialOffset）
+ * 原因：execution缓存只保留50条，历史成交数据不完整，无法靠回放重建
+ * 方案：用exchangePosition作为基准，计算initialOffset对齐账本
+ */
+function alignAccountingFromExchange() {
+  if (typeof bridge_getPosition !== 'function') {
+    logWarn('[账本对齐] bridge_getPosition不可用');
+    return { aligned: false, reason: 'bridge_unavailable' };
+  }
+
+  try {
+    const positionJson = bridge_getPosition(CONFIG.symbol);
+    if (!positionJson || positionJson === 'null' || positionJson === 'undefined') {
+      logWarn('[账本对齐] 无持仓数据');
+      return { aligned: false, reason: 'no_position' };
+    }
+
+    const position = JSON.parse(positionJson);
+    const exchangePos = position.positionNotional || 0;
+    const isShort = position.side === 'Sell' || position.side === 'SHORT';
+    const signedExchangePos = isShort ? -Math.abs(exchangePos) : exchangePos;
+    
+    const currentLedger = state.positionNotional || 0;
+    const gap = Math.abs(signedExchangePos - currentLedger);
+    
+    // 计算initialOffset：让(exchangePos - initialOffset) ≈ currentLedger
+    // 即：initialOffset = exchangePos - currentLedger
+    positionDiffState.initialOffset = signedExchangePos - currentLedger;
+    state.initialOffset = positionDiffState.initialOffset;
+    
+    logInfo('[账本对齐] exchangePos=' + signedExchangePos.toFixed(2) + 
+            ' ledger=' + currentLedger.toFixed(2) + 
+            ' gap=' + gap.toFixed(2) +
+            ' initialOffset=' + positionDiffState.initialOffset.toFixed(2));
+    
+    // 同时尝试从execution累加（仅用于校验）
+    const rebuildResult = rebuildAccountingFromExecutions();
+    if (rebuildResult.rebuilt) {
+      const afterRebuild = state.positionNotional || 0;
+      const rebuildGap = Math.abs(signedExchangePos - afterRebuild);
+      logInfo('[账本对齐] 重建后对比: ledger=' + afterRebuild.toFixed(2) + 
+              ' gap=' + rebuildGap.toFixed(2));
+    }
+    
+    return { 
+      aligned: true, 
+      exchangePos: signedExchangePos, 
+      ledger: currentLedger,
+      gap: gap,
+      initialOffset: positionDiffState.initialOffset,
+      rebuildResult: rebuildResult
+    };
+  } catch (e) {
+    logWarn('[账本对齐失败] ' + e);
+    return { aligned: false, reason: 'error', error: e.message };
+  }
+}
+
+/**
  * 按策略前缀回放成交，重建策略独立账本（审计日志）
+ * 保留用于校验，但主要依赖alignAccountingFromExchange
  */
 function rebuildAccountingFromExecutions() {
   const directionLabel = (CONFIG.direction || 'neutral').toLowerCase();
@@ -1380,9 +1440,12 @@ function rebuildAccountingFromExecutions() {
       if (!execId || seenExec[execId]) continue;
       seenExec[execId] = true;
 
-      // 关键修复：只回放本策略前缀，避免把同symbol其他策略成交算进来
-      if (!orderLinkId || orderLinkId.indexOf(strategyPrefix) !== 0) continue;
-      if (symbol && CONFIG.symbol && symbol !== CONFIG.symbol) continue;
+      // P1修复：放宽匹配条件，优先匹配本策略前缀，其次匹配同symbol成交
+      // 原因：execution缓存只保留50条，历史成交orderLinkId可能不匹配
+      const isOwnOrder = orderLinkId && orderLinkId.indexOf(strategyPrefix) === 0;
+      const isSameSymbol = symbol && CONFIG.symbol && symbol === CONFIG.symbol;
+      
+      if (!isOwnOrder && !isSameSymbol) continue;
 
       const side = exec.side;
       const execQty = Number(exec.execQty || 0);
@@ -1495,6 +1558,14 @@ function st_init() {
   state.ledgerRebuildLastTick = 0;
   if (!rebuildResult.rebuilt && Math.abs(state.exchangePosition || 0) > 1 && Math.abs(state.positionNotional || 0) < 1) {
     logWarn('[Init][口径告警] accountingPos≈0 但 exchangePos有量，等待后续成交回放/对齐');
+  }
+  
+  // P1修复：从交易所持仓对齐账本（execution数据不完整时）
+  const alignResult = alignAccountingFromExchange();
+  if (alignResult.aligned) {
+    logInfo('[Init][账本对齐] gap=' + alignResult.gap.toFixed(2) + ' offset=' + alignResult.initialOffset.toFixed(2));
+  } else {
+    logWarn('[Init][账本对齐失败] ' + (alignResult.reason || 'unknown'));
   }
   
   // P2修复：检测遗留订单（鲶鱼建议）
