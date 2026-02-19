@@ -1819,7 +1819,8 @@ function st_heartbeat(tickJson) {
   // P0 修复：每60心跳更新exchangePosition（从cache读取，cache由QuickJSStrategy.onTick刷新）
   if (state.tickCount % 60 === 0) {
     try {
-      const positionJson = bridge_getPosition(CONFIG.symbol);
+      // P0修复：使用锁定后的symbol
+      const positionJson = bridge_getPosition(LOCKED_SYMBOL);
       if (positionJson && positionJson !== 'null') {
         const position = JSON.parse(positionJson);
         let exchangePosition = position.positionNotional || 0;
@@ -1849,7 +1850,8 @@ function st_heartbeat(tickJson) {
   // P0修复：每30tick强制账本对齐（防止SSL/网络异常导致账本漂移）
   if (state.tickCount % 30 === 0) {
     try {
-      const positionJson = bridge_getPosition(CONFIG.symbol);
+      // P0修复：使用锁定后的symbol，确保不可变
+      const positionJson = bridge_getPosition(LOCKED_SYMBOL);
       if (positionJson && positionJson !== 'null') {
         const position = JSON.parse(positionJson);
         let exchangePos = position.positionNotional || 0;
