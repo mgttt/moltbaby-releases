@@ -1266,8 +1266,11 @@ function logRiskMetrics() {
   // P1修复：策略级gap（用于告警，不阻塞）
   const strategyGap = accountGap;
   
-  // P0修复：ownerStrategy使用state中锁定的值（禁止运行时重新计算）
-  const ownerStrategy = state.ownerStrategy || getStateKey();
+  // P0修复：ownerStrategy必须使用state中锁定的值（禁止任何运行时重算）
+  const ownerStrategy = state.ownerStrategy;
+  if (!ownerStrategy) {
+    logWarn('[风险指标] ownerStrategy未初始化，使用CONFIG回退');
+  }
   
   // P0修复：将计算值存回riskMetrics（避免NA）
   m.accountingPosition = accountingPos;
@@ -1275,7 +1278,7 @@ function logRiskMetrics() {
   m.accountGap = accountGap;
   m.strategyGap = strategyGap;
   // P0修复：ownerStrategy必须与实例state key一致，禁止覆盖
-  m.ownerStrategy = state.ownerStrategy || ownerStrategy;
+  m.ownerStrategy = state.ownerStrategy || ('state:' + CONFIG.symbol + ':' + CONFIG.direction);
   
   // P0修复：强制格式化（禁止NA）
   const fmtNum = (v, d) => {
