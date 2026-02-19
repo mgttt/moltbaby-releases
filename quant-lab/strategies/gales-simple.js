@@ -415,30 +415,32 @@ function checkCircuitBreaker() {
     }
   }
   
-  // 2. 仓位熔断（P1修复：告警only不置tripped - bot-009建议）
-  const positionRatio = effectivePosition / CONFIG.maxPosition;
-  if (positionRatio > cb.maxPositionRatio) {
-    // P2修复：熔断告警节流（>=60s或ratio变化>=0.2%才打一次）
-    const now = Date.now();
-    const lastWarn = circuitBreakerState.lastPositionWarnAt || 0;
-    const lastRatio = circuitBreakerState.lastPositionWarnRatio || 0;
-    const timeElapsed = now - lastWarn;
-    const ratioDiff = Math.abs(positionRatio - lastRatio);
-    
-    if (timeElapsed >= 60000 || ratioDiff >= 0.002) {
-      circuitBreakerState.lastPositionWarnAt = now;
-      circuitBreakerState.lastPositionWarnRatio = positionRatio;
-      // P1-debug: 打印详细仓位熔断信息
-      logWarn('[熔断触发-仓位] positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
-              ' | effectivePosition=' + effectivePosition.toFixed(2) +
-              ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
-              ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2) +
-              ' | maxPosition=' + CONFIG.maxPosition);
-    }
-    
-    // 不触发熔断停止，继续交易
-    return false;
-  }
+  // 2. 仓位熔断（暂时停用）
+  // 说明：positionRatio 基于策略内口径（effectivePosition/maxPosition），
+  // 当前仅保留为历史实现，不作为强风控依据，等待账户级杠杆风险口径接入后再启用。
+  // const positionRatio = effectivePosition / CONFIG.maxPosition;
+  // if (positionRatio > cb.maxPositionRatio) {
+  //   // P2修复：熔断告警节流（>=60s或ratio变化>=0.2%才打一次）
+  //   const now = Date.now();
+  //   const lastWarn = circuitBreakerState.lastPositionWarnAt || 0;
+  //   const lastRatio = circuitBreakerState.lastPositionWarnRatio || 0;
+  //   const timeElapsed = now - lastWarn;
+  //   const ratioDiff = Math.abs(positionRatio - lastRatio);
+  //   
+  //   if (timeElapsed >= 60000 || ratioDiff >= 0.002) {
+  //     circuitBreakerState.lastPositionWarnAt = now;
+  //     circuitBreakerState.lastPositionWarnRatio = positionRatio;
+  //     // P1-debug: 打印详细仓位熔断信息
+  //     logWarn('[熔断触发-仓位] positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
+  //             ' | effectivePosition=' + effectivePosition.toFixed(2) +
+  //             ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
+  //             ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2) +
+  //             ' | maxPosition=' + CONFIG.maxPosition);
+  //   }
+  //   
+  //   // 不触发熔断停止，继续交易
+  //   return false;
+  // }
   
   // 3. 价格偏离熔断
   if (state.centerPrice > 0) {
