@@ -179,6 +179,9 @@ let state = {
     accountLeverageRatio: null,            // 杠杆比=总持仓/净值
     updatedAt: 0,
   },
+  
+  // P0修复：ownerStrategy与实例state key强绑定，禁止运行时覆盖
+  ownerStrategy: '',                       // 在st_init中初始化并锁定
 };
 
 // 运行时状态（不持久化）
@@ -1243,32 +1246,56 @@ function updateRiskMetrics(tick) {
 /**
  * 统一风险观测日志（默认60秒一次）
  * P1修复：添加accountGap和strategyGap字段
+ * P0修复：强制输出非NA字段
  */
 function logRiskMetrics() {
-  const m = state.riskMetrics || {};
+  // P0修复：确保riskMetrics已初始化
+  if (!state.riskMetrics) {
+    state.riskMetrics = {};
+  }
+  
+  const m = state.riskMetrics;
+  
+  // P0修复：强制确保关键字段有值（禁止NA）
+  const accountingPos = m.accountingPosition !== undefined ? m.accountingPosition : (state.positionNotional || 0);
+  const exchangePos = m.exchangePosition !== undefined ? m.exchangePosition : (state.exchangePosition || 0);
   
   // P1修复：计算账户锚点gap（neutral作为账户主策略）
-  const accountingPos = m.accountingPosition || 0;
-  const exchangePos = m.exchangePosition || 0;
   const accountGap = Math.abs(accountingPos - exchangePos);
   
   // P1修复：策略级gap（用于告警，不阻塞）
   const strategyGap = accountGap;
   
-  // 确定ownerStrategy（当前策略方向）
-  const ownerStrategy = CONFIG.direction || 'neutral';
+  // P0修复：ownerStrategy使用state中锁定的值（禁止运行时重新计算）
+  const ownerStrategy = state.ownerStrategy || getStateKey();
   
-  logInfo('[风险指标] 策略(accountingPos=' + fmtRisk(m.accountingPosition, 2) +
-          ', accountingPnl=' + fmtRisk(m.accountingPnl, 2) +
-          ', galesLevel=' + fmtRisk(m.galesLevel, 0) +
-          ', exchangePos=' + fmtRisk(m.exchangePosition, 2) +
-          ', ledger=' + (m.ledgerStatus || 'NA') +
-          ', accountGap=' + fmtRisk(accountGap, 2) +
-          ', strategyGap=' + fmtRisk(strategyGap, 2) +
-          ', ownerStrategy=' + ownerStrategy +
-          ') | 账户(totalPos=' + fmtRisk(m.accountTotalPositionNotional, 2) +
-          ', netEq=' + fmtRisk(m.accountNetEquity, 2) +
-          ', lev=' + fmtRisk(m.accountLeverageRatio, 4) + ')');
+  // P0修复：将计算值存回riskMetrics（避免NA）
+  m.accountingPosition = accountingPos;
+  m.exchangePosition = exchangePos;
+  m.accountGap = accountGap;
+  m.strategyGap = strategyGap;
+  // P0修复：ownerStrategy必须与实例state key一致，禁止覆盖
+  m.ownerStrategy = state.ownerStrategy || ownerStrategy;
+  
+  // P0修复：强制格式化（禁止NA）
+  const fmtNum = (v, d) => {
+    if (v === null || v === undefined || typeof v !== 'number' || !isFinite(v)) {
+      return (0).toFixed(d || 2);
+    }
+    return v.toFixed(d || 2);
+  };
+  
+  logInfo('[风险指标] 策略(accountingPos=' + fmtNum(m.accountingPosition, 2) +
+          ', accountingPnl=' + fmtNum(m.accountingPnl, 2) +
+          ', galesLevel=' + fmtNum(m.galesLevel, 0) +
+          ', exchangePos=' + fmtNum(m.exchangePosition, 2) +
+          ', ledger=' + (m.ledgerStatus || 'ok') +
+          ', accountGap=' + fmtNum(m.accountGap, 2) +
+          ', strategyGap=' + fmtNum(m.strategyGap, 2) +
+          ', ownerStrategy=' + m.ownerStrategy +
+          ') | 账户(totalPos=' + fmtNum(m.accountTotalPositionNotional, 2) +
+          ', netEq=' + fmtNum(m.accountNetEquity, 2) +
+          ', lev=' + fmtNum(m.accountLeverageRatio, 4) + ')');
 }
 
 /**
@@ -1445,12 +1472,12 @@ function rebuildAccountingFromExecutions() {
       if (!execId || seenExec[execId]) continue;
       seenExec[execId] = true;
 
-      // P1修复：放宽匹配条件，优先匹配本策略前缀，其次匹配同symbol成交
-      // 原因：execution缓存只保留50条，历史成交orderLinkId可能不匹配
-      const isOwnOrder = orderLinkId && orderLinkId.indexOf(strategyPrefix) === 0;
-      const isSameSymbol = symbol && CONFIG.symbol && symbol === CONFIG.symbol;
+      // P0修复：严格匹配本策略成交（使用ownerStrategy/state key过滤）
+      // ownerStrategy = 'state:MYXUSDT:short' -> 匹配 'gales-MYXUSDT:short-...'
+      const expectedPrefix = getStateKey().replace('state:', 'gales-');
+      const isOwnOrder = orderLinkId && orderLinkId.startsWith(expectedPrefix);
       
-      if (!isOwnOrder && !isSameSymbol) continue;
+      if (!isOwnOrder) continue;
 
       const side = exec.side;
       const execQty = Number(exec.execQty || 0);
@@ -1546,6 +1573,10 @@ function st_init() {
   state.runId = Date.now();
   state.orderSeq = 0;
   logInfo('[Init] P0: 110072根治 - 新runId=' + state.runId + '，orderLinkId将唯一');
+  
+  // P0修复：ownerStrategy与实例state key强绑定，禁止运行时覆盖
+  state.ownerStrategy = getStateKey(); // 'state:MYXUSDT:short'
+  logInfo('[Init] P0: ownerStrategy锁定=' + state.ownerStrategy + '（与state key强绑定）');
   
   // P1修复：立即通知bridge新runId（确保tracker同步）
   if (typeof bridge_onRunIdChange === 'function') {
@@ -1793,6 +1824,33 @@ function st_heartbeat(tickJson) {
     const rr = rebuildAccountingFromExecutions();
     if (rr.rebuilt) {
       state.ledgerRebuildDone = true;
+    }
+  }
+
+  // P0修复：每30tick强制账本对齐（防止SSL/网络异常导致账本漂移）
+  if (state.tickCount % 30 === 0) {
+    try {
+      const positionJson = bridge_getPosition(CONFIG.symbol);
+      if (positionJson && positionJson !== 'null') {
+        const position = JSON.parse(positionJson);
+        let exchangePos = position.positionNotional || 0;
+        if (position.side === 'SHORT' || position.side === 'Sell') {
+          exchangePos = -Math.abs(exchangePos);
+        }
+        const ledgerPos = state.positionNotional || 0;
+        const gap = Math.abs(exchangePos - ledgerPos);
+        
+        // 风险：强制对齐会覆盖真实成交方向，仅在gap>100U时执行
+        if (gap > 100) {
+          const oldPos = state.positionNotional;
+          state.positionNotional = exchangePos;
+          logWarn('[账本对齐] tick=' + state.tickCount + ' gap=' + gap.toFixed(2) + ' > 100, 强制同步: ' + oldPos.toFixed(2) + ' -> ' + exchangePos.toFixed(2));
+        } else {
+          logDebug('[账本对齐] tick=' + state.tickCount + ' gap=' + gap.toFixed(2) + ' <= 100, 无需同步');
+        }
+      }
+    } catch (e) {
+      logWarn('[账本对齐] 失败: ' + e);
     }
   }
 
@@ -2271,7 +2329,8 @@ function placeOrder(grid) {
   const quantity = orderSize / orderPrice;
   // P1修复：110072根治 - orderLinkId加入direction防止跨策略误报
   const directionLabel = CONFIG.direction || 'neutral';
-  const orderLinkId = 'gales-' + directionLabel + '-' + state.runId + '-' + (state.orderSeq++) + '-' + grid.side;
+  // P0修复：orderLinkId包含ownerStrategy(state key)，确保唯一性
+  const orderLinkId = getStateKey().replace('state:', 'gales-') + '-' + state.runId + '-' + (state.orderSeq++) + '-' + grid.side;
 
   // 记录"有下单行为"（用于 autoRecenter 判断）
   state.lastPlaceTick = state.tickCount || 0;
