@@ -206,6 +206,8 @@ let circuitBreakerState = {
   // P1修复：熔断震荡
   recoveryTickCount: 0,  // 连续满足恢复条件的心跳数
   blockedSide: '',       // 熔断中禁止的开仓方向 ('Buy'/'Sell')
+  // P0新增：运行时熔断总开关 (默认true)
+  active: true,
 };
 
 // 加载状态
@@ -245,6 +247,16 @@ function loadState() {
         if (obj.initialOffset !== undefined) {
           positionDiffState.initialOffset = obj.initialOffset;
         }
+        
+        // P0新增：熔断状态兼容旧数据
+        if (obj.circuitBreakerState) {
+          // 兼容旧数据: 如active未定义, 默认为true
+          if (obj.circuitBreakerState.active === undefined) {
+            obj.circuitBreakerState.active = true;
+            logInfo('[熔断] 兼容旧数据: 设置active=true');
+          }
+          circuitBreakerState = obj.circuitBreakerState;
+        }
       }
     }
   } catch (e) {
@@ -262,6 +274,20 @@ function loadState() {
 // 保存状态
 function saveState() {
   bridge_stateSet(getStateKey(), JSON.stringify(state));
+}
+
+// ================================
+// P0新增: 熔断运行时控制
+// ================================
+
+function setCircuitBreakerActive(active) {
+  const oldValue = circuitBreakerState.active;
+  circuitBreakerState.active = !!active;
+  if (oldValue !== circuitBreakerState.active) {
+    logInfo('[熔断] 运行时开关变更: ' + oldValue + ' -> ' + circuitBreakerState.active);
+    saveState();
+  }
+  return circuitBreakerState.active;
 }
 
 // ================================
@@ -355,6 +381,12 @@ function cancelAllOrders() {
 // ================================
 
 function checkCircuitBreaker() {
+  // P0新增: 运行时总开关检查
+  if (!circuitBreakerState.active) {
+    logDebug('[熔断检查] 熔断检查已暂停(active=false)');
+    return false;
+  }
+  
   if (!CONFIG.circuitBreaker || !CONFIG.circuitBreaker.enabled) return false;
   
   const now = Date.now();
