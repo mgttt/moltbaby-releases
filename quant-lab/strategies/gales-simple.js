@@ -6,10 +6,14 @@
 
 // P2修复：持仓差值监控风控（必须在CONFIG之前定义）
 let positionDiffState = {
-  initialOffset: 0,      // 初始差值/历史遗留仓基准
-  lastDiff: 0,           // 上次差值（用于趋势检测）
-  diffIncreaseCount: 0,  // 差值连续增大计数
-  lastAlertAt: 0,        // 上次告警时间（防抖）
+  initialOffset: 0,           // 初始差值/历史遗留仓基准
+  lastDiff: 0,                // 上次差值（用于趋势检测）
+  diffIncreaseCount: 0,       // 差值连续增大计数
+  lastAlertAt: 0,             // 上次告警时间（防抖）
+  // [硬拦截最小集] B类: 状态不可置信硬拦截计数
+  ledgerGapOverCount: 0,      // 差值>2000U的连续心跳数
+  ledgerGapHardblocked: false, // B类硬拦截生效中
+  lastHardblockAlertAt: 0,    // 硬拦截告警防抖
 };
 
 // P0修复：execution去重集合（防止重复处理成交）
@@ -70,9 +74,9 @@ const CONFIG = {
   // 熔断机制 (P0 修复)
   circuitBreaker: {
     enabled: true,
-    maxDrawdown: 0.30,          // 最大回撤 30%
-    maxPositionRatio: 0.93,     // 仓位使用率 93%（避免频繁熔断）
-    maxPriceDrift: 0.50,        // 价格偏离中心 50%
+    maxDrawdown: 0.40,          // 硬拦截最后防线 40%（D类:账户生存）; 告警: 15%/25%
+    maxPositionRatio: 0.93,     // 保留备用（仓位熔断已注释）
+    maxPriceDrift: 0.50,        // 保留配置（价格偏离已降级为告警）
     cooldownAfterTrip: 600,     // 熔断后冷却 10 分钟
   },
 
@@ -217,6 +221,50 @@ let circuitBreakerState = {
   // P0新增：运行时熔断总开关 (默认true)
   active: true,
 };
+
+// [硬拦截最小集] A类: API关键失败计数器（认证/签名/系统级）
+// 可恢复错误（余额不足/时效过期）不计入此计数器
+let apiCriticalFailState = {
+  count: 0,           // 5分钟窗口内关键失败次数
+  windowStart: 0,     // 当前窗口开始时间
+  lastErrors: [],     // 最近3条错误消息（调试用）
+};
+
+// API错误分类：关键(critical)或可恢复(recoverable)
+// critical: 认证失败/签名错误/系统级 → 计入A类计数器
+// recoverable: 余额不足/时效过期 → 仅告警，不计入A类
+function classifyApiError(errMsg) {
+  const msg = String(errMsg || '').toLowerCase();
+  // 可恢复：余额不足(110007)、时效过期(110001)、订单不存在(110001)
+  if (msg.includes('ab not enough') || msg.includes('not enough') ||
+      msg.includes('too late to cancel') || msg.includes('order not exists') ||
+      msg.includes('110007') || msg.includes('110001')) {
+    return 'recoverable';
+  }
+  // 关键：认证/签名/系统级
+  if (msg.includes('invalid sign') || msg.includes('api key') || msg.includes('signature') ||
+      msg.includes('10001') || msg.includes('10003') || msg.includes('50000') ||
+      msg.includes('auth') || msg.includes('forbidden') || msg.includes('401') ||
+      msg.includes('403')) {
+    return 'critical';
+  }
+  // 未知错误：默认可恢复（避免误拦）
+  return 'unknown';
+}
+
+// 记录API关键失败
+function recordApiCriticalFail(errMsg) {
+  const now = Date.now();
+  const critWindow = 300000; // 5分钟
+  if (now - apiCriticalFailState.windowStart > critWindow) {
+    apiCriticalFailState.count = 0;
+    apiCriticalFailState.windowStart = now;
+    apiCriticalFailState.lastErrors = [];
+  }
+  apiCriticalFailState.count++;
+  apiCriticalFailState.lastErrors = [errMsg].concat(apiCriticalFailState.lastErrors).slice(0, 3);
+  logWarn('[A类计数] API关键失败 #' + apiCriticalFailState.count + '/3: ' + String(errMsg).slice(0, 100));
+}
 
 // 加载状态
 function loadState() {
@@ -464,22 +512,38 @@ function checkCircuitBreaker() {
   // highWaterMark 为 0 时跳过回撤检查（没有持仓历史，避免 0 除法误触发）
   if (circuitBreakerState.highWaterMark > 0) {
     const drawdown = (circuitBreakerState.highWaterMark - effectivePosition) / circuitBreakerState.highWaterMark;
+    const ddPct = (drawdown * 100).toFixed(2);
+    const ddBase = ' drawdown=' + ddPct + '% | hwm=' + circuitBreakerState.highWaterMark.toFixed(2) + ' | pos=' + effectivePosition.toFixed(2);
+
+    // [硬拦截最小集] D类:账户生存 — 40%最后防线（硬拦）
     if (drawdown > cb.maxDrawdown) {
       circuitBreakerState.tripped = true;
       circuitBreakerState.reason = '回撤熔断';
       circuitBreakerState.tripAt = now;
-      
-      // P1-debug: 打印详细熔断信息
-      logWarn('[熔断触发-回撤] drawdown=' + (drawdown * 100).toFixed(2) + '%' +
-              ' | highWaterMark=' + circuitBreakerState.highWaterMark.toFixed(2) +
-              ' | effectivePosition=' + effectivePosition.toFixed(2) +
-              ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
-              ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2));
-      
-      // 撤销所有订单
+      logWarn('[熔断触发-回撤]' + ddBase);
       cancelAllOrders();
-      
+      try { bridge_tgSend('9号', '[告急][D类硬拦截] 回撤' + ddPct + '%超40%最后防线，已停止开仓 (runId=' + state.runId + ')'); } catch(e){}
+      try { bridge_tgSend('1号', '[告急][D类硬拦截] 回撤' + ddPct + '%超40%最后防线 (runId=' + state.runId + ')'); } catch(e){}
       return true;
+    }
+
+    // 预警（不拦截）— 25%升级告警
+    if (drawdown > 0.25) {
+      const lastWarn25 = circuitBreakerState.lastDrawdownWarn25At || 0;
+      if (now - lastWarn25 > 300000) {  // 5分钟防抖
+        circuitBreakerState.lastDrawdownWarn25At = now;
+        logWarn('[告警-回撤25%]' + ddBase + ' (不拦截，继续运行)');
+        try { bridge_tgSend('9号', '[告警][回撤>25%] ' + ddPct + '%，注意监控 (runId=' + state.runId + ')'); } catch(e){}
+        try { bridge_tgSend('1号', '[告警][回撤>25%] ' + ddPct + '%，注意监控 (runId=' + state.runId + ')'); } catch(e){}
+      }
+    } else if (drawdown > 0.15) {
+      // 预警（不拦截）— 15%初级告警
+      const lastWarn15 = circuitBreakerState.lastDrawdownWarn15At || 0;
+      if (now - lastWarn15 > 600000) {  // 10分钟防抖
+        circuitBreakerState.lastDrawdownWarn15At = now;
+        logWarn('[告警-回撤15%]' + ddBase + ' (不拦截，继续运行)');
+        try { bridge_tgSend('9号', '[告警][回撤>15%] ' + ddPct + '%，留意回撤 (runId=' + state.runId + ')'); } catch(e){}
+      }
     }
   }
   
@@ -510,25 +574,69 @@ function checkCircuitBreaker() {
   //   return false;
   // }
   
-  // 3. 价格偏离熔断
+  // 3. 价格偏离 — [硬拦截最小集] 降级为告警（不拦截）
+  // 原：drift>50%硬拦截；现：仅告警，允许策略继续运行
   if (state.centerPrice > 0) {
     const drift = Math.abs(state.lastPrice - state.centerPrice) / state.centerPrice;
-    if (drift > cb.maxPriceDrift) {
-      circuitBreakerState.tripped = true;
-      circuitBreakerState.reason = '价格偏离熔断';
-      circuitBreakerState.tripAt = now;
-      
-      // P1-debug: 打印详细价格偏离熔断信息
-      logWarn('[熔断触发-价格偏离] drift=' + (drift * 100).toFixed(2) + '%' +
-              ' | centerPrice=' + state.centerPrice.toFixed(4) +
-              ' | lastPrice=' + state.lastPrice.toFixed(4) +
-              ' | effectivePosition=' + effectivePosition.toFixed(2));
-      
-      // 不撤单（价格可能快速恢复），但停止新下单
-      return true;
+    const driftPct = (drift * 100).toFixed(2);
+    if (drift > 0.30) {  // 30%预警（原50%硬拦截 → 30%告警，不拦）
+      const lastDriftWarn = circuitBreakerState.lastDriftWarnAt || 0;
+      if (now - lastDriftWarn > 600000) {  // 10分钟防抖
+        circuitBreakerState.lastDriftWarnAt = now;
+        logWarn('[告警-价格偏离' + driftPct + '%] center=' + state.centerPrice.toFixed(4) + ' last=' + state.lastPrice.toFixed(4) + ' (不拦截，继续运行)');
+        try { bridge_tgSend('9号', '[告警][价格偏离>' + (drift>0.50?'50':'30') + '%] drift=' + driftPct + '% (runId=' + state.runId + ')'); } catch(e){}
+      }
     }
   }
-  
+
+  // [硬拦截最小集] B类: 账本↔交易所持仓差值 > 2000U 持续3心跳 → 状态不可置信硬拦截
+  // 注意: positionNotional 是会计账本累积值（历史净头寸），不是当前持仓敞口
+  // 只有当交易所也显示 >100U 仓位时，才有意义比较（防止会计账本 vs 0 的误触发）
+  const ledgerPos = Math.abs(state.positionNotional || 0);
+  const exchangePos = Math.abs(state.exchangePosition || 0);
+  const adjustedExch = exchangePos - Math.abs(positionDiffState.initialOffset || 0);
+  const ledgerGap = Math.abs(adjustedExch - ledgerPos);
+
+  // exchangePos > 100: 交易所确认有实际持仓时才触发（避免 accountingLedger vs 0 的误触发）
+  if (exchangePos > 100 && ledgerPos > 1 && ledgerGap > 2000) {  // B类双侧非零才检查
+    positionDiffState.ledgerGapOverCount = (positionDiffState.ledgerGapOverCount || 0) + 1;
+    if (positionDiffState.ledgerGapOverCount >= 3) {
+      // 3个心跳持续超限 → 硬拦截
+      if (!positionDiffState.ledgerGapHardblocked) {
+        positionDiffState.ledgerGapHardblocked = true;
+        logWarn('[硬拦截-B类] 账本差值=' + ledgerGap.toFixed(0) + 'U > 2000U，持续3心跳，停止下单');
+        try { bridge_tgSend('9号', '[告急][B类硬拦截] 账本差值' + ledgerGap.toFixed(0) + 'U超限，状态不可置信，停止下单 (runId=' + state.runId + ')'); } catch(e){}
+        try { bridge_tgSend('1号', '[告急][B类硬拦截] 账本差值' + ledgerGap.toFixed(0) + 'U超限 (runId=' + state.runId + ')'); } catch(e){}
+      }
+      return true;
+    }
+  } else {
+    // 差值正常，重置计数并解除硬拦截
+    if (positionDiffState.ledgerGapOverCount > 0) {
+      if (positionDiffState.ledgerGapHardblocked) {
+        logInfo('[B类恢复] 账本差值回落至' + ledgerGap.toFixed(0) + 'U，恢复交易');
+        positionDiffState.ledgerGapHardblocked = false;
+      }
+      positionDiffState.ledgerGapOverCount = 0;
+    }
+  }
+
+  // 4. A类: API关键失败计数器检查
+  const critWindow = 300000; // 5分钟窗口
+  if (apiCriticalFailState.count >= 3) {
+    const elapsed = now - apiCriticalFailState.windowStart;
+    if (elapsed < critWindow) {
+      logWarn('[硬拦截-A类] API关键失败' + apiCriticalFailState.count + '次/' + (elapsed/1000).toFixed(0) + 's，停止下单');
+      try { bridge_tgSend('9号', '[告急][A类硬拦截] API关键失败' + apiCriticalFailState.count + '次，停止下单，需人工干预 (runId=' + state.runId + ')'); } catch(e){}
+      try { bridge_tgSend('1号', '[告急][A类硬拦截] API关键失败' + apiCriticalFailState.count + '次 (runId=' + state.runId + ')'); } catch(e){}
+      return true;
+    } else {
+      // 窗口过期，重置
+      apiCriticalFailState.count = 0;
+      apiCriticalFailState.windowStart = now;
+    }
+  }
+
   return false;
 }
 
@@ -1534,7 +1642,20 @@ function rebuildAccountingFromExecutions() {
  */
 function st_init() {
   logDebug('[DEBUG] st_init called');
-  
+
+  // [硬拦截最小集] 变更6: C类启动校验 — 关键参数完整性检查
+  // CONFIG缺失或无效 → 拒绝启动（throw阻止策略运行）
+  if (!CONFIG.symbol || typeof CONFIG.symbol !== 'string' || CONFIG.symbol.length === 0) {
+    throw new Error('[C类启动校验] CONFIG.symbol 缺失或无效，拒绝启动');
+  }
+  if (!CONFIG.direction || (CONFIG.direction !== 'neutral' && CONFIG.direction !== 'short' && CONFIG.direction !== 'long')) {
+    throw new Error('[C类启动校验] CONFIG.direction 缺失或无效(当前:' + CONFIG.direction + ')，拒绝启动');
+  }
+  if (!CONFIG.maxPosition || CONFIG.maxPosition <= 0) {
+    throw new Error('[C类启动校验] CONFIG.maxPosition 缺失或为0，拒绝启动');
+  }
+  logInfo('[C类启动校验] 通过: symbol=' + CONFIG.symbol + ' direction=' + CONFIG.direction + ' maxPosition=' + CONFIG.maxPosition);
+
   // P0修复：锁定CONFIG关键字段（初始化后不可变）
   LOCKED_SYMBOL = CONFIG.symbol;
   LOCKED_DIRECTION = CONFIG.direction;
@@ -2457,7 +2578,19 @@ function placeOrder(grid) {
     logInfo('✅ 挂单成功 orderId=' + grid.orderId);
     saveState();
   } catch (e) {
-    logWarn('❌ 挂单失败: ' + e);
+    // [硬拦截最小集] 变更4: 错误分类（A类关键 vs 可恢复）
+    const errClass = classifyApiError(e);
+    if (errClass === 'critical') {
+      // 认证/签名/系统级 → 计入A类计数器（checkCircuitBreaker将触发硬拦截）
+      logWarn('❌ 挂单失败[A类-关键]: ' + e);
+      recordApiCriticalFail(String(e));
+    } else if (errClass === 'recoverable') {
+      // 余额不足/时效过期 → 仅告警，等下个tick自动重试
+      logWarn('❌ 挂单失败[可恢复]: ' + e);
+    } else {
+      // 未知 → 记录，不计入A类（避免误拦）
+      logWarn('❌ 挂单失败[未知]: ' + e);
+    }
     grid.state = 'IDLE';
   }
 }
