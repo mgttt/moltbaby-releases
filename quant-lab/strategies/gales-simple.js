@@ -1484,7 +1484,7 @@ function rebuildAccountingFromExecutions() {
       seenExec[execId] = true;
 
       // P0修复：严格匹配本策略成交（使用ownerStrategy/state key过滤）
-      // orderLinkId格式: 'gales-MYXUSDT-short-SESSION_ID-runId-seq-side'
+      // orderLinkId格式: 'gales-MYXUSDT-short-{runId_last8}-seq-side' (≤45 chars)
       // getStateKey() = 'state:MYXUSDT:short' -> 需要匹配 'gales-MYXUSDT-short-'
       const expectedPrefix = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-';
       const isOwnOrder = orderLinkId && orderLinkId.startsWith(expectedPrefix);
@@ -2352,7 +2352,11 @@ function placeOrder(grid) {
   // P1修复：110072根治 - orderLinkId加入direction防止跨策略误报
   const directionLabel = CONFIG.direction || 'neutral';
   // P0修复：orderLinkId使用锁定后的字段，确保唯一性
-  const orderLinkId = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-' + SESSION_ID + '-' + state.runId + '-' + (state.orderSeq++) + '-' + grid.side;
+  // fix: Bybit orderLinkId ≤ 45 chars — 去掉 SESSION_ID，runId 取后8位
+  // 格式: gales-{symbol}-{direction}-{runId_last8}-{seq}-{side}
+  // 最长: gales-MYXUSDT-neutral-{8}-{3}-Sell = 37 chars (≤45)
+  const _runSuffix = String(state.runId).slice(-8);
+  const orderLinkId = ('gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-' + _runSuffix + '-' + (state.orderSeq++) + '-' + grid.side).slice(0, 45);
 
   // 记录"有下单行为"（用于 autoRecenter 判断）
   state.lastPlaceTick = state.tickCount || 0;
