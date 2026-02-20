@@ -62,6 +62,140 @@ Phase 1 (当前-Q2 2026)    Phase 2 (Q3 2026)        Phase 3 (Q4 2026)       Pha
 | WebAssembly | ⏳ 待启动 | 007 | 浏览器运行支持 |
 | 边缘云同步 | ⏳ 待规划 | 待定 | 增量同步协议 |
 | 嵌入式 AI 接口 | ⏳ 待规划 | 待定 | ONNX Runtime 集成 |
+| **Memory Vector SQL 层** | ⏳ 待规划 | 006 | 时序感知向量存取 SQL API |
+
+---
+
+### 🧠 Memory Vector SQL 层设计（Phase 2 专项）
+
+> **背景**：BotCorp 记忆体系进化规划（2026-02-20）。对标 sqlite-vec + DuckDB VSS，利用 ndtsdb 时序原生特性做差异化设计。
+
+#### 核心差异化：时序感知向量检索
+
+sqlite-vec 和 DuckDB VSS 都是通用向量数据库，不内置时间维度。ndtsdb 天然时序存储，可以在向量相似度之上叠加**时间衰减**，实现"越旧越淡化"的记忆检索——这是任何通用向量 DB 做不到的。
+
+#### SQL API 设计目标
+
+```sql
+-- 1. 建表：向量作为一等公民列类型
+CREATE MEMORY_VECTOR TABLE agent_memory (
+  agent_id   TEXT,
+  chunk_id   TEXT,
+  ts         TIMESTAMP,         -- ndtsdb 一等公民，自动分区键
+  type       TEXT,              -- semantic / episodic / procedural
+  validity   TEXT,              -- permanent / temporal / expired
+  certainty  TEXT,              -- high / medium / low
+  content    TEXT,
+  vec_dense  FLOAT[384],        -- BGE-M3 稠密向量（int8 量化存储）
+  vec_sparse SPARSE_FLOAT,      -- BGE-M3 稀疏向量（只存非零项）
+  PRIMARY KEY (agent_id, chunk_id)
+);
+
+-- 2. HNSW 索引（对标 DuckDB VSS usearch 库）
+CREATE HNSW INDEX ON agent_memory (vec_dense)
+WITH (metric = 'cosine', quant = 'sq8');   -- int8 量化，4x 压缩
+
+-- 3. 核心查询：向量相似度 × 时间衰减（ndtsdb 独有）
+SELECT
+  chunk_id,
+  content,
+  cosine_sim(vec_dense, $query_vec)
+    * time_decay(ts, half_life = '7d')      -- 7天半衰期
+    AS score
+FROM agent_memory
+WHERE agent_id = $agent
+  AND validity != 'expired'
+  AND ts >= now() - INTERVAL '90d'          -- 时间范围裁剪（索引加速）
+ORDER BY score DESC
+LIMIT 10;
+
+-- 4. 稀疏向量点积（SPLADE 稀疏检索）
+SELECT chunk_id, sparse_dot(vec_sparse, $query_sparse) AS score
+FROM agent_memory
+WHERE agent_id = $agent
+ORDER BY score DESC LIMIT 20;
+
+-- 5. 三路融合（RRF：Reciprocal Rank Fusion）
+WITH
+  dense_hits AS (
+    SELECT chunk_id, ROW_NUMBER() OVER (ORDER BY cosine_sim(vec_dense, $q) DESC) AS rk
+    FROM agent_memory WHERE agent_id = $agent LIMIT 20
+  ),
+  sparse_hits AS (
+    SELECT chunk_id, ROW_NUMBER() OVER (ORDER BY sparse_dot(vec_sparse, $qs) DESC) AS rk
+    FROM agent_memory WHERE agent_id = $agent LIMIT 20
+  ),
+  bm25_hits AS (
+    SELECT chunk_id, ROW_NUMBER() OVER (ORDER BY fts_bm25(content, $query) DESC) AS rk
+    FROM agent_memory WHERE agent_id = $agent LIMIT 20
+  )
+SELECT chunk_id,
+  1.0/(60+d.rk) + 1.0/(60+s.rk) + 1.0/(60+b.rk) AS rrf_score
+FROM dense_hits d
+  FULL JOIN sparse_hits s USING (chunk_id)
+  FULL JOIN bm25_hits   b USING (chunk_id)
+ORDER BY rrf_score DESC LIMIT 10;
+
+-- 6. 归档：validity=expired → 清除向量，保留元数据
+UPDATE agent_memory
+SET vec_dense = NULL, vec_sparse = NULL
+WHERE validity = 'expired';
+```
+
+#### 与现有方案对比
+
+| 特性 | sqlite-vec | DuckDB VSS | **ndtsdb（目标）** |
+|------|-----------|------------|----------------|
+| 稠密向量 HNSW | ❌（暴力扫）| ✅ usearch | ✅ usearch |
+| 稀疏向量 | ⚠️ 实验性 | ❌ | ✅ SPARSE_FLOAT 原生 |
+| int8 量化 | ❌ | ✅ | ✅ |
+| FTS BM25 | ❌ | ✅ FTS 扩展 | ✅ 内置 |
+| **time_decay()** | ❌ | ❌ | ✅ **独有** |
+| **时间范围裁剪** | ❌ | 有限 | ✅ 时序原生 |
+| **冷热分层归档** | ❌ | ❌ | ✅ validity 驱动 |
+| 跨 agent JOIN | ❌ | ✅ | ✅ |
+| 零依赖部署 | ✅ | ❌（100MB）| ✅ |
+
+#### 内置函数目标清单
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `cosine_sim` | `(FLOAT[N], FLOAT[N]) → FLOAT` | 余弦相似度（HNSW 加速） |
+| `inner_product` | `(FLOAT[N], FLOAT[N]) → FLOAT` | 内积（SPLADE 稀疏检索） |
+| `l2_distance` | `(FLOAT[N], FLOAT[N]) → FLOAT` | 欧氏距离 |
+| `sparse_dot` | `(SPARSE_FLOAT, SPARSE_FLOAT) → FLOAT` | 稀疏向量点积 |
+| `time_decay` | `(TIMESTAMP, half_life TEXT) → FLOAT` | 指数衰减 e^(-λt) |
+| `fts_bm25` | `(TEXT, TEXT) → FLOAT` | 全文 BM25 分数 |
+| `vec_quantize` | `(FLOAT[N], 'sq8'/'binary') → BLOB` | 向量量化存储 |
+
+#### 实现路径建议
+
+```
+Phase 2a（POC）：纯 SQL 层扩展
+  → 新增 FLOAT[N] / SPARSE_FLOAT 列类型
+  → time_decay() / cosine_sim() 作为 SQL 函数
+  → 暴力扫描（无 HNSW），验证 API 设计
+
+Phase 2b（性能）：HNSW 索引
+  → 集成 usearch C 库（同 DuckDB VSS）
+  → CREATE HNSW INDEX ... WITH (metric, quant)
+  → 查询优化器识别 KNN pattern，改写为索引扫描
+
+Phase 2c（稀疏）：SPARSE_FLOAT 原生支持
+  → (term_id, score) 对存储，只存非零项
+  → sparse_dot() 实现稀疏向量点积
+  → BGE-M3 稀疏输出直接入库
+
+Phase 3（统一）：记忆体系迁移
+  → 从 OpenClaw sqlite-vec → ndtsdb Memory Vector
+  → 统一时序 + 向量存储层
+```
+
+#### 外部参考
+- [sqlite-vec](https://github.com/asg017/sqlite-vec)：vec0 虚拟表设计，KNN 语法参考
+- [DuckDB VSS](https://duckdb.org/docs/stable/core_extensions/vss)：HNSW + usearch，int8 量化，metric 选项
+- [BGE-M3](https://huggingface.co/BAAI/bge-m3)：目标 embedding 模型，稠密+稀疏+多向量一体
+- [SPLADE](https://github.com/naver/splade)：稀疏向量检索参考实现
 
 **验收标准**:
 - 二进制大小: ≤ 5MB (Linux x64)
