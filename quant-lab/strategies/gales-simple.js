@@ -35,7 +35,7 @@ const CONFIG = {
   orderSizeUp: 50,             // 升方向（Sell）订单大小，如 50
   orderSizeDown: 100,          // 跌方向（Buy）订单大小，如 100
 
-  maxPosition: 7874,  // 2026-02-15: 总权益10%（78739×0.1），避免触顶，熔断只告警不撤单
+  maxPosition: 1500,  // 2026-02-15: 总权益10%（78739×0.1），避免触顶，熔断只告警不撤单
 
   magnetDistance: 0.015,     // 1.5% (P3优化: 减少空窗)
   cancelDistance: 0.01,      // 1%
