@@ -535,8 +535,8 @@ function checkCircuitBreaker() {
       return true;
     }
 
-    // 预警（不拦截）— 25%升级告警
-    if (drawdown > 0.25) {
+    // [临时禁用] 预警（不拦截）— 25%升级告警 → 99%永不触发
+    if (drawdown > 0.99) {
       const lastWarn25 = circuitBreakerState.lastDrawdownWarn25At || 0;
       if (now - lastWarn25 > 300000) {  // 5分钟防抖
         circuitBreakerState.lastDrawdownWarn25At = now;
@@ -544,7 +544,7 @@ function checkCircuitBreaker() {
         try { bridge_tgSend('9号', '[告警][回撤>25%] ' + ddPct + '%，注意监控 (runId=' + state.runId + ')'); } catch(e){}
         try { bridge_tgSend('1号', '[告警][回撤>25%] ' + ddPct + '%，注意监控 (runId=' + state.runId + ')'); } catch(e){}
       }
-    } else if (drawdown > 0.15) {
+    } else if (drawdown > 0.99) {  // [临时禁用] 15%初级告警 → 99%永不触发
       // 预警（不拦截）— 15%初级告警
       const lastWarn15 = circuitBreakerState.lastDrawdownWarn15At || 0;
       if (now - lastWarn15 > 600000) {  // 10分钟防抖
