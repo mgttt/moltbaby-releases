@@ -168,6 +168,9 @@ async function main() {
         demo: true,
         proxy: 'http://127.0.0.1:8890',
         category: 'linear',
+        // Phase 1: ndtsdb状态持久化配置
+        stateDir: process.env.HOME + '/.quant-lib',
+        runId: Date.now().toString(),
       });
 
       console.log('[Exchange] Bybit Provider 初始化完成 (Demo Trading)\n');
@@ -184,6 +187,9 @@ async function main() {
         testnet: accountConfig.testnet || false,
         proxy: accountConfig.proxy || 'http://127.0.0.1:8890',
         category: 'linear',
+        // Phase 1: ndtsdb状态持久化配置
+        stateDir: process.env.HOME + '/.quant-lib',
+        runId: Date.now().toString(),
       });
 
       console.log(`[Exchange] Bybit Provider 初始化完成 (${accountId})\n`);

@@ -12,6 +12,9 @@ import type { Kline } from 'quant-lib';
 import type { TradingProvider } from '../engine/live';
 import { createHmac } from 'crypto';
 import { spawnSync } from 'node:child_process';
+// Phase 1: ndtsdb状态持久化
+import { StateStore, OrderState, PositionState } from '../storage/StateStore.js';
+import { join } from 'path';
 
 /**
  * Bybit 配置
@@ -23,6 +26,9 @@ export interface BybitProviderConfig {
   demo?: boolean;  // Demo Trading 模式 (api-demo.bybit.com)
   proxy?: string;
   category?: 'spot' | 'linear' | 'inverse';  // 产品类型
+  // Phase 1: ndtsdb状态持久化配置
+  stateDir?: string;
+  runId?: string;
 }
 
 /**
@@ -70,6 +76,10 @@ export class BybitProvider implements TradingProvider {
   private lastCurlErrorTime = 0;
   private consecutiveCurlErrors = 0;
   
+  // Phase 1: ndtsdb状态持久化
+  private stateStore?: StateStore;
+  private currentRunId?: string;
+  
   constructor(config: BybitProviderConfig) {
     this.config = config;
     this.category = config.category || 'linear';
@@ -91,6 +101,17 @@ export class BybitProvider implements TradingProvider {
     if (config.proxy) {
       console.log(`[BybitProvider] 使用代理: ${config.proxy} (curl)`);
       console.log(`[BybitProvider] 使用代理: ${config.proxy}`);
+    }
+    
+    // Phase 1: 初始化ndtsdb状态持久化
+    if (config.stateDir && config.runId) {
+      this.stateStore = new StateStore({
+        baseDir: join(config.stateDir, 'ndtsdb'),
+      });
+      this.currentRunId = config.runId;
+      console.log(`[BybitProvider] ndtsdb状态持久化已启用: runId=${config.runId}`);
+    } else {
+      console.log('[BybitProvider] ndtsdb状态持久化未启用(缺少stateDir或runId)');
     }
   }
   
@@ -380,8 +401,8 @@ export class BybitProvider implements TradingProvider {
     
     console.log(`[BybitProvider] 下单成功: orderId=${result.result.orderId}`);
     
-    // 兼容 order/create 精简返回：补充调用时的参数
-    return this.parseOrder({
+    // Phase 1: 记录订单到ndtsdb
+    const order = this.parseOrder({
       ...result.result,
       symbol: this.toExchangeSymbol(symbol),
       side: 'Buy',
@@ -389,6 +410,9 @@ export class BybitProvider implements TradingProvider {
       qty: quantity.toString(),
       price: price?.toString() || '0',
     });
+    await this.recordOrder(order, 'Buy', price || 0, quantity);
+    
+    return order;
   }
   
   /**
@@ -452,8 +476,8 @@ export class BybitProvider implements TradingProvider {
     
     console.log(`[BybitProvider] 下单成功: orderId=${result.result.orderId}`);
     
-    // 兼容 order/create 精简返回：补充调用时的参数
-    return this.parseOrder({
+    // Phase 1: 记录订单到ndtsdb
+    const order = this.parseOrder({
       ...result.result,
       symbol: this.toExchangeSymbol(symbol),
       side: 'Sell',
@@ -461,6 +485,9 @@ export class BybitProvider implements TradingProvider {
       qty: quantity.toString(),
       price: price?.toString() || '0',
     });
+    await this.recordOrder(order, 'Sell', price || 0, quantity);
+    
+    return order;
   }
   
   /**
@@ -1016,6 +1043,44 @@ export class BybitProvider implements TradingProvider {
         return 'REJECTED';
       default:
         return 'PENDING';
+    }
+  }
+
+  // Phase 1: 记录订单到ndtsdb
+  private async recordOrder(
+    order: Order,
+    side: 'Buy' | 'Sell',
+    price: number,
+    qty: number
+  ): Promise<void> {
+    if (!this.stateStore || !this.currentRunId) {
+      return; // ndtsdb未启用
+    }
+
+    try {
+      const now = BigInt(Date.now()) * 1000000n; // nanos
+      const orderState: OrderState = {
+        orderKey: `order:${this.currentRunId}:${order.orderLinkId || order.orderId}`,
+        runId: this.currentRunId,
+        orderLinkId: order.orderLinkId || order.orderId,
+        symbol: order.symbol,
+        side: side,
+        qty: qty,
+        price: price,
+        status: order.status,
+        filledQty: order.filledQty || 0,
+        avgPrice: order.avgPrice || price,
+        pnl: 0, // 初始为0，成交后更新
+        paramsHash: 'default', // TODO: 从策略获取当前参数hash
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await this.stateStore.upsertOrder(orderState);
+      console.log(`[BybitProvider] ndtsdb记录订单: ${orderState.orderKey}`);
+    } catch (e) {
+      // ndtsdb写入失败不影响主流程，仅记录日志
+      console.error(`[BybitProvider] ndtsdb记录订单失败: ${e}`);
     }
   }
   
