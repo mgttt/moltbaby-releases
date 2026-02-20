@@ -97,6 +97,8 @@ export interface StrategyContext {
   // 数据查询
   getLastBar(symbol: string): Kline | null;
   getBars(symbol: string, limit: number): Kline[];
+  /** 历史K线（REST回源，供缓存层使用） */
+  getKlines?(symbol: string, interval: string, limit: number): Promise<Kline[]>;
   
   // 指标访问（如果使用 StreamingIndicators）
   getIndicator?(symbol: string, name: string): number | undefined;

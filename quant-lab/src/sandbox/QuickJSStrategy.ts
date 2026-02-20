@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, watchFile, unwatchFile, statSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
+import { BarCacheLayer } from '../cache/BarCacheLayer.ts';
 import { getQuickJS, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
 
 // 兼容获取home目录
@@ -79,6 +80,11 @@ export class QuickJSStrategy {
   
   // P2修复：缓存就绪门闸（bot-009建议）
   private cacheReady = false;
+
+  // bar 缓存层（历史K线 REST→ndtsdb，不影响WS tick路径）
+  private barCache = new BarCacheLayer({
+    logger: (msg) => console.log(`[BarCache] ${msg}`),
+  });
   
   // 待处理订单队列（异步执行）
   private pendingOrders: Array<{
@@ -1065,6 +1071,39 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_getPrice', bridge_getPrice);
     bridge_getPrice.dispose();
+
+    // bridge_getKlines - 获取历史K线（缓存层 → REST 回源）
+    // 用于策略指标warmup；不影响WS tick实时路径
+    // DISABLE_BAR_CACHE=1 → 直接REST bypass
+    const bridge_getKlines = this.ctx.newFunction('bridge_getKlines', (symbolHandle, intervalHandle, limitHandle) => {
+      const symbol   = this.ctx!.getString(symbolHandle);
+      const interval = this.ctx!.getString(intervalHandle);
+      const limit    = this.ctx!.getNumber(limitHandle) || 100;
+
+      // 返回 Promise handle（QuickJS async bridge）
+      const promiseHandle = this.ctx!.newPromise();
+
+      // 异步执行：不阻塞事件循环
+      this.barCache.getBars(symbol, interval, limit, async () => {
+        if (typeof this.strategyCtx?.getKlines === 'function') {
+          return await this.strategyCtx.getKlines(symbol, interval, limit);
+        }
+        throw new Error('bridge_getKlines: strategyCtx.getKlines not available (upgrade BybitStrategyContext)');
+      }).then(({ bars, fromCache }) => {
+        const result = JSON.stringify({ bars, fromCache, stats: this.barCache.getStats() });
+        promiseHandle.resolve(this.ctx!.newString(result));
+        this.ctx!.runtime.executePendingJobs();
+      }).catch((e: Error) => {
+        promiseHandle.reject(this.ctx!.newString(String(e)));
+        this.ctx!.runtime.executePendingJobs();
+      });
+
+      const h = promiseHandle.handle;
+      promiseHandle.dispose();
+      return h;
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getKlines', bridge_getKlines);
+    bridge_getKlines.dispose();
 
     // bridge_getAccount - 获取账户信息
     const bridge_getAccount = this.ctx.newFunction('bridge_getAccount', () => {

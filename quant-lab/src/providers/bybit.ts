@@ -606,6 +606,37 @@ export class BybitProvider implements TradingProvider {
   }
 
   /**
+   * REST 获取历史K线（用于指标warmup + 缓存层回源）
+   * @param symbol  交易对（e.g. MYXUSDT）
+   * @param interval Kline周期（e.g. '1m','5m','1h'）
+   * @param limit   返回条数（max 200）
+   * @param endTime 结束时间（ms，默认当前）
+   */
+  async getKlines(symbol: string, interval: string, limit = 100, endTime?: number): Promise<Kline[]> {
+    const params: Record<string, any> = {
+      category: this.category,
+      symbol,
+      interval: this.toBybitInterval(interval),
+      limit: Math.min(limit, 200),
+    };
+    if (endTime) params.end = String(endTime);
+
+    const result = await this.request('GET', '/v5/market/kline', params);
+    const list: string[][] = result.result?.list ?? [];
+    // Bybit返回: [startTime(ms), open, high, low, close, volume, turnover]，按时间倒序
+    return list
+      .map(k => ({
+        timestamp: Math.floor(parseInt(k[0]) / 1000),  // 转秒
+        open: parseFloat(k[1]),
+        high: parseFloat(k[2]),
+        low: parseFloat(k[3]),
+        close: parseFloat(k[4]),
+        volume: parseFloat(k[5]),
+      }))
+      .sort((a, b) => a.timestamp - b.timestamp);  // 升序
+  }
+
+  /**
    * P0修复：查询订单（按orderLinkId）
    * 用于110072幂等成功处理
    */

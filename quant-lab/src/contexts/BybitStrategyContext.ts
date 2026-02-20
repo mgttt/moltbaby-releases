@@ -156,7 +156,19 @@ export class BybitStrategyContext implements StrategyContext {
   getBars(symbol: string, limit: number): Kline[] {
     return this.barHistory.slice(-limit);
   }
-  
+
+  /**
+   * 历史K线（REST回源，供BarCacheLayer使用）
+   * 走 quant-lab BybitProvider.getKlines()
+   */
+  async getKlines(symbol: string, interval: string, limit: number): Promise<Kline[]> {
+    const p = this.provider as any;
+    if (typeof p?.getKlines === 'function') {
+      return await p.getKlines(symbol, interval, limit);
+    }
+    throw new Error('BybitStrategyContext.getKlines: provider.getKlines not available');
+  }
+
   /**
    * 更新 K线缓存（由外部调用）
    */

@@ -1,0 +1,2 @@
+# BarCacheLayer 源码例外（全局gitignore排除了cache/）
+!cache/
