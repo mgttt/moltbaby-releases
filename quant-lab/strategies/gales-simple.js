@@ -74,7 +74,7 @@ const CONFIG = {
   // 熔断机制 (P0 修复)
   circuitBreaker: {
     enabled: true,
-    maxDrawdown: 0.40,          // 硬拦截最后防线 40%（D类:账户生存）; 告警: 15%/25%
+    maxDrawdown: 0.99,          // [临时禁用D类] 99%永不触发; 原40%因中性网格仓位回撤≠资金回撤,待重设计
     maxPositionRatio: 0.93,     // 保留备用（仓位熔断已注释）
     maxPriceDrift: 0.50,        // 保留配置（价格偏离已降级为告警）
     cooldownAfterTrip: 600,     // 熔断后冷却 10 分钟
@@ -312,6 +312,14 @@ function loadState() {
             logInfo('[熔断] 兼容旧数据: 设置active=true');
           }
           circuitBreakerState = obj.circuitBreakerState;
+          // [hotfix] 重启时重置 highWaterMark=0
+          // 原因: hwm 是基于历史会计账本累积值(positionNotional)，跨进程持久化后
+          // 与真实仓位口径不匹配，导致重启入金时误触发 D 类回撤拦截
+          // 修复: 每次重启强制从 0 重建，由当前真实 effectivePosition 重新确定峰值
+          circuitBreakerState.highWaterMark = 0;
+          circuitBreakerState.tripped = false;          // 重启后解除熔断
+          circuitBreakerState.recoveryTickCount = 0;
+          logInfo('[熔断] 重启重置: highWaterMark=0, tripped=false (防历史账本污染)');
         }
       }
     }
