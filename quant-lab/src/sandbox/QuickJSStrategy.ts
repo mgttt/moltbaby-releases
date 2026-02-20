@@ -1239,9 +1239,15 @@ export class QuickJSStrategy {
     bridge_cancelOrder.dispose();
 
     // P2修复：bridge_tgSend - 发送Telegram通知
+    // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，避免干扰；需显式开启 STRATEGY_TG_ENABLED=1
     const bridge_tgSend = this.ctx.newFunction('bridge_tgSend', (toHandle, messageHandle) => {
       const to = this.ctx!.getString(toHandle);
       const message = this.ctx!.getString(messageHandle);
+
+      if (process.env.STRATEGY_TG_ENABLED !== '1') {
+        console.warn(`[QuickJSStrategy] bridge_tgSend blocked by policy (set STRATEGY_TG_ENABLED=1 to enable)`);
+        return this.ctx!.newString('blocked');
+      }
       
       try {
         // 调用tg命令发送消息

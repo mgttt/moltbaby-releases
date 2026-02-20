@@ -125,6 +125,12 @@ export class AlertManager {
       return;
     }
 
+    // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，需显式开启 STRATEGY_TG_ENABLED=1
+    if (process.env.STRATEGY_TG_ENABLED !== '1') {
+      console.warn('[AlertManager] Telegram告警已被策略系统禁用（STRATEGY_TG_ENABLED!=1）');
+      return;
+    }
+
     try {
       const target = this.config.tgTarget || 'bot-000';
       
