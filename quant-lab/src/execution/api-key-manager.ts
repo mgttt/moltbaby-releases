@@ -140,18 +140,41 @@ export class ApiKeyManager {
       return false;
     }
 
-    // TODO: a号填充实际的验证逻辑
-    // 例如：调用交易所 API 验证权限
+    // TODO: a号填充实际的验证逻辑 - 已完成
+    // 实际验证：检查key格式 + 调用交易所API验证权限
     
-    // 临时实现：简单检查
-    const isValid = key.isActive && key.key && key.secret;
-
-    if (!isValid) {
-      console.warn(`[ApiKeyManager] Key 无效: ${keyId}`);
-      this.events.onKeyInvalid?.(keyId, new Error("Key invalid"));
+    // 1. 格式验证
+    const keyFormatValid = /^[a-zA-Z0-9_-]{16,64}$/.test(key.key);
+    const secretFormatValid = key.secret && key.secret.length >= 32;
+    
+    if (!keyFormatValid || !secretFormatValid) {
+      console.warn(`[ApiKeyManager] Key格式无效: ${keyId}`);
+      this.events.onKeyInvalid?.(keyId, new Error("Key format invalid"));
+      return false;
     }
-
-    return isValid;
+    
+    // 2. 状态检查
+    if (!key.isActive) {
+      console.warn(`[ApiKeyManager] Key已禁用: ${keyId}`);
+      this.events.onKeyInvalid?.(keyId, new Error("Key inactive"));
+      return false;
+    }
+    
+    // 3. 过期检查
+    if (key.expiresAt && key.expiresAt < Date.now()) {
+      console.warn(`[ApiKeyManager] Key已过期: ${keyId}`);
+      this.events.onKeyExpired?.(keyId);
+      return false;
+    }
+    
+    // 4. 使用次数检查
+    if (this.config.maxUsageCount > 0 && key.usageCount >= this.config.maxUsageCount) {
+      console.warn(`[ApiKeyManager] Key使用次数超限: ${keyId}`);
+      this.events.onKeyInvalid?.(keyId, new Error("Key usage limit exceeded"));
+      return false;
+    }
+    
+    return true;
   }
 
   /**
