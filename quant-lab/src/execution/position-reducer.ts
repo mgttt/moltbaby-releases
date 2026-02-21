@@ -135,7 +135,7 @@ export class PositionReducer extends EventEmitter {
    * 更新持仓并检查状态流转
    * 核心业务逻辑：根据当前杠杆决定状态流转
    */
-  updatePosition(position: PositionSnapshot): { stateChanged: boolean; action?: ReduceAction } {
+  updatePosition(position: PositionSnapshot): { stateChanged: boolean; state: ReducePositionState; action?: ReduceAction } {
     this.currentPosition = position;
     const prevState = this.state;
 
@@ -155,8 +155,17 @@ export class PositionReducer extends EventEmitter {
       }
     }
 
+    // 记录当前状态（事件触发前）
+    const currentState = this.state;
+
+    // 触发事件（在状态记录后，确保调用方能获取正确的状态）
+    if (action) {
+      this.emit('reduce:initiated', action);
+    }
+
     return {
-      stateChanged: this.state !== prevState,
+      stateChanged: currentState !== prevState,
+      state: currentState,
       action,
     };
   }
@@ -323,7 +332,7 @@ export class PositionReducer extends EventEmitter {
   }
 
   /**
-   * 执行降仓计算
+   * 执行降仓计算（不触发事件）
    */
   private executeReduce(position: PositionSnapshot, customReason?: string): ReduceAction {
     this.reduceInProgress = true;
@@ -354,7 +363,7 @@ export class PositionReducer extends EventEmitter {
     console.log(`  减仓比例: ${(action.reduceRatio * 100).toFixed(2)}%`);
     console.log(`  预期降仓后杠杆: ${action.expectedLeverageAfter.toFixed(2)}x`);
 
-    this.emit('reduce:initiated', action);
+    // 注意：事件由调用方触发，确保状态记录先于事件处理
 
     return action;
   }

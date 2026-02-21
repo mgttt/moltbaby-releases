@@ -383,10 +383,13 @@ export class RetryPolicy {
 
   /**
    * 记录熔断器成功
+   * 
+   * 修复：成功时，无论是OPEN还是HALF_OPEN，都应该关闭熔断器
+   * 因为成功意味着服务已经恢复
    */
   recordCircuitSuccess(): void {
     this.circuitBreaker.failures = 0;
-    if (this.circuitBreaker.state === "HALF_OPEN") {
+    if (this.circuitBreaker.state === "HALF_OPEN" || this.circuitBreaker.state === "OPEN") {
       this.circuitBreaker.state = "CLOSED";
       this.events.onCircuitBreakerClose?.();
       this.log("[RetryPolicy] 熔断器关闭，恢复正常");

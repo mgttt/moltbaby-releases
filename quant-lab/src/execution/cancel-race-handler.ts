@@ -188,9 +188,9 @@ export class CancelRaceHandler {
         if (shouldFail) {
           const errors = [
             new Error("110001: Order does not exist"),
-            new Error("NETWORK_ERROR: 连接超时"),
-            new Error("SERVER_ERROR: 服务器内部错误"),
-            new Error("RATE_LIMIT: 请求过于频繁"),
+            new Error("network timeout"), // 小写，匹配NETWORK_ERROR
+            new Error("500 server error"), // 小写，匹配SERVER_ERROR
+            new Error("429 rate limit"), // 包含429，匹配RATE_LIMIT
           ];
           const randomError = errors[Math.floor(Math.random() * errors.length)];
           reject(randomError);

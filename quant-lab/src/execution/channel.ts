@@ -258,7 +258,7 @@ export class OrderChannel {
    */
   private async simulateConnect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      // 模拟连接延迟
+      // 模拟连接延迟（100ms，减少测试时间）
       setTimeout(() => {
         // 模拟95%成功率（低于99.99%目标，用于测试重试策略）
         const success = Math.random() > 0.05;
@@ -266,16 +266,16 @@ export class OrderChannel {
         if (success) {
           resolve();
         } else {
-          // 模拟不同类型的错误
+          // 模拟不同类型的错误（小写，确保能被正确分类）
           const errors = [
-            new Error("NETWORK_ERROR: 连接超时"),
-            new Error("SERVER_ERROR: 服务器内部错误"),
-            new Error("RATE_LIMIT: 请求过于频繁"),
+            new Error("network timeout"), // 匹配NETWORK_ERROR
+            new Error("500 server error"), // 匹配SERVER_ERROR
+            new Error("429 rate limit"), // 匹配RATE_LIMIT
           ];
           const randomError = errors[Math.floor(Math.random() * errors.length)];
           reject(randomError);
         }
-      }, 500); // 500ms延迟
+      }, 100); // 100ms延迟（从500ms减少）
     });
   }
 

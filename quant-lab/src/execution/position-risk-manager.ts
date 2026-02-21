@@ -187,25 +187,20 @@ export class PositionRiskManager {
     // 4. 触发状态机
     const reduceResult = this.reducer.updatePosition(snapshot);
 
-    // 记录状态机触发后的状态（此时可能是REDUCE）
-    const reducerStateAfterTrigger = this.reducer.getState();
-
-    // 5. 如果有降仓指令，尝试执行
-    let reduceInitiated = false;
-    if (reduceResult.action && this.onReduceCallback) {
-      reduceInitiated = await this.onReduceCallback(reduceResult.action);
-    }
+    // 5. 如果有降仓指令，标记为已发起
+    // 注意：实际执行由事件监听 handleReduceInitiated 处理，避免重复调用
+    const reduceInitiated = !!reduceResult.action;
 
     // 6. 构建结果（使用触发后的状态，因为执行回调后状态可能已经变为RECOVERY）
     const riskCheck: RiskCheckResult = {
       allowed: leverage <= this.config.maxLeverage,
-      riskLevel: this.calculateRiskLevel(leverage, reducerStateAfterTrigger),
+      riskLevel: this.calculateRiskLevel(leverage, reduceResult.state),
       reduceAction: reduceResult.action,
       riskMetrics: {
         currentLeverage: leverage,
         marginUsage,
         positionValue,
-        reducerState: reducerStateAfterTrigger,
+        reducerState: reduceResult.state,
       },
     };
 
