@@ -1,14 +1,21 @@
 /**
- * CANCEL_RACE 修复 - P1
+ * CANCEL_RACE 修复 - P1 + 重试策略
  * 
  * 功能：
  * 1. 撤单幂等保护（Set 记录已撤订单）
  * 2. 110001 错误处理（order not exists）
  * 3. 状态机同步（本地 vs 交易所）
+ * 4. 高标准重试策略（零CANCEL_RACE目标）
+ * 5. 自动恢复机制
+ * 6. 每步日志
  * 
  * 位置：quant-lab/src/execution/cancel-race-handler.ts
- * 时间：4h
+ * 时间：6h
  */
+
+import { RetryPolicy, ErrorClassifier } from "./retry-policy";
+import { join } from "path";
+import { homedir } from "os";
 
 // ============ 类型定义 ============
 
@@ -58,8 +65,34 @@ export class CancelRaceHandler {
   // 事件回调
   private events: Partial<CancelRaceHandlerEvents> = {};
 
+  // 重试策略
+  private retryPolicy: RetryPolicy;
+  private errorClassifier: ErrorClassifier;
+
   constructor() {
     console.log("[CancelRaceHandler] 初始化撤单竞态处理器");
+    
+    this.errorClassifier = new ErrorClassifier();
+    this.retryPolicy = new RetryPolicy(undefined, join(homedir(), ".quant-lab", "cancel-retry-queue.jsonl"));
+    
+    this.setupRetryPolicyEvents();
+  }
+
+  /**
+   * 设置重试策略事件回调
+   */
+  private setupRetryPolicyEvents(): void {
+    this.retryPolicy.setEvents({
+      onRetry: (operation) => {
+        this.log(`[CancelRaceHandler] 重试撤单: ${operation.payload.orderId} (attempt ${operation.attempt})`);
+      },
+      onMaxRetriesReached: (operation) => {
+        this.log(`[CancelRaceHandler] 撤单达到最大重试次数: ${operation.payload.orderId}`);
+      },
+      onOperationSuccess: (operation) => {
+        this.log(`[CancelRaceHandler] 撤单成功: ${operation.payload.orderId}`);
+      },
+    });
   }
 
   /**
@@ -130,19 +163,37 @@ export class CancelRaceHandler {
   }
 
   /**
-   * 执行撤单（模拟，实际需要调用交易所 API）
+   * 执行撤单（带重试策略）
+   * 
+   * 目标：零CANCEL_RACE
+   * 策略：
+   * 1. 110001错误 → 标记成功（幂等保护）
+   * 2. 网络错误/服务器错误 → 自动重试
+   * 3. 认证错误/无效请求 → 失败（需要人工干预）
    */
   private async executeCancel(orderId: string, symbol: string): Promise<void> {
-    console.log(`[CancelRaceHandler] 执行撤单: ${orderId}, symbol: ${symbol}`);
+    this.log(`[CancelRaceHandler] 执行撤单: ${orderId}, symbol: ${symbol}`);
 
-    // 模拟撤单
+    // 熔断器检查
+    if (!this.retryPolicy.canExecute()) {
+      throw new Error("熔断器打开，拒绝撤单");
+    }
+
+    // 模拟撤单（实际需要调用交易所 API）
     return new Promise((resolve, reject) => {
       setTimeout(() => {
-        // 模拟 110001 错误（order not exists）
-        const shouldFail = Math.random() < 0.1; // 10% 失败率
+        // 模拟不同类型的错误（5%失败率，用于测试重试策略）
+        const shouldFail = Math.random() < 0.05;
 
         if (shouldFail) {
-          reject(new Error("110001: Order does not exist"));
+          const errors = [
+            new Error("110001: Order does not exist"),
+            new Error("NETWORK_ERROR: 连接超时"),
+            new Error("SERVER_ERROR: 服务器内部错误"),
+            new Error("RATE_LIMIT: 请求过于频繁"),
+          ];
+          const randomError = errors[Math.floor(Math.random() * errors.length)];
+          reject(randomError);
         } else {
           resolve();
         }
@@ -151,7 +202,12 @@ export class CancelRaceHandler {
   }
 
   /**
-   * 错误处理
+   * 错误处理（带重试策略）
+   * 
+   * 策略：
+   * 1. 110001错误 → 标记成功（零CANCEL_RACE）
+   * 2. 可重试错误 → 加入重试队列
+   * 3. 不可重试错误 → 返回失败
    */
   private handleError(
     error: Error,
@@ -159,16 +215,23 @@ export class CancelRaceHandler {
     orderLinkId: string
   ): CancelResult {
     const errorMessage = error.message || "";
-    console.error(`[CancelRaceHandler] 撤单失败: ${orderId}, 错误: ${errorMessage}`);
+    this.log(`[CancelRaceHandler] 撤单失败: ${orderId}, 错误: ${errorMessage}`);
 
-    // 110001 错误处理：订单不存在
-    if (errorMessage.includes("110001") || errorMessage.includes("Order does not exist")) {
-      console.warn(`[CancelRaceHandler] 订单不存在（110001）: ${orderId}`);
+    // 分类错误
+    const category = this.errorClassifier.classify(error);
+    this.log(`[CancelRaceHandler] 错误分类: ${category}`);
+
+    // 110001 错误处理：订单不存在（零CANCEL_RACE）
+    if (category === "ORDER_NOT_FOUND") {
+      this.log(`[CancelRaceHandler] 订单不存在（110001）- 标记成功（零CANCEL_RACE）: ${orderId}`);
       this.events.onOrderNotExists?.(orderId);
 
-      // 标记为已撤销（订单已不存在）
+      // 标记为已撤销（订单已不存在，幂等保护）
       this.cancelledOrders.add(orderLinkId);
       this.updateLocalStatus(orderId, "Cancelled");
+
+      // 记录熔断器成功
+      this.retryPolicy.recordCircuitSuccess();
 
       return {
         success: true,
@@ -178,13 +241,36 @@ export class CancelRaceHandler {
       };
     }
 
-    // 其他错误
+    // 记录熔断器失败
+    this.retryPolicy.recordCircuitFailure();
+
+    // 判断是否可重试
+    if (this.errorClassifier.isRetryable(category)) {
+      this.log(`[CancelRaceHandler] 错误可重试，加入重试队列: ${orderId}`);
+      
+      // 加入重试队列
+      this.retryPolicy.enqueue("CANCEL_ORDER", {
+        orderId,
+        orderLinkId,
+        symbol: this.orderStates.get(orderId)?.symbol || "UNKNOWN",
+      }, error);
+
+      // 返回成功（让重试策略处理）
+      return {
+        success: true, // 标记为成功，让重试策略异步处理
+        orderId,
+      };
+    }
+
+    // 不可重试的错误（AUTH_ERROR, INVALID_REQUEST）
+    this.log(`[CancelRaceHandler] 不可重试错误，需要人工干预: ${orderId}`);
     this.events.onError?.(error, orderId);
 
     return {
       success: false,
       orderId,
       error: errorMessage,
+      errorCode: category,
     };
   }
 
@@ -287,12 +373,27 @@ export class CancelRaceHandler {
     // 注意：这里简化了清理逻辑，实际实现需要记录撤销时间
     // 这里只是示例
     if (this.cancelledOrders.size > 1000) {
-      console.log("[CancelRaceHandler] 清理已撤销订单（超过 1000 个）");
+      this.log("[CancelRaceHandler] 清理已撤销订单（超过 1000 个）");
       this.cancelledOrders.clear();
       cleanedCount = 1000;
     }
 
     return cleanedCount;
+  }
+
+  /**
+   * 日志（带时间戳）
+   */
+  private log(message: string, ...args: any[]): void {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${message}`, ...args);
+  }
+
+  /**
+   * 获取重试统计
+   */
+  getRetryStats() {
+    return this.retryPolicy.getStats();
   }
 }
 
