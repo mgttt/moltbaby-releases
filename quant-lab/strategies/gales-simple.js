@@ -2838,6 +2838,15 @@ function st_heartbeat(tickJson) {
     }
   }
 
+  // P1新增：每100心跳写入指标到ndtsdb
+  if (state.tickCount % 100 === 0 && typeof bridge_writeMetric === 'function') {
+    try {
+      bridge_writeMetric('adx', marketRegimeState.currentADX || 0);
+      bridge_writeMetric('pnl', state.accountingPnl || 0);
+      bridge_writeMetric('position', state.accountingPos || 0);
+    } catch (e) {}
+  }
+
   // 心跳末尾持久化（确保部分成交/对冲/撤单等状态不丢）
   saveState();
 }

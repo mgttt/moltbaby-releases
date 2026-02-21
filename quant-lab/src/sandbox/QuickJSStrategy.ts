@@ -12,6 +12,7 @@ import { join } from 'path';
 import { execSync } from 'child_process';
 import { BarCacheLayer } from '../cache/BarCacheLayer.ts';
 import { getQuickJS, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
+import { ColumnarTable } from '../../../ndtsdb/src/index.ts';
 
 // 兼容获取home目录
 function getHomeDir(): string {
@@ -100,6 +101,14 @@ export class QuickJSStrategy {
     avgPrice: number;
   } = { symbol: '', side: 'FLAT', qty: 0, avgPrice: 0 };
   private runningSimPnl = 0;
+
+  // P1新增：ndtsdb指标持久化
+  private metricsTable = new ColumnarTable([
+    { name: 'timestamp', type: 'int64' },
+    { name: 'name', type: 'string' },
+    { name: 'value', type: 'float64' },
+    { name: 'strategyId', type: 'string' },
+  ]);
 
   // P1新增：资金费检测状态
   private fundingRateCache: Map<string, { fundingRate: number; nextFundingTime: number; timestamp: number }> = new Map();
@@ -1966,6 +1975,25 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_recordSimTrade', bridge_recordSimTrade);
     bridge_recordSimTrade.dispose();
+
+    // P1新增：bridge_writeMetric - 写入指标到ndtsdb
+    const bridge_writeMetric = this.ctx.newFunction('bridge_writeMetric', (nameHandle, valueHandle) => {
+      const name = this.ctx!.getString(nameHandle);
+      const value = this.ctx!.getNumber(valueHandle);
+      const timestamp = Date.now();
+      const strategyId = this.config.strategyId;
+      
+      try {
+        this.metricsTable.addRow({ timestamp, name, value, strategyId });
+        logger.debug(`[QuickJSStrategy] 写入指标: ${name}=${value}, strategy=${strategyId}`);
+        return this.ctx!.newString(JSON.stringify({ success: true }));
+      } catch (error: any) {
+        logger.error(`[QuickJSStrategy] 写入指标失败:`, error.message);
+        return this.ctx!.newString(JSON.stringify({ success: false, error: error.message }));
+      }
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_writeMetric', bridge_writeMetric);
+    bridge_writeMetric.dispose();
 
     // P2修复：bridge_tgSend - 发送Telegram通知
     // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，避免干扰；需显式开启 STRATEGY_TG_ENABLED=1
