@@ -5,8 +5,8 @@
 
 FROM docker.io/library/alpine:3.19
 
-# 安装基础工具
-RUN apk add --no-cache curl xz
+# 安装基础工具 + readline/ncurses依赖
+RUN apk add --no-cache curl xz readline-dev ncurses-dev
 
 # 下载并安装 Zig
 ARG ZIG_VERSION=0.13.0
