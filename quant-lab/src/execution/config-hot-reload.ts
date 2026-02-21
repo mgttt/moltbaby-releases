@@ -16,6 +16,34 @@ import { homedir } from "os";
 
 // ============ 类型定义 ============
 
+/**
+ * 参数校验规则
+ */
+export interface ValidationRule {
+  type: 'number' | 'string' | 'boolean' | 'array';
+  required?: boolean;
+  min?: number;           // 数值最小值
+  max?: number;           // 数值最大值
+  minLength?: number;     // 字符串最小长度
+  maxLength?: number;     // 字符串最大长度
+  pattern?: RegExp;       // 字符串正则匹配
+  enum?: any[];           // 枚举值
+  custom?: (value: any) => boolean | string; // 自定义校验，返回true通过，字符串为错误信息
+}
+
+/**
+ * 校验规则集合
+ */
+export type ValidationRules = Record<string, ValidationRule>;
+
+/**
+ * 校验结果
+ */
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
 export interface ConfigChange {
   key: string;
   oldValue: any;
@@ -40,7 +68,9 @@ export interface HotReloadOptions {
   watchPath?: string;
   backupDir?: string;
   maxBackups?: number;
-  validateConfig?: (config: Record<string, any>) => boolean;
+  validateConfig?: (config: Record<string, any>) => boolean | ValidationResult;
+  validationRules?: ValidationRules; // P1新增：参数校验规则
+  onValidationFail?: (errors: string[]) => void; // P1新增：校验失败回调
 }
 
 // ============ 配置热重载管理器 ============
@@ -51,7 +81,9 @@ export class ConfigHotReloadManager {
   private watcher: any = null;
   private backupDir: string;
   private maxBackups: number;
-  private validateConfig?: (config: Record<string, any>) => boolean;
+  private validateConfig?: (config: Record<string, any>) => boolean | ValidationResult;
+  private validationRules?: ValidationRules; // P1新增
+  private onValidationFail?: (errors: string[]) => void; // P1新增
   private events: Partial<ConfigHotReloadEvents> = {};
   private snapshots: ConfigSnapshot[] = [];
   private currentVersion: number = 0;
@@ -63,6 +95,8 @@ export class ConfigHotReloadManager {
     this.backupDir = options?.backupDir || join(homedir(), ".quant-lab", "config-backups");
     this.maxBackups = options?.maxBackups || 10;
     this.validateConfig = options?.validateConfig;
+    this.validationRules = options?.validationRules; // P1新增
+    this.onValidationFail = options?.onValidationFail; // P1新增
 
     // 确保备份目录存在
     if (!existsSync(this.backupDir)) {
@@ -79,6 +113,183 @@ export class ConfigHotReloadManager {
   setEvents(events: Partial<ConfigHotReloadEvents>): void {
     this.events = { ...this.events, ...events };
   }
+
+  // P1新增: 参数校验方法 ========================================
+
+  /**
+   * 使用规则校验配置
+   * @param config 待校验配置
+   * @param rules 校验规则
+   * @returns 校验结果
+   */
+  validateWithRules(config: Record<string, any>, rules?: ValidationRules): ValidationResult {
+    const validationRules = rules || this.validationRules;
+    if (!validationRules) {
+      return { valid: true, errors: [] };
+    }
+
+    const errors: string[] = [];
+
+    for (const [key, rule] of Object.entries(validationRules)) {
+      const value = config[key];
+
+      // 必填检查
+      if (rule.required && (value === undefined || value === null)) {
+        errors.push(`[校验失败] ${key}: 必填项缺失`);
+        continue;
+      }
+
+      // 未提供且非必填，跳过
+      if (value === undefined || value === null) {
+        continue;
+      }
+
+      // 类型检查
+      if (rule.type) {
+        const actualType = Array.isArray(value) ? 'array' : typeof value;
+        if (actualType !== rule.type) {
+          errors.push(`[校验失败] ${key}: 类型错误，期望 ${rule.type}，实际 ${actualType}`);
+          continue;
+        }
+      }
+
+      // 数值范围检查
+      if (rule.type === 'number') {
+        if (rule.min !== undefined && value < rule.min) {
+          errors.push(`[校验失败] ${key}: 数值过小，最小值 ${rule.min}，实际 ${value}`);
+        }
+        if (rule.max !== undefined && value > rule.max) {
+          errors.push(`[校验失败] ${key}: 数值过大，最大值 ${rule.max}，实际 ${value}`);
+        }
+      }
+
+      // 字符串长度检查
+      if (rule.type === 'string') {
+        if (rule.minLength !== undefined && value.length < rule.minLength) {
+          errors.push(`[校验失败] ${key}: 字符串过短，最小长度 ${rule.minLength}，实际 ${value.length}`);
+        }
+        if (rule.maxLength !== undefined && value.length > rule.maxLength) {
+          errors.push(`[校验失败] ${key}: 字符串过长，最大长度 ${rule.maxLength}，实际 ${value.length}`);
+        }
+        if (rule.pattern && !rule.pattern.test(value)) {
+          errors.push(`[校验失败] ${key}: 格式不匹配，期望 ${rule.pattern}`);
+        }
+      }
+
+      // 枚举检查
+      if (rule.enum && !rule.enum.includes(value)) {
+        errors.push(`[校验失败] ${key}: 值不在允许范围内，期望 ${rule.enum.join(', ')}，实际 ${value}`);
+      }
+
+      // 自定义校验
+      if (rule.custom) {
+        const customResult = rule.custom(value);
+        if (customResult !== true) {
+          errors.push(`[校验失败] ${key}: ${typeof customResult === 'string' ? customResult : '自定义校验失败'}`);
+        }
+      }
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+    };
+  }
+
+  /**
+   * 策略参数默认校验规则 (Gales策略)
+   */
+  static getGalesValidationRules(): ValidationRules {
+    return {
+      symbol: {
+        type: 'string',
+        required: true,
+        pattern: /^[A-Z0-9]+USDT$/,
+      },
+      gridCount: {
+        type: 'number',
+        required: true,
+        min: 2,
+        max: 50,
+      },
+      gridSpacing: {
+        type: 'number',
+        required: true,
+        min: 0.001,
+        max: 0.5,
+      },
+      gridSpacingUp: {
+        type: 'number',
+        min: 0.001,
+        max: 0.5,
+      },
+      gridSpacingDown: {
+        type: 'number',
+        min: 0.001,
+        max: 0.5,
+      },
+      orderSize: {
+        type: 'number',
+        required: true,
+        min: 1,
+        max: 100000,
+      },
+      orderSizeUp: {
+        type: 'number',
+        min: 1,
+        max: 100000,
+      },
+      orderSizeDown: {
+        type: 'number',
+        min: 1,
+        max: 100000,
+      },
+      maxPosition: {
+        type: 'number',
+        required: true,
+        min: 10,
+        max: 1000000,
+      },
+      direction: {
+        type: 'string',
+        required: true,
+        enum: ['long', 'short', 'neutral'],
+      },
+      magnetDistance: {
+        type: 'number',
+        min: 0.001,
+        max: 0.1,
+      },
+      cancelDistance: {
+        type: 'number',
+        min: 0.001,
+        max: 0.1,
+      },
+      cooldownSec: {
+        type: 'number',
+        min: 0,
+        max: 3600,
+      },
+      maxActiveOrders: {
+        type: 'number',
+        min: 1,
+        max: 100,
+      },
+      autoRecenter: {
+        type: 'boolean',
+      },
+      recenterDistance: {
+        type: 'number',
+        min: 0.01,
+        max: 0.5,
+      },
+      simMode: {
+        type: 'boolean',
+      },
+    };
+  }
+
+  // P1新增结束 ========================================
 
   /**
    * 加载配置
@@ -159,9 +370,41 @@ export class ConfigHotReloadManager {
       // 1. 读取新配置
       const newConfig = this.readConfigFile();
 
-      // 2. 验证配置
-      if (this.validateConfig && !this.validateConfig(newConfig)) {
-        throw new Error("配置验证失败");
+      // 2. 验证配置 (P1增强: 支持规则校验和自定义校验)
+      let validationErrors: string[] = [];
+
+      // 2.1 规则校验
+      const ruleValidation = this.validateWithRules(newConfig);
+      if (!ruleValidation.valid) {
+        validationErrors.push(...ruleValidation.errors);
+      }
+
+      // 2.2 自定义校验
+      if (this.validateConfig) {
+        const customResult = this.validateConfig(newConfig);
+        if (typeof customResult === 'boolean') {
+          if (!customResult) {
+            validationErrors.push('[自定义校验失败]');
+          }
+        } else if (!customResult.valid) {
+          validationErrors.push(...customResult.errors);
+        }
+      }
+
+      // 2.3 校验失败处理
+      if (validationErrors.length > 0) {
+        this.log(`[ConfigHotReload] ❌ 配置校验失败，拒绝更新:`);
+        validationErrors.forEach(err => this.log(`  ${err}`));
+
+        // 触发校验失败回调
+        this.onValidationFail?.(validationErrors);
+
+        // 发送告警事件
+        const error = new Error(`配置校验失败: ${validationErrors.join('; ')}`);
+        this.events.onError?.(error);
+
+        this.isReloading = false;
+        return;
       }
 
       // 3. 检测变更
@@ -183,14 +426,14 @@ export class ConfigHotReloadManager {
       this.currentVersion++;
 
       // 6. 触发事件
-      this.log(`[ConfigHotReload] 配置已重载，版本: ${this.currentVersion}, 变更: ${changes.length} 项`);
+      this.log(`[ConfigHotReload] ✅ 配置已重载，版本: ${this.currentVersion}, 变更: ${changes.length} 项`);
       this.events.onConfigChange?.(changes);
       this.events.onConfigReload?.(this.config);
 
       // 7. 清理旧备份
       this.cleanupOldBackups();
     } catch (error: any) {
-      this.log(`[ConfigHotReload] 配置重载失败: ${error.message}`);
+      this.log(`[ConfigHotReload] ❌ 配置重载失败: ${error.message}`);
       this.events.onError?.(error);
     } finally {
       this.isReloading = false;

@@ -1,4 +1,36 @@
 #!/usr/bin/env bun
+
+// ================================
+// 【P1】启动前依赖自检（防止停机35h）
+// ================================
+function runDependencyCheck(): void {
+  const errors: string[] = [];
+
+  // 1. 检查 quickjs-emscripten 是否可 import
+  try {
+    require.resolve('quickjs-emscripten');
+  } catch (e) {
+    errors.push('❌ 依赖缺失: quickjs-emscripten 无法解析');
+  }
+
+  // 2. 检查关键 logger 路径是否解析成功
+  try {
+    require.resolve('../src/utils/logger');
+  } catch (e) {
+    errors.push('❌ 依赖缺失: ../src/utils/logger 无法解析');
+  }
+
+  if (errors.length > 0) {
+    console.error('[DEPENDENCY_CHECK_FAILED] 启动前依赖自检失败:');
+    errors.forEach(err => console.error(`  ${err}`));
+    console.error('[DEPENDENCY_CHECK_FAILED] 请运行: cd quant-lab && bun install');
+    process.exit(1);
+  }
+}
+
+// 立即执行依赖检查
+runDependencyCheck();
+
 import { createLogger } from '../src/utils/logger';
 const logger = createLogger('RUN_STRATEGY_GENERIC');
 /**

@@ -192,6 +192,17 @@ let state = {
   initialOffset: 0,        // 初始差值/历史遗留仓基准
   ledgerRebuildDone: false,
   ledgerRebuildLastTick: 0,
+  
+  // P2修复：positionDiffState持久化字段
+  positionDiffState: {
+    initialOffset: 0,
+    lastDiff: 0,
+    diffIncreaseCount: 0,
+    lastAlertAt: 0,
+    ledgerGapOverCount: 0,
+    ledgerGapHardblocked: false,
+    lastHardblockAlertAt: 0,
+  },
 
   // P0修复：应急方向切换并发锁（防止placeOrder执行中切换方向）
   isPlacingOrder: false,   // 正在下单标志，下单期间禁止方向切换
@@ -232,10 +243,9 @@ let runtime = {
 let circuitBreakerState = {
   tripped: false,
   reason: '',
-  tripAt: 0,
+  tripAt: 0,  // 熔断触发时间戳
   highWaterMark: 0,  // 最高权益（用于计算回撤）
   // P1修复：熔断震荡
-  recoveryTickCount: 0,  // 连续满足恢复条件的心跳数
   blockedSide: '',       // 熔断中禁止的开仓方向 ('Buy'/'Sell')
   // P0新增：运行时熔断总开关 (默认true)
   active: true,
@@ -318,8 +328,20 @@ function loadState() {
         }
         if (obj.ledgerRebuildDone === undefined) state.ledgerRebuildDone = false;
         if (obj.ledgerRebuildLastTick === undefined) state.ledgerRebuildLastTick = 0;
-        // P2修复：加载initialOffset
-        if (obj.initialOffset !== undefined) {
+        
+        // P2修复：加载positionDiffState（完整持久化）
+        if (obj.positionDiffState) {
+          positionDiffState.initialOffset = obj.positionDiffState.initialOffset || 0;
+          positionDiffState.lastDiff = obj.positionDiffState.lastDiff || 0;
+          positionDiffState.diffIncreaseCount = obj.positionDiffState.diffIncreaseCount || 0;
+          positionDiffState.lastAlertAt = obj.positionDiffState.lastAlertAt || 0;
+          positionDiffState.ledgerGapOverCount = obj.positionDiffState.ledgerGapOverCount || 0;
+          positionDiffState.ledgerGapHardblocked = obj.positionDiffState.ledgerGapHardblocked || false;
+          positionDiffState.lastHardblockAlertAt = obj.positionDiffState.lastHardblockAlertAt || 0;
+          logInfo('[P2] positionDiffState已加载: initialOffset=' + positionDiffState.initialOffset);
+        }
+        // 兼容旧数据：单独加载initialOffset
+        else if (obj.initialOffset !== undefined) {
           positionDiffState.initialOffset = obj.initialOffset;
         }
         
@@ -337,7 +359,7 @@ function loadState() {
           // 修复: 每次重启强制从 0 重建，由当前真实 effectivePosition 重新确定峰值
           circuitBreakerState.highWaterMark = 0;
           circuitBreakerState.tripped = false;          // 重启后解除熔断
-          circuitBreakerState.recoveryTickCount = 0;
+          // P2: 删除recoveryTickCount，不再使用
           logInfo('[熔断] 重启重置: highWaterMark=0, tripped=false (防历史账本污染)');
         }
       }
@@ -356,6 +378,16 @@ function loadState() {
 
 // 保存状态
 function saveState() {
+  // P2修复：同步positionDiffState到state，确保持久化
+  state.positionDiffState = {
+    initialOffset: positionDiffState.initialOffset || 0,
+    lastDiff: positionDiffState.lastDiff || 0,
+    diffIncreaseCount: positionDiffState.diffIncreaseCount || 0,
+    lastAlertAt: positionDiffState.lastAlertAt || 0,
+    ledgerGapOverCount: positionDiffState.ledgerGapOverCount || 0,
+    ledgerGapHardblocked: positionDiffState.ledgerGapHardblocked || false,
+    lastHardblockAlertAt: positionDiffState.lastHardblockAlertAt || 0,
+  };
   bridge_stateSet(getStateKey(), JSON.stringify(state));
 }
 
@@ -666,44 +698,38 @@ function checkCircuitBreaker() {
   const now = Date.now();
   const cb = CONFIG.circuitBreaker;
   
-  // 冷却期内检查恢复条件
+  // P2修复: 熔断恢复改为基于时间戳，不再依赖连续心跳
   if (circuitBreakerState.tripped) {
     const elapsed = (now - circuitBreakerState.tripAt) / 1000;
     if (elapsed < cb.cooldownAfterTrip) {
       return true;  // 仍在冷却期
     }
     
-    // P0修复：熔断震荡 - 使用effectivePosition判断恢复条件
+    // 冷却期结束后，检查仓位条件
     const effectivePos = Math.max(
       Math.abs(state.positionNotional || 0),
       Math.abs(state.exchangePosition || 0)
     );
     const positionRatio = effectivePos / CONFIG.maxPosition;
+    
     if (positionRatio < cb.maxPositionRatio) {
-      circuitBreakerState.recoveryTickCount = (circuitBreakerState.recoveryTickCount || 0) + 1;
-      if (circuitBreakerState.recoveryTickCount >= 3) {
-        // 连续3个心跳满足条件，重置熔断
-        circuitBreakerState.tripped = false;
-        circuitBreakerState.reason = '';
-        circuitBreakerState.recoveryTickCount = 0;
-        circuitBreakerState.blockedSide = '';
-        // P1修复：恢复时重置highWaterMark为当前仓位，避免震荡循环
-        circuitBreakerState.highWaterMark = effectivePos;
-        // P1-debug: 打印详细恢复信息
-        logInfo('[熔断恢复] 仓位回落，恢复交易' +
-                ' | positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
-                ' | effectivePos=' + effectivePos.toFixed(2) +
-                ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
-                ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2) +
-                ' | highWaterMark=' + circuitBreakerState.highWaterMark.toFixed(2));
-        return false;
-      }
-    } else {
-      // 不满足条件，重置计数
-      circuitBreakerState.recoveryTickCount = 0;
+      // 满足恢复条件，立即恢复（不再依赖连续心跳计数）
+      circuitBreakerState.tripped = false;
+      circuitBreakerState.reason = '';
+      circuitBreakerState.blockedSide = '';
+      // P1修复：恢复时重置highWaterMark为当前仓位，避免震荡循环
+      circuitBreakerState.highWaterMark = effectivePos;
+      // P2: 删除recoveryTickCount，不再使用
+      logInfo('[熔断恢复] 冷却期结束且仓位回落，恢复交易' +
+              ' | 冷却=' + elapsed.toFixed(0) + 's' +
+              ' | positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
+              ' | effectivePos=' + effectivePos.toFixed(2) +
+              ' | highWaterMark=' + circuitBreakerState.highWaterMark.toFixed(2));
+      return false;
     }
     
-    return true;  // 冷却期结束但仓位未回落，继续熔断
+    // 冷却期结束但仓位未回落，继续熔断
+    return true;
   }
   
   // P0修复：熔断机制使用effectivePosition（取策略内部和交易所的较大值）
@@ -764,32 +790,36 @@ function checkCircuitBreaker() {
     }
   }
   
-  // 2. 仓位熔断（暂时停用）
-  // 说明：positionRatio 基于策略内口径（effectivePosition/maxPosition），
-  // 当前仅保留为历史实现，不作为强风控依据，等待账户级杠杆风险口径接入后再启用。
-  // const positionRatio = effectivePosition / CONFIG.maxPosition;
-  // if (positionRatio > cb.maxPositionRatio) {
-  //   // P2修复：熔断告警节流（>=60s或ratio变化>=0.2%才打一次）
-  //   const now = Date.now();
-  //   const lastWarn = circuitBreakerState.lastPositionWarnAt || 0;
-  //   const lastRatio = circuitBreakerState.lastPositionWarnRatio || 0;
-  //   const timeElapsed = now - lastWarn;
-  //   const ratioDiff = Math.abs(positionRatio - lastRatio);
-  //   
-  //   if (timeElapsed >= 60000 || ratioDiff >= 0.002) {
-  //     circuitBreakerState.lastPositionWarnAt = now;
-  //     circuitBreakerState.lastPositionWarnRatio = positionRatio;
-  //     // P1-debug: 打印详细仓位熔断信息
-  //     logWarn('[熔断触发-仓位] positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
-  //             ' | effectivePosition=' + effectivePosition.toFixed(2) +
-  //             ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
-  //             ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2) +
-  //             ' | maxPosition=' + CONFIG.maxPosition);
-  //   }
-  //   
-  //   // 不触发熔断停止，继续交易
-  //   return false;
-  // }
+  // 2. 仓位熔断（方案B：恢复但改为限制开仓）
+  const positionRatio = effectivePosition / CONFIG.maxPosition;
+  if (positionRatio > cb.maxPositionRatio) {
+    // P2修复：熔断告警节流（>=60s或ratio变化>=0.2%才打一次）
+    const lastWarn = circuitBreakerState.lastPositionWarnAt || 0;
+    const lastRatio = circuitBreakerState.lastPositionWarnRatio || 0;
+    const timeElapsed = now - lastWarn;
+    const ratioDiff = Math.abs(positionRatio - lastRatio);
+
+    if (timeElapsed >= 60000 || ratioDiff >= 0.002) {
+      circuitBreakerState.lastPositionWarnAt = now;
+      circuitBreakerState.lastPositionWarnRatio = positionRatio;
+      // P1-debug: 打印详细仓位熔断信息
+      logWarn('[仓位限制触发] positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
+              ' | effectivePosition=' + effectivePosition.toFixed(2) +
+              ' | positionNotional=' + (state.positionNotional || 0).toFixed(2) +
+              ' | exchangePosition=' + (state.exchangePosition || 0).toFixed(2) +
+              ' | maxPosition=' + CONFIG.maxPosition +
+              ' | 限制新开仓，不停止策略');
+    }
+
+    // 方案B：设置blockNewOrders标志，限制新开仓但不完全停止策略
+    circuitBreakerState.blockNewOrders = true;
+  } else {
+    // 仓位恢复正常，清除blockNewOrders标志
+    if (circuitBreakerState.blockNewOrders) {
+      logInfo('[仓位限制解除] positionRatio=' + (positionRatio * 100).toFixed(2) + '%，恢复开仓');
+      circuitBreakerState.blockNewOrders = false;
+    }
+  }
   
   // 3. 价格偏离 — [硬拦截最小集] 降级为告警（不拦截）
   // 原：drift>50%硬拦截；现：仅告警，允许策略继续运行
@@ -2576,6 +2606,24 @@ function getEffectiveMagnetDistance() {
 }
 
 function shouldPlaceOrder(grid, distance) {
+  // ADX市场状态检测：极强趋势时暂停下单
+  if (shouldSuspendGridTrading()) {
+    logWarn('[ADX] 极强趋势，暂停网格下单 gridId=' + grid.id);
+    return false;
+  }
+
+  // 仓位熔断检查：仓位超限时限制开仓
+  if (circuitBreakerState.blockNewOrders) {
+    logWarn('[仓位限制] 仓位超限，禁止新开仓 gridId=' + grid.id);
+    return false;
+  }
+
+  // P1修复: 防重复挂单 - 检查grid状态，PLACING状态直接返回false
+  if (grid.state === 'PLACING') {
+    logDebug('[防重单] gridId=' + grid.id + ' 状态为PLACING，跳过');
+    return false;
+  }
+
   const distancePct = (distance * 100).toFixed(2);
 
   // P0 Debug: 记录 Buy 网格检查
@@ -2695,12 +2743,11 @@ function shouldPlaceOrder(grid, distance) {
 }
 
 function placeOrder(grid) {
-  // P0修复：设置并发锁，防止方向切换
+  // P0修复：设置并发锁，防止方向切换（锁在内层try/finally中清除）
   state.isPlacingOrder = true;
   
-  try {
-    // 双保险：避免重复挂单（grid 状态丢失时常见）
-    const existing = findActiveOrderByGridId(grid.id);
+  // 双保险：避免重复挂单（grid 状态丢失时常见）
+  const existing = findActiveOrderByGridId(grid.id);
     if (existing) {
       syncGridFromOrder(grid, existing);
       state.isPlacingOrder = false;  // 清除锁

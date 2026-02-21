@@ -363,6 +363,180 @@ describe("配置热重载 - 验收测试", () => {
       console.log("✅ 监听已停止");
     });
   });
+
+  // P1新增: 参数校验测试 ========================================
+  describe("P1新增: 参数校验功能", () => {
+    test("校验规则: 必填项缺失", () => {
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+        validationRules: {
+          symbol: { type: 'string', required: true },
+          gridCount: { type: 'number', required: true, min: 2, max: 50 },
+        },
+      });
+
+      const invalidConfig = {
+        // symbol缺失
+        gridCount: 10,
+      };
+
+      const result = manager.validateWithRules(invalidConfig);
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0]).toContain('symbol');
+      expect(result.errors[0]).toContain('必填');
+    });
+
+    test("校验规则: 数值范围检查", () => {
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+        validationRules: {
+          gridCount: { type: 'number', min: 2, max: 10 },
+        },
+      });
+
+      // 数值过小
+      const result1 = manager.validateWithRules({ gridCount: 1 });
+      expect(result1.valid).toBe(false);
+      expect(result1.errors[0]).toContain('过小');
+
+      // 数值过大
+      const result2 = manager.validateWithRules({ gridCount: 100 });
+      expect(result2.valid).toBe(false);
+      expect(result2.errors[0]).toContain('过大');
+
+      // 数值正常
+      const result3 = manager.validateWithRules({ gridCount: 5 });
+      expect(result3.valid).toBe(true);
+      expect(result3.errors.length).toBe(0);
+    });
+
+    test("校验规则: 类型检查", () => {
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+        validationRules: {
+          gridCount: { type: 'number' },
+          symbol: { type: 'string' },
+        },
+      });
+
+      const invalidConfig = {
+        gridCount: "not a number",
+        symbol: 123,
+      };
+
+      const result = manager.validateWithRules(invalidConfig);
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBe(2);
+    });
+
+    test("校验规则: 枚举值检查", () => {
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+        validationRules: {
+          direction: { type: 'string', enum: ['long', 'short', 'neutral'] },
+        },
+      });
+
+      // 有效值
+      const result1 = manager.validateWithRules({ direction: 'long' });
+      expect(result1.valid).toBe(true);
+
+      // 无效值
+      const result2 = manager.validateWithRules({ direction: 'invalid' });
+      expect(result2.valid).toBe(false);
+      expect(result2.errors[0]).toContain('不在允许范围内');
+    });
+
+    test("校验规则: 正则表达式检查", () => {
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+        validationRules: {
+          symbol: { type: 'string', pattern: /^[A-Z0-9]+USDT$/ },
+        },
+      });
+
+      // 有效symbol
+      const result1 = manager.validateWithRules({ symbol: 'BTCUSDT' });
+      expect(result1.valid).toBe(true);
+
+      // 无效symbol
+      const result2 = manager.validateWithRules({ symbol: 'invalid' });
+      expect(result2.valid).toBe(false);
+      expect(result2.errors[0]).toContain('格式不匹配');
+    });
+
+    test("Gales策略默认校验规则", () => {
+      const rules = ConfigHotReloadManager.getGalesValidationRules();
+
+      // 有效配置
+      const validConfig = {
+        symbol: 'BTCUSDT',
+        gridCount: 10,
+        gridSpacing: 0.02,
+        orderSize: 100,
+        maxPosition: 1000,
+        direction: 'neutral',
+      };
+
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH);
+      const result = manager.validateWithRules(validConfig, rules);
+      expect(result.valid).toBe(true);
+
+      // 无效配置: gridCount过大
+      const invalidConfig = {
+        ...validConfig,
+        gridCount: 100, // 超过max: 50
+      };
+
+      const result2 = manager.validateWithRules(invalidConfig, rules);
+      expect(result2.valid).toBe(false);
+      expect(result2.errors[0]).toContain('gridCount');
+    });
+
+    test("热更新时校验失败→拒绝更新", async () => {
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+        validationRules: {
+          gridCount: { type: 'number', min: 2, max: 10 },
+        },
+      });
+
+      let validationFailed = false;
+      manager.setEvents({
+        onError: (error) => {
+          if (error.message.includes('校验失败')) {
+            validationFailed = true;
+          }
+        },
+      });
+
+      manager.startWatching();
+
+      // 写入无效配置(gridCount=100超出范围)
+      const invalidConfig = {
+        symbol: 'BTCUSDT',
+        gridCount: 100, // 超出范围
+        gridSpacing: 0.01,
+        orderSize: 100,
+        maxPosition: 1000,
+      };
+
+      writeFileSync(TEST_CONFIG_PATH, JSON.stringify(invalidConfig, null, 2));
+
+      // 等待检测
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      expect(validationFailed).toBe(true);
+
+      // 验证配置未被更新(gridCount仍是初始值)
+      const currentConfig = manager.getConfig();
+      expect(currentConfig.gridCount).not.toBe(100);
+
+      manager.stopWatching();
+    });
+  });
+  // P1新增结束 ========================================
 });
 
 // ============ 回滚说明 ============
