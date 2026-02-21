@@ -11,6 +11,7 @@ export { DataProvider, RestDataProvider, WebSocketDataProvider } from './base.js
 export { BinanceCurlProvider } from './binance-curl.js';
 export { BybitCurlProvider } from './bybit-curl.js';
 export { TradingViewProvider } from './tradingview.js';
+export { WeQuantTushareProvider } from './wequant-tushare.js';
 
 // NOTE: FUTU provider depends on a futu-trader native client that is not present in this repo.
 // Import it directly only in environments that have that dependency.

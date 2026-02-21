@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createLogger } from '../utils/logger';
+import { createLogger } from '../src/utils/logger';
 const logger = createLogger('RUN_STRATEGY_GENERIC');
 /**
  * 通用策略启动器
