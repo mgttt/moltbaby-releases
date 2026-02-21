@@ -966,8 +966,8 @@ static void write_partition_file(const char* filepath,
     int pos = 0;
     pos += snprintf(json+pos, sizeof(json)-pos,
         "{\"columns\":["
-        "{\"name\":\"symbol\",\"type\":\"int32\"},"
-        "{\"name\":\"interval\",\"type\":\"int32\"},"
+        "{\"name\":\"symbol\",\"type\":\"string\"},"
+        "{\"name\":\"interval\",\"type\":\"string\"},"
         "{\"name\":\"timestamp\",\"type\":\"int64\"},"
         "{\"name\":\"open\",\"type\":\"float64\"},"
         "{\"name\":\"high\",\"type\":\"float64\"},"
@@ -988,21 +988,26 @@ static void write_partition_file(const char* filepath,
     }
     pos += snprintf(json+pos, sizeof(json)-pos, "]}}");
 
-    /* === 写入 magic + header_len + json === */
-    fwrite("NDTS", 1, 4, f);
+    /* === 写入固定4096字节header区（与Bun RESERVED_HEADER_SIZE=4096对齐） === */
+    /* header_block[4096]: magic(4) + header_len(4) + json(N) + padding(4096-8-N) */
+    #define RESERVED_HEADER_SIZE 4096
+    uint8_t header_block[RESERVED_HEADER_SIZE];
+    memset(header_block, 0, RESERVED_HEADER_SIZE);
     uint32_t hlen = (uint32_t)pos;
-    fwrite(&hlen, 4, 1, f);
-    fwrite(json, 1, pos, f);
+    /* magic */
+    memcpy(header_block, "NDTS", 4);
+    /* header_len */
+    memcpy(header_block + 4, &hlen, 4);
+    /* json */
+    memcpy(header_block + 8, json, pos);
+    /* padding已由memset填0 */
 
-    /* === padding 到 8 字节（从 header_len 字段起算） === */
-    size_t written = 4 + pos;  /* header_len(4) + json */
-    size_t pad = (8 - (written % 8)) % 8;
-    static const uint8_t zeros[8] = {0};
-    if (pad > 0) fwrite(zeros, 1, pad, f);
+    fwrite(header_block, 1, RESERVED_HEADER_SIZE, f);
 
-    /* === CRC32 of header === */
-    uint32_t hcrc = crc32_buf(json, pos);
+    /* === CRC32 of 整个header_block（与Bun一致） === */
+    uint32_t hcrc = crc32_buf(header_block, RESERVED_HEADER_SIZE);
     fwrite(&hcrc, 4, 1, f);
+    #undef RESERVED_HEADER_SIZE
 
     /* === Chunk === */
     /* chunk_start: 用于计算chunk的CRC32 */
@@ -1080,6 +1085,7 @@ static void write_partition_file(const char* filepath,
 struct NDTSDB {
     char path[256];
     int is_dir;   // 1=目录模式（PartitionedTable格式），0=文件模式（旧格式）
+    int dirty;    // 1=有写入操作，close时才写出；0=只读，close不写文件
 };
 
 // 简化版内存存储（MVP用，后续优化）
@@ -1121,6 +1127,7 @@ NDTSDB* ndtsdb_open(const char* path) {
     
     // 检测路径类型
     db->is_dir = path_is_dir(path);
+    db->dirty = 0;  // 默认只读，insert操作时置1
     
     if (db->is_dir) {
         /* === 目录模式：读取所有分区文件（Phase 2，Bun版格式） === */
@@ -1308,6 +1315,8 @@ NDTSDB* ndtsdb_open(const char* path) {
 void ndtsdb_close(NDTSDB* db) {
     if (!db) return;
 
+    if (!db->dirty) goto cleanup;  // 只读操作，不写出文件
+
     if (db->is_dir) {
         /* ===== 目录模式：写出 PartitionedTable 格式 ===== */
         
@@ -1455,7 +1464,7 @@ cleanup:
 }
 
 int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const KlineRow* row) {
-    (void)db;
+    if (db) db->dirty = 1;  // 标记有写入
     SymbolData* sd = find_or_create_symbol(symbol, interval);
     if (!sd) return -1;
     if (sd->count >= MAX_KLINES_PER_SYMBOL) return -1;
@@ -1465,7 +1474,7 @@ int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const Kl
 }
 
 int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, const KlineRow* rows, uint32_t n) {
-    (void)db;
+    if (db) db->dirty = 1;  // 标记有写入
     SymbolData* sd = find_or_create_symbol(symbol, interval);
     if (!sd) return -1;
     

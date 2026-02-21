@@ -105,6 +105,18 @@ const CONFIG = {
   adxStrongTrendThreshold: 40, // 极强趋势阈值
   regimeAlertCooldownSec: 300, // 市场状态告警冷却时间（秒）
 
+  // P1新增：订单超时自动撤单（Freqtrade风格）
+  orderTimeoutSec: 3600,      // 默认1小时，挂单超时自动撤销
+
+  // P2新增：ROI时间梯度（Freqtrade风格）
+  gridTimeDecay: {
+    enabled: false,             // 默认关闭，需要显式开启
+    stages: [                   // 时间阶段配置
+      { afterMinutes: 60, spacingMultiplier: 0.8 },   // 持仓超60分钟：间距缩小到80%
+      { afterMinutes: 120, spacingMultiplier: 0.6 },  // 持仓超120分钟：间距缩小到60%
+    ],
+  },
+
   simMode: true,
 };
 
@@ -2796,44 +2808,55 @@ function st_onParamsUpdate(newParamsJson) {
  * P1新增：资金费结算回调
  * Bybit每8小时结算一次（08:00, 16:00, 00:00 UTC）
  * 
- * @param {string} feeJson - JSON格式的资金费数据 {symbol, fundingRate, nextFundingTime, timeToFundingMs}
+ * @param {string} feeJson - JSON格式的资金费数据 {symbol, fundingRate, nextFundingTime, timeToFundingMs, estimatedFee}
  */
 function st_onFundingFee(feeJson) {
+  // 暂时停用（总裁：当前阶段作用不大，框架接口保留）
+}
+
+/**
+ * P1新增：动态止损回调（Freqtrade风格）
+ * 
+ * @param {string} stoplossJson - JSON格式的止损数据 {position, entryPrice, currentPrice, holdingMinutes, unrealizedPnl, unrealizedPnlPct}
+ * @returns {number} 止损阈值（负值表示亏损，正值表示允许回撤比例）
+ */
+function st_customStoploss(stoplossJson) {
   try {
-    const fee = (typeof feeJson === 'string') ? JSON.parse(feeJson) : feeJson;
-    const { symbol, fundingRate, nextFundingTime, timeToFundingMs } = fee;
+    const data = (typeof stoplossJson === 'string') ? JSON.parse(stoplossJson) : stoplossJson;
+    const { position, entryPrice, currentPrice, holdingMinutes, unrealizedPnl, unrealizedPnlPct } = data;
     
-    const fundingPct = (fundingRate * 100).toFixed(4);
-    const timeToFundingSec = Math.floor(timeToFundingMs / 1000);
-    
-    logInfo('[资金费结算] ' + symbol + ' rate=' + fundingPct + '% timeToFunding=' + timeToFundingSec + 's');
-    
-    // 资金费率 > 0.1%（空头大收益）→ 触发一次加仓机会提示
-    if (fundingRate > 0.001) {
-      logWarn('[资金费机会] 空头收益率 ' + fundingPct + '% > 0.1%，可考虑加仓做空');
-      try {
-        if (typeof bridge_tgSend === 'function') {
-          bridge_tgSend('9号', '[机会] ' + symbol + ' 资金费率 ' + fundingPct + '%，空头收益丰厚，评估加仓做空 runId=' + state.runId);
-        }
-      } catch (e) {}
+    // 参数校验
+    if (!position || !entryPrice || !currentPrice || holdingMinutes === undefined) {
+      logWarn('[st_customStoploss] 参数缺失，使用默认-15%止损');
+      return -0.15;
     }
     
-    // 资金费率 < -0.1%（空头付费）→ 发出减仓警告
-    else if (fundingRate < -0.001) {
-      logWarn('[资金费警告] 空头付费率 ' + fundingPct + '% < -0.1%，建议减仓避免高成本');
-      try {
-        if (typeof bridge_tgSend === 'function') {
-          bridge_tgSend('9号', '[警告] ' + symbol + ' 资金费率 ' + fundingPct + '%，空头付费高，考虑减仓 runId=' + state.runId);
-        }
-      } catch (e) {}
+    const pnlPct = unrealizedPnlPct || (unrealizedPnl / (Math.abs(position) * entryPrice));
+    
+    // 前60分钟：固定-15%止损（最大亏损）
+    if (holdingMinutes < 60) {
+      logInfo('[动态止损] 前60分钟，固定-15%止损 holding=' + holdingMinutes + 'min pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      return -0.15;
     }
     
-    // 常规记录（-0.1% 到 0.1% 之间）
-    else {
-      logInfo('[资金费常规] 费率 ' + fundingPct + '% 在常规区间，无特殊操作');
+    // 盈利>10%后：转-1.5%追踪止损（锁定更多利润）
+    if (pnlPct > 0.10) {
+      logInfo('[动态止损] 盈利>10%，转-1.5%追踪止损 pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      return -0.015;
     }
+    
+    // 盈利>5%后：转-3%追踪止损（保护利润）
+    if (pnlPct > 0.05) {
+      logInfo('[动态止损] 盈利>5%，转-3%追踪止损 pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      return -0.03;
+    }
+    
+    // 默认：-15%止损
+    logInfo('[动态止损] 默认-15%止损 holding=' + holdingMinutes + 'min pnl=' + (pnlPct * 100).toFixed(2) + '%');
+    return -0.15;
   } catch (e) {
-    logWarn('st_onFundingFee failed: ' + e);
+    logWarn('st_customStoploss failed: ' + e);
+    return -0.15; // 出错时返回默认-15%
   }
 }
 
@@ -2927,6 +2950,30 @@ function getEffectiveMagnetDistance() {
  * @returns {boolean} true=可以下单，false=条件不满足
  */
 function shouldPlaceOrder(grid, distance) {
+  // ===== P1新增：订单超时检查 =====
+  // 超时条件：grid.state==='ACTIVE' && grid.createdAt && (now - grid.createdAt) > orderTimeoutSec*1000
+  if (grid.state === 'ACTIVE' && grid.createdAt) {
+    const now = Date.now();
+    const orderTimeoutMs = (CONFIG.orderTimeoutSec || 3600) * 1000;
+    const elapsed = now - grid.createdAt;
+    if (elapsed > orderTimeoutMs) {
+      logWarn('[OrderTimeout] gridId=' + grid.id + ' 挂单超时 ' + Math.floor(elapsed / 1000) + 's > ' + CONFIG.orderTimeoutSec + 's，自动撤销');
+      try {
+        if (grid.orderId) {
+          bridge_cancelOrder(grid.orderId);
+        }
+      } catch (e) {
+        logWarn('[OrderTimeout] gridId=' + grid.id + ' 撤单失败: ' + e);
+      }
+      // 重置grid状态
+      grid.state = 'IDLE';
+      grid.orderId = undefined;
+      grid.orderLinkId = undefined;
+      grid.orderPrice = undefined;
+      return false;
+    }
+  }
+
   // 杠杆硬顶/熔断blockNewOrders：优先拦截，并打印准确原因
   if (circuitBreakerState.blockNewOrders) {
     var blockReason = (circuitBreakerState.leverageHardCapTriggeredAt > 0) ? '杠杆硬顶' : '仓位熔断';
@@ -2948,9 +2995,29 @@ function shouldPlaceOrder(grid, distance) {
 
   const distancePct = (distance * 100).toFixed(2);
 
+  // ===== P2新增：ROI时间梯度检查 =====
+  // 根据持仓时间动态调整触发距离，持仓越久越容易触发（强迫快进快出）
+  let timeDecayMultiplier = 1.0;
+  if (CONFIG.gridTimeDecay?.enabled && grid.createdAt) {
+    const now = Date.now();
+    const holdingMinutes = Math.floor((now - grid.createdAt) / 60000);
+    
+    // 查找适用的stage
+    for (const stage of CONFIG.gridTimeDecay.stages) {
+      if (holdingMinutes >= stage.afterMinutes) {
+        timeDecayMultiplier = stage.spacingMultiplier;
+      }
+    }
+    
+    if (timeDecayMultiplier < 1.0) {
+      logDebug('[ROI时间梯度] gridId=' + grid.id + ' 持仓=' + holdingMinutes + 'min 间距倍数=' + timeDecayMultiplier);
+    }
+  }
+
   // ===== 1. 磁铁距离检查 =====
   // 为什么需要磁铁：网格策略只在价格接近网格线时挂单，避免远处挂单被瞬时波动触发
-  const magnet = getEffectiveMagnetDistance();
+  const baseMagnet = getEffectiveMagnetDistance();
+  const magnet = baseMagnet * timeDecayMultiplier;  // 应用时间梯度
   if (distance > magnet) {
     return false;  // 距离太远，不在磁铁范围内
   }

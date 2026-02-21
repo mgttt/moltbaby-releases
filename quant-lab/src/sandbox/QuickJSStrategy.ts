@@ -599,6 +599,9 @@ export class QuickJSStrategy {
 
     // 处理待处理订单
     await this.processPendingOrders();
+
+    // P1新增：动态止损检查
+    await this.checkAndExecuteStoploss();
   }
 
   /**
@@ -768,6 +771,117 @@ export class QuickJSStrategy {
       }
     } catch (error: any) {
       logger.warn(`[QuickJSStrategy] 检测资金费失败:`, error.message);
+    }
+  }
+
+  /**
+   * P1新增：动态止损检查与执行
+   * 调用策略JS的st_customStoploss并根据返回值执行减仓
+   */
+  private async checkAndExecuteStoploss(): Promise<void> {
+    if (!this.ctx || !this.cachedPositions) return;
+
+    // 检查策略是否实现了st_customStoploss
+    const globalHandle = this.ctx.global;
+    const stCustomStoplossHandle = this.ctx.getProp(globalHandle, 'st_customStoploss');
+    const isFunction = this.ctx.typeof(stCustomStoplossHandle) === 'function';
+    stCustomStoplossHandle.dispose();
+
+    if (!isFunction) {
+      return; // 策略未实现，跳过
+    }
+
+    for (const [symbol, position] of this.cachedPositions.entries()) {
+      if (!position || position.quantity === 0) continue;
+
+      try {
+        // 计算持仓时长（基于第一个订单时间）
+        const now = Date.now();
+        const positionEntryTime = this.getPositionEntryTime(symbol);
+        const holdingMinutes = positionEntryTime > 0 
+          ? Math.floor((now - positionEntryTime) / 60000) 
+          : 0;
+
+        // 构造止损数据
+        const stoplossData = {
+          symbol,
+          position: position.quantity,
+          entryPrice: position.entryPrice,
+          currentPrice: position.currentPrice,
+          holdingMinutes,
+          unrealizedPnl: position.unrealizedPnl,
+          unrealizedPnlPct: position.entryPrice > 0 
+            ? (position.currentPrice - position.entryPrice) / position.entryPrice * (position.side === 'SHORT' ? -1 : 1)
+            : 0,
+        };
+
+        // 调用策略的st_customStoploss
+        const code = `st_customStoploss(${JSON.stringify(stoplossData)})`;
+        const result = this.ctx!.evalCode(code);
+
+        if (result.error) {
+          const errorMsg = this.ctx!.dump(result.error);
+          logger.error(`[QuickJSStrategy] st_customStoploss 执行失败:`, errorMsg);
+          result.error.dispose();
+          continue;
+        }
+
+        const stoplossThreshold = this.ctx!.dump(result.value);
+        result.value.dispose();
+
+        // 检查是否触发止损
+        if (stoplossData.unrealizedPnlPct < stoplossThreshold) {
+          logger.warn(`[动态止损] ${symbol} 触发止损: 当前盈亏=${(stoplossData.unrealizedPnlPct * 100).toFixed(2)}% 阈值=${(stoplossThreshold * 100).toFixed(2)}%`);
+          
+          // 执行减仓（市价单平掉全部或部分仓位）
+          await this.executeStoplossOrder(symbol, position);
+        }
+      } catch (error: any) {
+        logger.error(`[QuickJSStrategy] 动态止损检查失败 ${symbol}:`, error.message);
+      }
+    }
+  }
+
+  /**
+   * P1新增：获取持仓首次入场时间
+   */
+  private getPositionEntryTime(symbol: string): number {
+    // 从订单历史中找到该品种最早的成交订单
+    const orders = this.orderStateManager.getAllOrders();
+    let earliestTime = 0;
+    
+    for (const order of orders) {
+      if (order.product === symbol && order.state === 'FILLED' && order.updatedAt) {
+        if (earliestTime === 0 || order.updatedAt < earliestTime) {
+          earliestTime = order.updatedAt;
+        }
+      }
+    }
+    
+    return earliestTime;
+  }
+
+  /**
+   * P1新增：执行止损订单
+   */
+  private async executeStoplossOrder(symbol: string, position: Position): Promise<void> {
+    try {
+      if (!this.strategyCtx) return;
+
+      const closeSide = position.side === 'LONG' ? 'SELL' : 'BUY';
+      const closeQty = Math.abs(position.quantity);
+
+      logger.warn(`[动态止损执行] ${symbol} ${closeSide} ${closeQty} @ 市价`);
+
+      if (closeSide === 'SELL') {
+        await this.strategyCtx.sell(symbol, closeQty);
+      } else {
+        await this.strategyCtx.buy(symbol, closeQty);
+      }
+
+      logger.info(`[动态止损执行] ${symbol} 减仓成功`);
+    } catch (error: any) {
+      logger.error(`[动态止损执行] ${symbol} 减仓失败:`, error.message);
     }
   }
 
