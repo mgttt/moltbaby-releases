@@ -21,7 +21,7 @@ function getHomeDir(): string {
 import type { QuickJSContext as QuickJSContextType } from 'quickjs-emscripten';
 import type { Kline } from '../../../quant-lib/src';
 import type { StrategyContext, Order, Position, Account } from '../engine/types';
-import { sma, ema, rsi, macd, bollingerBands, atr, stdDev, wma } from '../../quant-lib/src/indicators/indicators';
+import { sma, ema, rsi, macd, bollingerBands, atr, stdDev, wma } from '../../../quant-lib/src/indicators/indicators';
 import { OrderStateManager, globalOrderManager } from '../engine/OrderStateManager';
 import { LegacyOrderTracker } from '../engine/LegacyOrderTracker';
 
@@ -2031,6 +2031,72 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_writeMetric', bridge_writeMetric);
     bridge_writeMetric.dispose();
+
+    // P3新增：bridge_readMetric - 从磁盘读取指标
+    const bridge_readMetric = this.ctx.newFunction('bridge_readMetric', async (nameHandle, limitHandle) => {
+      const name = this.ctx!.getString(nameHandle);
+      const limit = limitHandle ? this.ctx!.getNumber(limitHandle) : 10;
+      const strategyId = this.config.strategyId;
+      const metricsDir = join(getHomeDir(), '.quant-lib', 'metrics', strategyId);
+
+      try {
+        // 先flush确保最新数据已写入磁盘
+        await this.flushMetrics();
+
+        // spawn ndtsdb-cli query读取数据
+        const { spawn } = await import('child_process');
+        const ndtsdbCli = '/home/devali/moltbaby/ndtsdb-cli/ndtsdb-cli';
+
+        const rows: Array<{timestamp: number, value: number}> = await new Promise((resolve, reject) => {
+          const proc = spawn(ndtsdbCli, [
+            'query', '--database', metricsDir,
+            '--symbols', name,
+            '--limit', String(limit),
+            '--format', 'json'
+          ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+          let stdout = '';
+          let stderr = '';
+          proc.stdout.on('data', (data) => { stdout += data; });
+          proc.stderr.on('data', (data) => { stderr += data; });
+
+          proc.on('close', (code) => {
+            if (code !== 0) {
+              reject(new Error(`ndtsdb-cli query failed: ${stderr}`));
+              return;
+            }
+
+            // 解析每行JSON
+            const lines = stdout.trim().split('\n').filter(l => l.trim());
+            const result = lines.map(line => {
+              try {
+                const row = JSON.parse(line);
+                return {
+                  timestamp: Number(row.timestamp),
+                  value: Number(row.close) // 使用close字段作为value
+                };
+              } catch (e) {
+                return null;
+              }
+            }).filter((r): r is {timestamp: number, value: number} => r !== null);
+
+            resolve(result);
+          });
+
+          proc.on('error', (err) => {
+            reject(new Error(`Failed to spawn ndtsdb-cli: ${err.message}`));
+          });
+        });
+
+        logger.debug(`[QuickJSStrategy] 读取指标: ${name}, limit=${limit}, 返回${rows.length}条`);
+        return this.ctx!.newString(JSON.stringify(rows));
+      } catch (error: any) {
+        logger.error(`[QuickJSStrategy] 读取指标失败:`, error.message);
+        return this.ctx!.newString(JSON.stringify([]));
+      }
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_readMetric', bridge_readMetric);
+    bridge_readMetric.dispose();
 
     // P2修复：bridge_tgSend - 发送Telegram通知
     // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，避免干扰；需显式开启 STRATEGY_TG_ENABLED=1

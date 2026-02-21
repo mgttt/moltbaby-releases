@@ -241,7 +241,7 @@ async function main() {
   // 确保重启后能加载到相同的state文件
   const direction = params.direction || 'neutral';
   const strategy = new QuickJSStrategy({
-    strategyId: `gales-${symbol}-${direction}`,
+    strategyId: params.strategyId || `gales-${symbol}-${direction}`,
     strategyFile,
     params,
     maxRetries: 3,
@@ -268,7 +268,7 @@ async function main() {
   // - RELOAD_API_PORT=0: 禁用HTTP server（live默认）
   // - RELOAD_API_PORT未设置: live模式禁用，paper模式启用动态端口
   // - RELOAD_API_PORT显式指定: 使用指定端口
-  const strategyId = `gales-${symbol}-${direction}`;
+  const strategyId = params.strategyId || `gales-${symbol}-${direction}`;
   let apiPort: number;
   
   if (process.env.RELOAD_API_PORT === '0') {
