@@ -1,4 +1,6 @@
 // ============================================================
+import { createLogger } from '../utils/logger';
+const logger = createLogger('GalesStrategy');
 // Gales Strategy - 磁铁限价网格策略
 // 
 // Grid + Martingale = Gales (大风大浪中收益)

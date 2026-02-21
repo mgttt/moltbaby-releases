@@ -1,4 +1,6 @@
 // ============================================================
+import { createLogger } from '../utils/logger';
+const logger = createLogger('BacktestEngine');
 // 回测引擎
 // ============================================================
 
@@ -68,9 +70,9 @@ export class BacktestEngine {
    * 运行回测
    */
   async run(): Promise<BacktestResult> {
-    console.log(`[BacktestEngine] 开始回测: ${this.strategy.name}`);
-    console.log(`  品种: ${this.config.symbols.join(', ')}`);
-    console.log(`  周期: ${this.config.interval}`);
+    logger.info(`[BacktestEngine] 开始回测: ${this.strategy.name}`);
+    logger.info(`  品种: ${this.config.symbols.join(', ')}`);
+    logger.info(`  周期: ${this.config.interval}`);
     console.log(`  时间: ${new Date(this.config.startTime * 1000).toISOString()} ~ ${new Date(this.config.endTime * 1000).toISOString()}`);
     console.log(`  初始资金: $${this.config.initialBalance.toLocaleString()}`);
     
@@ -120,10 +122,10 @@ export class BacktestEngine {
     // 计算回测结果
     const result = this.computeResult();
     
-    console.log(`[BacktestEngine] 回测完成`);
-    console.log(`  最终权益: $${result.finalBalance.toLocaleString()}`);
-    console.log(`  总回报: ${(result.totalReturn * 100).toFixed(2)}%`);
-    console.log(`  最大回撤: ${(result.maxDrawdown * 100).toFixed(2)}%`);
+    logger.info(`[BacktestEngine] 回测完成`);
+    logger.info(`  最终权益: $${result.finalBalance.toLocaleString()}`);
+    logger.info(`  总回报: ${(result.totalReturn * 100).toFixed(2)}%`);
+    logger.info(`  最大回撤: ${(result.maxDrawdown * 100).toFixed(2)}%`);
     console.log(`  胜率: ${(result.winRate * 100).toFixed(2)}%`);
     console.log(`  总交易: ${result.totalTrades}`);
     

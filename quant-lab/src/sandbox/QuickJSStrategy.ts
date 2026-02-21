@@ -1,4 +1,6 @@
 // ============================================================
+import { createLogger } from '../utils/logger';
+const logger = createLogger('QUICK_JSSTRATEGY');
 // QuickJS 沙箱策略运行器 (v3)
 //
 // 将 .js 策略文件包装成 Strategy 接口
@@ -83,7 +85,7 @@ export class QuickJSStrategy {
 
   // bar 缓存层（历史K线 REST→ndtsdb，不影响WS tick路径）
   private barCache = new BarCacheLayer({
-    logger: (msg) => console.log(`[BarCache] ${msg}`),
+    logger: (msg) => logger.info(`[BarCache] ${msg}`),
   });
   
   // 待处理订单队列（异步执行）
@@ -129,7 +131,7 @@ export class QuickJSStrategy {
     // P0: 初始化订单状态管理器
     this.orderStateManager = new OrderStateManager();
     this.orderStateManager.onAlert((alert) => {
-      console.error(`[QuickJSStrategy] 订单异常告警:`, alert);
+      logger.error(`[QuickJSStrategy] 订单异常告警:`, alert);
     });
     
     // P1: 初始化遗留订单追踪器（从 state 恢复 runId）
@@ -137,7 +139,7 @@ export class QuickJSStrategy {
     this.loadState();
     const runId = this.strategyState.get('runId')?.toString() || Date.now().toString();
     this.legacyOrderTracker = new LegacyOrderTracker(runId, this.config.strategyId);
-    console.log(`[QuickJSStrategy] 遗留订单追踪器已初始化, runId=${runId}`);
+    logger.info(`[QuickJSStrategy] 遗留订单追踪器已初始化, runId=${runId}`);
   }
 
   /**
@@ -147,8 +149,8 @@ export class QuickJSStrategy {
     this.strategyCtx = ctx;
     this.bootTimeMs = Date.now();  // 记录启动时间（用于Order Reconcile过滤）
 
-    console.log(`[QuickJSStrategy] 初始化策略: ${this.config.strategyId}`);
-    console.log(`[QuickJSStrategy] 文件: ${this.config.strategyFile}`);
+    logger.info(`[QuickJSStrategy] 初始化策略: ${this.config.strategyId}`);
+    logger.info(`[QuickJSStrategy] 文件: ${this.config.strategyFile}`);
 
     // 启动热重载监听
     if (this.config.hotReload) {
@@ -199,10 +201,10 @@ export class QuickJSStrategy {
       try {
         await this.refreshCache(this.strategyCtx!);
       } catch (error: any) {
-        console.error(`[QuickJSStrategy] [Init] 缓存刷新失败，使用空缓存启动:`, error.message);
-        console.error(`[QuickJSStrategy] [Init] 策略将继续运行，onTick会定期重试刷新`);
+        logger.error(`[QuickJSStrategy] [Init] 缓存刷新失败，使用空缓存启动:`, error.message);
+        logger.error(`[QuickJSStrategy] [Init] 策略将继续运行，onTick会定期重试刷新`);
         // P2修复：缓存未就绪门闸（bot-009建议）
-        console.error(`[QuickJSStrategy] [Init] [P2 GATE] cacheReady=false，禁止下单直到缓存刷新成功`);
+        logger.error(`[QuickJSStrategy] [Init] [P2 GATE] cacheReady=false，禁止下单直到缓存刷新成功`);
         // 使用空缓存继续（稍后onTick每60心跳会重试）
       }
 
@@ -214,15 +216,15 @@ export class QuickJSStrategy {
       this.errorCount = 0;
       this.lastError = undefined;
       
-      console.log(`[QuickJSStrategy] 策略初始化完成`);
+      logger.info(`[QuickJSStrategy] 策略初始化完成`);
     } catch (error: any) {
       this.errorCount++;
       this.lastError = error;
-      console.error(`[QuickJSStrategy] 初始化失败 (${this.errorCount}/${this.config.maxRetries}):`, error.message);
+      logger.error(`[QuickJSStrategy] 初始化失败 (${this.errorCount}/${this.config.maxRetries}):`, error.message);
       
       // 自动重试
       if (this.errorCount < this.config.maxRetries!) {
-        console.log(`[QuickJSStrategy] ${this.config.retryDelayMs}ms 后重试...`);
+        logger.info(`[QuickJSStrategy] ${this.config.retryDelayMs}ms 后重试...`);
         await new Promise(resolve => setTimeout(resolve, this.config.retryDelayMs));
         await this.initializeSandbox();
       } else {
@@ -246,12 +248,12 @@ export class QuickJSStrategy {
     // 计算旧版本hash
     const oldHash = this.calculateFileHash();
     
-    console.log(`[QuickJSStrategy] [RELOAD] =========================================`);
-    console.log(`[QuickJSStrategy] [RELOAD] 开始热重载`);
-    console.log(`[QuickJSStrategy] [RELOAD] 策略ID: ${this.config.strategyId}`);
-    console.log(`[QuickJSStrategy] [RELOAD] 触发人: ${triggeredBy}`);
-    console.log(`[QuickJSStrategy] [RELOAD] 时间戳: ${timestamp}`);
-    console.log(`[QuickJSStrategy] [RELOAD] 旧hash: ${oldHash}`);
+    logger.info(`[QuickJSStrategy] [RELOAD] =========================================`);
+    logger.info(`[QuickJSStrategy] [RELOAD] 开始热重载`);
+    logger.info(`[QuickJSStrategy] [RELOAD] 策略ID: ${this.config.strategyId}`);
+    logger.info(`[QuickJSStrategy] [RELOAD] 触发人: ${triggeredBy}`);
+    logger.info(`[QuickJSStrategy] [RELOAD] 时间戳: ${timestamp}`);
+    logger.info(`[QuickJSStrategy] [RELOAD] 旧hash: ${oldHash}`);
 
     try {
       // 1. 保存完整状态快照（用于回滚）
@@ -260,12 +262,12 @@ export class QuickJSStrategy {
       snapshot.triggeredBy = triggeredBy;
       snapshot.timestamp = Date.now();
       this.saveSnapshotForRollback(snapshot);
-      console.log(`[QuickJSStrategy] [RELOAD] 状态快照已创建`);
+      logger.info(`[QuickJSStrategy] [RELOAD] 状态快照已创建`);
 
       // 2. 调用st_stop清理旧策略
       if (this.ctx && this.initialized) {
         await this.callStrategyFunction('st_stop').catch((err) => {
-          console.warn(`[QuickJSStrategy] st_stop失败:`, err.message);
+          logger.warn(`[QuickJSStrategy] st_stop失败:`, err.message);
         });
       }
 
@@ -281,7 +283,7 @@ export class QuickJSStrategy {
 
       // 5. 计算新版本hash
       const newHash = this.calculateFileHash();
-      console.log(`[QuickJSStrategy] [RELOAD] 新hash: ${newHash}`);
+      logger.info(`[QuickJSStrategy] [RELOAD] 新hash: ${newHash}`);
 
       // 6. 恢复状态快照
       await this.restoreSnapshot(snapshot);
@@ -301,16 +303,16 @@ export class QuickJSStrategy {
 
       const duration = Date.now() - startTime;
       
-      console.log(`[QuickJSStrategy] [RELOAD] 热重载完成 ✅ (${duration}ms)`);
-      console.log(`[QuickJSStrategy] [RELOAD] hash变化: ${oldHash} → ${newHash}`);
-      console.log(`[QuickJSStrategy] [RELOAD] =========================================`);
+      logger.info(`[QuickJSStrategy] [RELOAD] 热重载完成 ✅ (${duration}ms)`);
+      logger.info(`[QuickJSStrategy] [RELOAD] hash变化: ${oldHash} → ${newHash}`);
+      logger.info(`[QuickJSStrategy] [RELOAD] =========================================`);
 
       return { success: true, oldHash, newHash, duration };
     } catch (error: any) {
       const duration = Date.now() - startTime;
-      console.error(`[QuickJSStrategy] [RELOAD] 热重载失败 ❌ (${duration}ms)`);
-      console.error(`[QuickJSStrategy] [RELOAD] 错误:`, error.message);
-      console.error(`[QuickJSStrategy] [RELOAD] =========================================`);
+      logger.error(`[QuickJSStrategy] [RELOAD] 热重载失败 ❌ (${duration}ms)`);
+      logger.error(`[QuickJSStrategy] [RELOAD] 错误:`, error.message);
+      logger.error(`[QuickJSStrategy] [RELOAD] =========================================`);
       throw error;
     }
   }
@@ -347,7 +349,7 @@ export class QuickJSStrategy {
     const filepath = join(snapshotDir, filename);
     
     writeFileSync(filepath, JSON.stringify(snapshot, null, 2));
-    console.log(`[QuickJSStrategy] 快照已保存: ${filepath}`);
+    logger.info(`[QuickJSStrategy] 快照已保存: ${filepath}`);
   }
 
   /**
@@ -355,9 +357,9 @@ export class QuickJSStrategy {
    */
   async rollback(): Promise<{ success: boolean; restoredHash?: string; error?: string; rto: number }> {
     const startTime = Date.now();
-    console.log(`[QuickJSStrategy] [ROLLBACK] =========================================`);
-    console.log(`[QuickJSStrategy] [ROLLBACK] 开始回滚`);
-    console.log(`[QuickJSStrategy] [ROLLBACK] 策略ID: ${this.config.strategyId}`);
+    logger.info(`[QuickJSStrategy] [ROLLBACK] =========================================`);
+    logger.info(`[QuickJSStrategy] [ROLLBACK] 开始回滚`);
+    logger.info(`[QuickJSStrategy] [ROLLBACK] 策略ID: ${this.config.strategyId}`);
     
     try {
       // 获取上一版快照
@@ -366,12 +368,12 @@ export class QuickJSStrategy {
         throw new Error('没有找到上一版快照');
       }
       
-      console.log(`[QuickJSStrategy] [ROLLBACK] 目标hash: ${snapshot.previousHash || 'unknown'}`);
+      logger.info(`[QuickJSStrategy] [ROLLBACK] 目标hash: ${snapshot.previousHash || 'unknown'}`);
       
       // 1. 调用st_stop清理当前策略
       if (this.ctx && this.initialized) {
         await this.callStrategyFunction('st_stop').catch((err) => {
-          console.warn(`[QuickJSStrategy] st_stop失败:`, err.message);
+          logger.warn(`[QuickJSStrategy] st_stop失败:`, err.message);
         });
       }
 
@@ -384,7 +386,7 @@ export class QuickJSStrategy {
       // 3. 恢复上一版策略文件（从快照中的源代码）
       if (snapshot.sourceCode) {
         writeFileSync(this.config.strategyFile, snapshot.sourceCode);
-        console.log(`[QuickJSStrategy] [ROLLBACK] 策略文件已恢复`);
+        logger.info(`[QuickJSStrategy] [ROLLBACK] 策略文件已恢复`);
       }
 
       // 4. 重新初始化
@@ -402,16 +404,16 @@ export class QuickJSStrategy {
       const duration = Date.now() - startTime;
       const rto = duration; // RTO = 实际恢复时间
       
-      console.log(`[QuickJSStrategy] [ROLLBACK] 回滚完成 ✅ (${duration}ms)`);
-      console.log(`[QuickJSStrategy] [ROLLBACK] RTO: ${rto}ms`);
-      console.log(`[QuickJSStrategy] [ROLLBACK] =========================================`);
+      logger.info(`[QuickJSStrategy] [ROLLBACK] 回滚完成 ✅ (${duration}ms)`);
+      logger.info(`[QuickJSStrategy] [ROLLBACK] RTO: ${rto}ms`);
+      logger.info(`[QuickJSStrategy] [ROLLBACK] =========================================`);
 
       return { success: true, restoredHash: snapshot.previousHash, rto };
     } catch (error: any) {
       const duration = Date.now() - startTime;
-      console.error(`[QuickJSStrategy] [ROLLBACK] 回滚失败 ❌ (${duration}ms)`);
-      console.error(`[QuickJSStrategy] [ROLLBACK] 错误:`, error.message);
-      console.error(`[QuickJSStrategy] [ROLLBACK] =========================================`);
+      logger.error(`[QuickJSStrategy] [ROLLBACK] 回滚失败 ❌ (${duration}ms)`);
+      logger.error(`[QuickJSStrategy] [ROLLBACK] 错误:`, error.message);
+      logger.error(`[QuickJSStrategy] [ROLLBACK] =========================================`);
       return { success: false, error: error.message, rto: duration };
     }
   }
@@ -440,18 +442,18 @@ export class QuickJSStrategy {
   }
 
   private startHotReload(): void {
-    console.log(`[QuickJSStrategy] 启动热重载监听: ${this.config.strategyFile}`);
+    logger.info(`[QuickJSStrategy] 启动热重载监听: ${this.config.strategyFile}`);
 
     watchFile(this.config.strategyFile, { interval: 2000 }, async (curr, prev) => {
       if (curr.mtimeMs !== this.fileLastModified) {
-        console.log(`[QuickJSStrategy] 检测到文件变化，触发自动重新加载...`);
+        logger.info(`[QuickJSStrategy] 检测到文件变化，触发自动重新加载...`);
         this.fileLastModified = curr.mtimeMs;
 
         try {
           // 使用新的reload()方法
           await this.reload();
         } catch (error: any) {
-          console.error(`[QuickJSStrategy] 自动热重载失败:`, error.message);
+          logger.error(`[QuickJSStrategy] 自动热重载失败:`, error.message);
         }
       }
     });
@@ -492,11 +494,11 @@ export class QuickJSStrategy {
     } catch (error: any) {
       this.errorCount++;
       this.lastError = error;
-      console.error(`[QuickJSStrategy] onBar 错误 (${this.errorCount}):`, error.message);
+      logger.error(`[QuickJSStrategy] onBar 错误 (${this.errorCount}):`, error.message);
 
       // 错误隔离：记录但不中断
       if (this.errorCount > 10) {
-        console.error(`[QuickJSStrategy] 错误次数过多，尝试重启沙箱...`);
+        logger.error(`[QuickJSStrategy] 错误次数过多，尝试重启沙箱...`);
         await this.recoverSandbox();
       }
     }
@@ -506,7 +508,7 @@ export class QuickJSStrategy {
    * 沙箱恢复（错误后重启）
    */
   private async recoverSandbox(): Promise<void> {
-    console.log(`[QuickJSStrategy] 开始沙箱恢复...`);
+    logger.info(`[QuickJSStrategy] 开始沙箱恢复...`);
 
     try {
       // 清理旧沙箱
@@ -522,9 +524,9 @@ export class QuickJSStrategy {
       // 重新初始化
       await this.initializeSandbox();
 
-      console.log(`[QuickJSStrategy] 沙箱恢复成功`);
+      logger.info(`[QuickJSStrategy] 沙箱恢复成功`);
     } catch (error: any) {
-      console.error(`[QuickJSStrategy] 沙箱恢复失败:`, error.message);
+      logger.error(`[QuickJSStrategy] 沙箱恢复失败:`, error.message);
       throw error;
     }
   }
@@ -545,16 +547,16 @@ export class QuickJSStrategy {
       const wasReady = this.cacheReady;
       try {
         await this.refreshCache(ctx);
-        console.log(`[QuickJSStrategy] [Cache Refresh] 持仓缓存已刷新 (tick #${this.tickCount})`);
+        logger.info(`[QuickJSStrategy] [Cache Refresh] 持仓缓存已刷新 (tick #${this.tickCount})`);
         // P2修复：缓存刷新成功后记录门闸状态变化（bot-009建议）
         if (!wasReady && this.cacheReady) {
-          console.log(`[QuickJSStrategy] [P2 GATE] cacheReady: false → true，允许下单`);
+          logger.info(`[QuickJSStrategy] [P2 GATE] cacheReady: false → true，允许下单`);
         }
       } catch (error: any) {
-        console.error(`[QuickJSStrategy] [Cache Refresh] 刷新失败:`, error.message);
+        logger.error(`[QuickJSStrategy] [Cache Refresh] 刷新失败:`, error.message);
         // P2修复：缓存刷新失败后记录门闸状态（bot-009建议）
         if (wasReady && !this.cacheReady) {
-          console.error(`[QuickJSStrategy] [P2 GATE] cacheReady: true → false，禁止下单`);
+          logger.error(`[QuickJSStrategy] [P2 GATE] cacheReady: true → false，禁止下单`);
         }
       }
       
@@ -601,13 +603,13 @@ export class QuickJSStrategy {
       
       if (result.error) {
         const errorMsg = this.ctx.dump(result.error);
-        console.error(`[QuickJSStrategy] st_onOrderUpdate 执行失败:`, errorMsg);
+        logger.error(`[QuickJSStrategy] st_onOrderUpdate 执行失败:`, errorMsg);
         result.error.dispose();
       } else {
         result.value.dispose();
       }
     } catch (error: any) {
-      console.error(`[QuickJSStrategy] st_onOrderUpdate 调用异常:`, error.message);
+      logger.error(`[QuickJSStrategy] st_onOrderUpdate 调用异常:`, error.message);
     }
   }
 
@@ -616,11 +618,11 @@ export class QuickJSStrategy {
    */
   notifyOrderUpdate(orderUpdate: { orderId: string; gridId?: number; status?: string; cumQty?: number; avgPrice?: number }): void {
     if (!this.initialized || !this.ctx) {
-      console.warn(`[QuickJSStrategy] notifyOrderUpdate: 策略未初始化`);
+      logger.warn(`[QuickJSStrategy] notifyOrderUpdate: 策略未初始化`);
       return;
     }
 
-    console.log(`[QuickJSStrategy] notifyOrderUpdate: 通知策略订单更新`, orderUpdate);
+    logger.info(`[QuickJSStrategy] notifyOrderUpdate: 通知策略订单更新`, orderUpdate);
 
     try {
       // 调用沙箱里的 st_onOrderUpdate
@@ -630,17 +632,17 @@ export class QuickJSStrategy {
       
       if (result.error) {
         const errorMsg = this.ctx.dump(result.error);
-        console.error(`[QuickJSStrategy] notifyOrderUpdate 执行失败:`, errorMsg);
+        logger.error(`[QuickJSStrategy] notifyOrderUpdate 执行失败:`, errorMsg);
         result.error.dispose();
       } else {
-        console.log(`[QuickJSStrategy] notifyOrderUpdate 执行成功`);
+        logger.info(`[QuickJSStrategy] notifyOrderUpdate 执行成功`);
         result.value.dispose();
         
         // P0: 更新订单状态
         this.updateOrderStateFromNotification(orderUpdate);
       }
     } catch (error: any) {
-      console.error(`[QuickJSStrategy] notifyOrderUpdate 调用异常:`, error.message);
+      logger.error(`[QuickJSStrategy] notifyOrderUpdate 调用异常:`, error.message);
     }
   }
 
@@ -699,7 +701,7 @@ export class QuickJSStrategy {
       throw new Error('策略未初始化，无法更新参数');
     }
 
-    console.log(`[QuickJSStrategy] 热更新参数:`, newParams);
+    logger.info(`[QuickJSStrategy] 热更新参数:`, newParams);
 
     // 1. 更新内部参数存储
     this.config.params = { ...this.config.params, ...newParams };
@@ -718,9 +720,9 @@ export class QuickJSStrategy {
     // 3. 调用策略的参数更新回调
     try {
       await this.callStrategyFunction('st_onParamsUpdate', this.config.params);
-      console.log(`[QuickJSStrategy] 参数更新完成`);
+      logger.info(`[QuickJSStrategy] 参数更新完成`);
     } catch (error: any) {
-      console.warn(`[QuickJSStrategy] 策略未实现 st_onParamsUpdate:`, error.message);
+      logger.warn(`[QuickJSStrategy] 策略未实现 st_onParamsUpdate:`, error.message);
     }
 
     // 4. 保存状态
@@ -731,12 +733,12 @@ export class QuickJSStrategy {
    * 停止
    */
   async onStop(ctx: StrategyContext): Promise<void> {
-    console.log(`[QuickJSStrategy] 停止策略: ${this.config.strategyId}`);
+    logger.info(`[QuickJSStrategy] 停止策略: ${this.config.strategyId}`);
 
     // 停止热重载监听
     if (this.config.hotReload) {
       unwatchFile(this.config.strategyFile);
-      console.log(`[QuickJSStrategy] 已停止热重载监听`);
+      logger.info(`[QuickJSStrategy] 已停止热重载监听`);
     }
 
     // 调用 st_stop（如果存在）
@@ -786,10 +788,10 @@ export class QuickJSStrategy {
             this.cachedPositions.set(withSlash, pos);
           }
           
-          console.log(`[QuickJSStrategy] 持仓缓存: symbol=${pos.symbol}, quantity=${pos.quantity}`);
+          logger.info(`[QuickJSStrategy] 持仓缓存: symbol=${pos.symbol}, quantity=${pos.quantity}`);
         }
         
-        console.log(`[QuickJSStrategy] 缓存刷新成功: ${positions.length} 个持仓`);
+        logger.info(`[QuickJSStrategy] 缓存刷新成功: ${positions.length} 个持仓`);
       } else {
         // LiveEngine/BacktestEngine: 使用同步 API
         this.cachedAccount = ctx.getAccount();
@@ -813,13 +815,13 @@ export class QuickJSStrategy {
           }
         }
         
-        console.log(`[QuickJSStrategy] 缓存刷新成功: ${account.positions.length} 个持仓`);
+        logger.info(`[QuickJSStrategy] 缓存刷新成功: ${account.positions.length} 个持仓`);
       }
       
       // P2修复：缓存刷新成功后设置门闸（bot-009建议）
       this.cacheReady = true;
     } catch (error: any) {
-      console.error(`[QuickJSStrategy] 缓存刷新失败:`, error.message);
+      logger.error(`[QuickJSStrategy] 缓存刷新失败:`, error.message);
       // P2修复：缓存刷新失败时门闸仍为false（bot-009建议）
       this.cacheReady = false;
       // P0 修复：抛出错误让调用者知道初始化失败
@@ -843,11 +845,11 @@ export class QuickJSStrategy {
       // 拉取未完成订单
       const openOrders = await (ctx as any).getOpenOrders();
       this.cachedOpenOrders = openOrders;  // P2修复：缓存openOrders（遗留订单检测）
-      console.log(`[QuickJSStrategy] [Order Reconcile] 未完成订单: ${openOrders.length} 个`);
+      logger.info(`[QuickJSStrategy] [Order Reconcile] 未完成订单: ${openOrders.length} 个`);
       
       if (openOrders.length > 0) {
         for (const order of openOrders.slice(0, 5)) {
-          console.log(`[QuickJSStrategy] [Order Reconcile] - orderId=${order.orderId}, orderLinkId=${order.orderLinkId}, symbol=${order.symbol}, side=${order.side}, qty=${order.qty}, price=${order.price}, status=${order.orderStatus}`);
+          logger.info(`[QuickJSStrategy] [Order Reconcile] - orderId=${order.orderId}, orderLinkId=${order.orderLinkId}, symbol=${order.symbol}, side=${order.side}, qty=${order.qty}, price=${order.price}, status=${order.orderStatus}`);
         }
       }
       
@@ -856,7 +858,7 @@ export class QuickJSStrategy {
       // 临时回退不传startTime，恢复监控能力（TODO: 研究Bybit API文档找到正确用法）
       const executions = await (ctx as any).getExecutions();
       this.cachedExecutions = executions;
-      console.log(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个`);
+      logger.info(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个`);
       
       // P1修复：过滤只处理本策略execution（按策略方向前缀）
       const strategyId = this.config.strategyId || '';
@@ -866,11 +868,11 @@ export class QuickJSStrategy {
         if (!exec.orderLinkId) return false;
         return exec.orderLinkId.startsWith(strategyPrefix);
       });
-      console.log(`[QuickJSStrategy] [Order Reconcile] 本策略成交: ${myExecutions.length} 个 (过滤后)`);
+      logger.info(`[QuickJSStrategy] [Order Reconcile] 本策略成交: ${myExecutions.length} 个 (过滤后)`);
       
       if (myExecutions.length > 0) {
         for (const exec of myExecutions.slice(0, 5)) {
-          console.log(`[QuickJSStrategy] [Order Reconcile] - execId=${exec.execId}, orderLinkId=${exec.orderLinkId}, symbol=${exec.symbol}, side=${exec.side}, execQty=${exec.execQty}, execPrice=${exec.execPrice}, execTime=${exec.execTime}`);
+          logger.info(`[QuickJSStrategy] [Order Reconcile] - execId=${exec.execId}, orderLinkId=${exec.orderLinkId}, symbol=${exec.symbol}, side=${exec.side}, execQty=${exec.execQty}, execPrice=${exec.execPrice}, execTime=${exec.execTime}`);
         }
         
         // NOTE: 不在Order Reconcile时处理历史executions，避免重复计算仓位
@@ -884,10 +886,10 @@ export class QuickJSStrategy {
       if (this.legacyOrderTracker) {
         const alerts = this.legacyOrderTracker.check(openOrders);
         for (const alert of alerts) {
-          console.log(`[QuickJSStrategy] ${alert.message}`);
+          logger.info(`[QuickJSStrategy] ${alert.message}`);
           // 发送 Telegram 告警（异步不阻塞）
           this.legacyOrderTracker.sendAlert(alert).catch(err => 
-            console.error(`[QuickJSStrategy] 遗留订单告警发送失败:`, err)
+            logger.error(`[QuickJSStrategy] 遗留订单告警发送失败:`, err)
           );
         }
       }
@@ -898,7 +900,7 @@ export class QuickJSStrategy {
       }
       
     } catch (error: any) {
-      console.error(`[QuickJSStrategy] [Order Reconcile] 对账失败:`, error.message);
+      logger.error(`[QuickJSStrategy] [Order Reconcile] 对账失败:`, error.message);
       // 不抛出错误，避免影响策略运行
     }
   }
@@ -920,8 +922,8 @@ export class QuickJSStrategy {
         // P1修复：不再标记ABNORMAL，而是标记为CANCELLED（假设已撤单）
         // 这是重挂/替换场景的正常情况：旧单被替换为新单(-0→-1)
         if (strategyOrder.state === 'SUBMITTED') {
-          console.warn(`[QuickJSStrategy] 订单在交易所不存在(假设已撤单): ${strategyOrder.orderLinkId}`);
-          console.warn(`  原状态: SUBMITTED → CANCELLED (重挂替换场景)`);
+          logger.warn(`[QuickJSStrategy] 订单在交易所不存在(假设已撤单): ${strategyOrder.orderLinkId}`);
+          logger.warn(`  原状态: SUBMITTED → CANCELLED (重挂替换场景)`);
           this.orderStateManager.updateState(strategyOrder.orderLinkId, 'CANCELLED');
         }
         continue;
@@ -934,9 +936,9 @@ export class QuickJSStrategy {
       );
       
       if (!check.consistent) {
-        console.warn(`[QuickJSStrategy] 订单状态不一致: ${strategyOrder.orderLinkId}`);
-        console.warn(`  策略状态: ${strategyOrder.state}`);
-        console.warn(`  交易所状态: ${exchangeOrder.orderStatus}`);
+        logger.warn(`[QuickJSStrategy] 订单状态不一致: ${strategyOrder.orderLinkId}`);
+        logger.warn(`  策略状态: ${strategyOrder.state}`);
+        logger.warn(`  交易所状态: ${exchangeOrder.orderStatus}`);
         
         // 延迟处理，给状态同步时间
         this.orderStateManager.handleInconsistency(
@@ -955,8 +957,8 @@ export class QuickJSStrategy {
     
     // P2修复：缓存就绪门闸检查（bot-009建议）
     if (!this.cacheReady) {
-      console.warn(`[QuickJSStrategy] [P2 GATE] 缓存未就绪，禁止下单（pending orders: ${this.pendingOrders.length}）`);
-      console.warn(`[QuickJSStrategy] [P2 GATE] 缓存刷新失败时未知真实仓位，强制拒绝下单避免风险`);
+      logger.warn(`[QuickJSStrategy] [P2 GATE] 缓存未就绪，禁止下单（pending orders: ${this.pendingOrders.length}）`);
+      logger.warn(`[QuickJSStrategy] [P2 GATE] 缓存刷新失败时未知真实仓位，强制拒绝下单避免风险`);
       
       // 拒绝所有pending orders
       const orders = [...this.pendingOrders];
@@ -982,9 +984,9 @@ export class QuickJSStrategy {
 
         let order: Order;
         
-        console.log(`[QuickJSStrategy] processPendingOrders: 下单参数`, params);
-        console.log(`[QuickJSStrategy] [P0 DEBUG] 准备调用 ${params.side}(symbol=${params.symbol}, qty=${params.qty}, price=${params.price}, orderLinkId=${params.orderLinkId})`);
-        console.log(`[QuickJSStrategy] [P0 DEBUG] gridId=${params.gridId}`);
+        logger.info(`[QuickJSStrategy] processPendingOrders: 下单参数`, params);
+        logger.info(`[QuickJSStrategy] [P0 DEBUG] 准备调用 ${params.side}(symbol=${params.symbol}, qty=${params.qty}, price=${params.price}, orderLinkId=${params.orderLinkId})`);
+        logger.info(`[QuickJSStrategy] [P0 DEBUG] gridId=${params.gridId}`);
         
         if (params.side === 'Buy') {
           order = await this.strategyCtx.buy(
@@ -1004,7 +1006,7 @@ export class QuickJSStrategy {
           );
         }
 
-        console.log(`[QuickJSStrategy] processPendingOrders: 下单成功`, { orderId: order.id, symbol: order.symbol, gridId: params.gridId });
+        logger.info(`[QuickJSStrategy] processPendingOrders: 下单成功`, { orderId: order.id, symbol: order.symbol, gridId: params.gridId });
 
         // P0 关键修复：下单成功后必须通知策略（回写真实 orderId）
         if (params.gridId) {
@@ -1015,12 +1017,12 @@ export class QuickJSStrategy {
             cumQty: order.filledQty || 0,
             avgPrice: order.avgPrice || order.price || 0,
           });
-          console.log(`[QuickJSStrategy] processPendingOrders: 已通知策略 gridId=${params.gridId} orderId=${order.id}`);
+          logger.info(`[QuickJSStrategy] processPendingOrders: 已通知策略 gridId=${params.gridId} orderId=${order.id}`);
         }
 
         resolve({ orderId: order.id });
       } catch (error: any) {
-        console.error(`[QuickJSStrategy] processPendingOrders: 下单失败`, error);
+        logger.error(`[QuickJSStrategy] processPendingOrders: 下单失败`, error);
         reject(error);
       }
     }
@@ -1038,7 +1040,7 @@ export class QuickJSStrategy {
     const bridge_log = this.ctx.newFunction('bridge_log', (levelHandle, messageHandle) => {
       const level = this.ctx!.getString(levelHandle);
       const message = this.ctx!.getString(messageHandle);
-      console.log(`[${this.config.strategyId}][${level}] ${message}`);
+      logger.info(`[${this.config.strategyId}][${level}] ${message}`);
     });
     this.ctx.setProp(this.ctx.global, 'bridge_log', bridge_log);
     bridge_log.dispose();
@@ -1121,9 +1123,9 @@ export class QuickJSStrategy {
       const position = this.cachedPositions.get(symbol);
       
       // P0 调试日志
-      console.log(`[QuickJSStrategy] bridge_getPosition(${symbol}): found=${!!position}`);
+      logger.info(`[QuickJSStrategy] bridge_getPosition(${symbol}): found=${!!position}`);
       if (!position) {
-        console.log(`[QuickJSStrategy] bridge_getPosition: cachedPositions keys:`, Array.from(this.cachedPositions.keys()));
+        logger.info(`[QuickJSStrategy] bridge_getPosition: cachedPositions keys:`, Array.from(this.cachedPositions.keys()));
       }
       
       if (!position) {
@@ -1144,7 +1146,7 @@ export class QuickJSStrategy {
 
     // P2修复：bridge_getOpenOrders - 获取未完成订单（遗留订单检测）
     const bridge_getOpenOrders = this.ctx.newFunction('bridge_getOpenOrders', () => {
-      console.log(`[QuickJSStrategy] bridge_getOpenOrders: cached=${this.cachedOpenOrders.length} orders`);
+      logger.info(`[QuickJSStrategy] bridge_getOpenOrders: cached=${this.cachedOpenOrders.length} orders`);
       return this.ctx!.newString(JSON.stringify(this.cachedOpenOrders));
     });
     this.ctx.setProp(this.ctx.global, 'bridge_getOpenOrders', bridge_getOpenOrders);
@@ -1162,9 +1164,9 @@ export class QuickJSStrategy {
       const paramsJson = this.ctx!.getString(paramsHandle);
       const params = JSON.parse(paramsJson);
 
-      console.log(`[QuickJSStrategy] bridge_placeOrder 收到 paramsJson:`, paramsJson);
-      console.log(`[QuickJSStrategy] bridge_placeOrder 解析后 params:`, params);
-      console.log(`[QuickJSStrategy] [P0 DEBUG] gridId=${params.gridId}, orderLinkId=${params.orderLinkId}`);
+      logger.info(`[QuickJSStrategy] bridge_placeOrder 收到 paramsJson:`, paramsJson);
+      logger.info(`[QuickJSStrategy] bridge_placeOrder 解析后 params:`, params);
+      logger.info(`[QuickJSStrategy] [P0 DEBUG] gridId=${params.gridId}, orderLinkId=${params.orderLinkId}`);
 
       // P0: 注册订单到状态管理器
       if (params.orderLinkId) {
@@ -1186,7 +1188,7 @@ export class QuickJSStrategy {
       this.pendingOrders.push({
         params,
         resolve: (result) => {
-          console.log(`[QuickJSStrategy] 下单成功:`, result);
+          logger.info(`[QuickJSStrategy] 下单成功:`, result);
           // P0: 更新订单状态为已提交
           if (params.orderLinkId) {
             this.orderStateManager.updateState(params.orderLinkId, 'SUBMITTED', {
@@ -1199,7 +1201,7 @@ export class QuickJSStrategy {
           }
         },
         reject: (error) => {
-          console.error(`[QuickJSStrategy] 下单失败:`, error.message);
+          logger.error(`[QuickJSStrategy] 下单失败:`, error.message);
           // P0: 更新订单状态为提交失败
           if (params.orderLinkId) {
             this.orderStateManager.updateState(params.orderLinkId, 'SUBMIT_FAILED', {
@@ -1218,12 +1220,12 @@ export class QuickJSStrategy {
     // bridge_cancelOrder - 撤单（异步执行）
     const bridge_cancelOrder = this.ctx.newFunction('bridge_cancelOrder', (orderIdHandle) => {
       const orderId = this.ctx!.getString(orderIdHandle);
-      console.log(`[QuickJSStrategy] 撤单请求: ${orderId}`);
+      logger.info(`[QuickJSStrategy] 撤单请求: ${orderId}`);
 
       // 异步执行撤单
       if (this.strategyCtx) {
         this.strategyCtx.cancelOrder(orderId).then((result: any) => {
-          console.log(`[QuickJSStrategy] 撤单成功: ${orderId}`);
+          logger.info(`[QuickJSStrategy] 撤单成功: ${orderId}`);
           // P1修复：撤单成功后更新状态机
           // 尝试通过orderId查找orderLinkId
           const orderLinkId = this.findOrderLinkIdByOrderId(orderId);
@@ -1231,7 +1233,7 @@ export class QuickJSStrategy {
             this.notifyOrderUpdate({ orderLinkId, orderId, status: 'Cancelled', cumQty: 0 });
           }
         }).catch((error: any) => {
-          console.error(`[QuickJSStrategy] 撤单失败:`, error.message);
+          logger.error(`[QuickJSStrategy] 撤单失败:`, error.message);
         });
       }
     });
@@ -1245,7 +1247,7 @@ export class QuickJSStrategy {
       const message = this.ctx!.getString(messageHandle);
 
       if (process.env.STRATEGY_TG_ENABLED !== '1') {
-        console.warn(`[QuickJSStrategy] bridge_tgSend blocked by policy (set STRATEGY_TG_ENABLED=1 to enable)`);
+        logger.warn(`[QuickJSStrategy] bridge_tgSend blocked by policy (set STRATEGY_TG_ENABLED=1 to enable)`);
         return this.ctx!.newString('blocked');
       }
       
@@ -1254,9 +1256,9 @@ export class QuickJSStrategy {
         const from = 'bot-001'; // 策略通知默认来自bot-001（投资组长）
         const cmd = `/usr/local/bin/tg send! ${from} ${to} "${message.replace(/"/g, '\\"')}"`;
         execSync(cmd, { encoding: 'utf-8', stdio: 'ignore' });
-        console.log(`[QuickJSStrategy] bridge_tgSend: ${from} → ${to}: ${message}`);
+        logger.info(`[QuickJSStrategy] bridge_tgSend: ${from} → ${to}: ${message}`);
       } catch (error: any) {
-        console.error(`[QuickJSStrategy] bridge_tgSend failed:`, error.message);
+        logger.error(`[QuickJSStrategy] bridge_tgSend failed:`, error.message);
       }
       
       return this.ctx!.newString('ok');
@@ -1288,7 +1290,7 @@ export class QuickJSStrategy {
           fnHandle.dispose();
         }
       } catch (error: any) {
-        console.error(`[QuickJSStrategy] bridge_onExecution failed:`, error.message);
+        logger.error(`[QuickJSStrategy] bridge_onExecution failed:`, error.message);
       }
       
       return this.ctx!.newString('ok');
@@ -1304,10 +1306,10 @@ export class QuickJSStrategy {
           const runIdStr = String(newRunId);
           const prevRunId = (this.legacyOrderTracker as any).currentRunId || 'undefined';
           this.legacyOrderTracker.updateRunId(runIdStr);
-          console.log(`[QuickJSStrategy] bridge_onRunIdChange: ${prevRunId} -> ${runIdStr}`);
+          logger.info(`[QuickJSStrategy] bridge_onRunIdChange: ${prevRunId} -> ${runIdStr}`);
         }
       } catch (error: any) {
-        console.error(`[QuickJSStrategy] bridge_onRunIdChange failed:`, error.message);
+        logger.error(`[QuickJSStrategy] bridge_onRunIdChange failed:`, error.message);
       }
     });
     this.ctx.setProp(this.ctx.global, 'bridge_onRunIdChange', bridge_onRunIdChange);
@@ -1386,10 +1388,10 @@ export class QuickJSStrategy {
           for (const [k, v] of Object.entries(obj)) {
             this.strategyState.set(k, v);
           }
-          console.log(`[QuickJSStrategy] 加载状态: ${Object.keys(obj).length} 个键`);
+          logger.info(`[QuickJSStrategy] 加载状态: ${Object.keys(obj).length} 个键`);
         }
       } catch (error: any) {
-        console.warn(`[QuickJSStrategy] 加载状态失败:`, error.message);
+        logger.warn(`[QuickJSStrategy] 加载状态失败:`, error.message);
       }
     }
   }
@@ -1403,7 +1405,7 @@ export class QuickJSStrategy {
     try {
       sourceCode = readFileSync(this.config.strategyFile, 'utf-8');
     } catch (error) {
-      console.warn(`[QuickJSStrategy] 无法读取策略文件源代码:`, error);
+      logger.warn(`[QuickJSStrategy] 无法读取策略文件源代码:`, error);
     }
 
     return {
@@ -1424,7 +1426,7 @@ export class QuickJSStrategy {
    * 恢复策略状态快照（用于热更新）
    */
   async restoreSnapshot(snapshot: StrategySnapshot): Promise<void> {
-    console.log(`[QuickJSStrategy] 恢复快照: ${new Date(snapshot.timestamp).toISOString()}`);
+    logger.info(`[QuickJSStrategy] 恢复快照: ${new Date(snapshot.timestamp).toISOString()}`);
 
     // 恢复策略状态
     this.strategyState.clear();
@@ -1450,7 +1452,7 @@ export class QuickJSStrategy {
       this.legacyOrderTracker.updateRunId(snapshot.state.runId.toString());
     }
 
-    console.log(`[QuickJSStrategy] 快照恢复完成: ${Object.keys(snapshot.state).length} 个状态键`);
+    logger.info(`[QuickJSStrategy] 快照恢复完成: ${Object.keys(snapshot.state).length} 个状态键`);
   }
 
   /**
@@ -1473,7 +1475,7 @@ export class QuickJSStrategy {
       const out = Object.fromEntries(this.strategyState.entries());
       writeFileSync(this.stateFile, JSON.stringify(out, null, 2));
     } catch (error: any) {
-      console.warn(`[QuickJSStrategy] 写入状态失败:`, error.message);
+      logger.warn(`[QuickJSStrategy] 写入状态失败:`, error.message);
     }
   }
 }

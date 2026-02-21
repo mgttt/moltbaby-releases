@@ -301,6 +301,56 @@ bun run tests/sql-test.ts               # SQL parser + executor
 
 ---
 
+## Performance Monitoring
+
+使用 CI 自动化脚本跟踪性能趋势，及时发现性能回退。
+
+### Quick Start
+
+```bash
+# 运行基准测试并保存结果
+./scripts/bench-ci.sh
+
+# 查看性能趋势报告
+./scripts/bench-report.sh
+```
+
+### CI 自动化
+
+`bench-ci.sh` 自动执行以下操作：
+1. 清理测试环境
+2. 运行基准测试 (写入/读取吞吐量)
+3. 对比历史记录，检测性能下降 (>10% 告警)
+4. 追加结果到 `~/.ndtsdb-cli/bench-history.jsonl`
+
+### 配置
+
+```bash
+# 自定义告警阈值 (默认 0.1 = 10%)
+export BENCH_ALERT_THRESHOLD=0.15
+./scripts/bench-ci.sh
+```
+
+### 历史数据格式
+
+```jsonl
+{"timestamp":"2026-02-21T06:06:00Z","version":"v0.9.5","write_rows_per_sec":3357146,"read_rows_per_sec":3434216,"binary_size_mb":2.67}
+{"timestamp":"2026-02-21T06:06:30Z","version":"v0.9.5","write_rows_per_sec":3783780,"read_rows_per_sec":3289625,"binary_size_mb":2.67}
+```
+
+### 集成到 CI/CD
+
+```yaml
+# .github/workflows/perf.yml 示例
+- name: Performance Benchmark
+  run: |
+    cd ndtsdb
+    ./scripts/bench-ci.sh
+    ./scripts/bench-report.sh
+```
+
+---
+
 ## Version History
 
 - **v0.9.5.0** (2026-02-15)

@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { createLogger } from '../utils/logger';
+const logger = createLogger('CLI');
 /**
  * Quant-Lab CLI - 策略实验室命令行工具
  * 
@@ -91,12 +93,12 @@ async function main() {
   const args = process.argv.slice(2);
   
   if (args.length === 0 || args[0] === '-h' || args[0] === '--help') {
-    console.log(HELP);
+    logger.info(HELP);
     process.exit(0);
   }
   
   if (args[0] === '-v' || args[0] === '--version') {
-    console.log(`Quant-Lab CLI v${VERSION}`);
+    logger.info(`Quant-Lab CLI v${VERSION}`);
     process.exit(0);
   }
   
@@ -162,8 +164,8 @@ async function main() {
       break;
       
     default:
-      console.error(`❌ Unknown command: ${command}`);
-      console.log(`Run 'qlab --help' for usage.`);
+      logger.error(`❌ Unknown command: ${command}`);
+      logger.info(`Run 'qlab --help' for usage.`);
       process.exit(1);
   }
 }
@@ -172,31 +174,31 @@ async function main() {
 
 async function cmdAdd(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab add <strategy-file>');
+    logger.error('Usage: qlab add <strategy-file>');
     process.exit(1);
   }
   
   const filePath = args[0];
   
   if (!existsSync(filePath)) {
-    console.error(`❌ Strategy file not found: ${filePath}`);
+    logger.error(`❌ Strategy file not found: ${filePath}`);
     process.exit(1);
   }
   
   // TODO: 验证策略文件格式
   // TODO: 添加到策略池
   
-  console.log(`➕ Adding strategy from ${filePath}...`);
-  console.log('✅ Strategy added: bybit-positions-monitor');
-  console.log('');
-  console.log('Next steps:');
-  console.log(`  qlab run bybit-positions-monitor    # Test run`);
-  console.log(`  qlab start bybit-positions-monitor  # Start timer`);
+  logger.info(`➕ Adding strategy from ${filePath}...`);
+  logger.info('✅ Strategy added: bybit-positions-monitor');
+  logger.info('');
+  logger.info('Next steps:');
+  logger.info(`  qlab run bybit-positions-monitor    # Test run`);
+  logger.info(`  qlab start bybit-positions-monitor  # Start timer`);
 }
 
 async function cmdRemove(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab remove <strategy-id>');
+    logger.error('Usage: qlab remove <strategy-id>');
     process.exit(1);
   }
   
@@ -206,27 +208,27 @@ async function cmdRemove(args: string[]): Promise<void> {
   // TODO: 如果定时任务在运行，先停止
   // TODO: 从策略池移除
   
-  console.log(`🗑️  Removing strategy ${strategyId}...`);
-  console.log(`✅ Strategy ${strategyId} removed`);
+  logger.info(`🗑️  Removing strategy ${strategyId}...`);
+  logger.info(`✅ Strategy ${strategyId} removed`);
 }
 
 async function cmdList(args: string[]): Promise<void> {
   // TODO: 从策略池读取所有策略
   
-  console.log('📋 Strategies:');
-  console.log('');
-  console.log('ID                           TYPE      STATUS    TIMER     LAST RUN');
-  console.log('─────────────────────────────────────────────────────────────────────');
-  console.log('bybit-positions-monitor      monitor   active    30min     2m ago');
-  console.log('btc-grid-trading             trading   disabled  -         -');
-  console.log('risk-check                   monitor   active    5min      1m ago');
-  console.log('');
-  console.log('Total: 3 strategies (2 active, 1 disabled)');
+  logger.info('📋 Strategies:');
+  logger.info('');
+  logger.info('ID                           TYPE      STATUS    TIMER     LAST RUN');
+  logger.info('─────────────────────────────────────────────────────────────────────');
+  logger.info('bybit-positions-monitor      monitor   active    30min     2m ago');
+  logger.info('btc-grid-trading             trading   disabled  -         -');
+  logger.info('risk-check                   monitor   active    5min      1m ago');
+  logger.info('');
+  logger.info('Total: 3 strategies (2 active, 1 disabled)');
 }
 
 async function cmdShow(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab show <strategy-id>');
+    logger.error('Usage: qlab show <strategy-id>');
     process.exit(1);
   }
   
@@ -234,27 +236,27 @@ async function cmdShow(args: string[]): Promise<void> {
   
   // TODO: 显示策略详细信息
   
-  console.log(`📄 Strategy: ${strategyId}`);
-  console.log('');
-  console.log('ID:          bybit-positions-monitor');
-  console.log('Name:        Bybit 持仓监控');
-  console.log('Type:        monitor');
-  console.log('Status:      active');
-  console.log('Timer:       30 minutes');
-  console.log('Last Run:    2026-02-07 20:03:00');
-  console.log('Last Result: success (20 positions)');
-  console.log('File:        strategies/bybitPositions.ts');
-  console.log('');
-  console.log('Requirements:');
-  console.log('  APIs:      bybit');
-  console.log('  Accounts:  wjcgm@bbt, wjcgm@bbt-sub1');
+  logger.info(`📄 Strategy: ${strategyId}`);
+  logger.info('');
+  logger.info('ID:          bybit-positions-monitor');
+  logger.info('Name:        Bybit 持仓监控');
+  logger.info('Type:        monitor');
+  logger.info('Status:      active');
+  logger.info('Timer:       30 minutes');
+  logger.info('Last Run:    2026-02-07 20:03:00');
+  logger.info('Last Result: success (20 positions)');
+  logger.info('File:        strategies/bybitPositions.ts');
+  logger.info('');
+  logger.info('Requirements:');
+  logger.info('  APIs:      bybit');
+  logger.info('  Accounts:  wjcgm@bbt, wjcgm@bbt-sub1');
 }
 
 // ========== Execution ==========
 
 async function cmdRun(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab run <strategy-id> [--params {"key":"value"}]');
+    logger.error('Usage: qlab run <strategy-id> [--params {"key":"value"}]');
     process.exit(1);
   }
   
@@ -267,16 +269,16 @@ async function cmdRun(args: string[]): Promise<void> {
     try {
       params = JSON.parse(args[paramsIndex + 1]);
     } catch {
-      console.error('❌ Invalid JSON in --params');
+      logger.error('❌ Invalid JSON in --params');
       process.exit(1);
     }
   }
   
-  console.log(`▶️  Running strategy: ${strategyId}`);
+  logger.info(`▶️  Running strategy: ${strategyId}`);
   if (Object.keys(params).length > 0) {
-    console.log(`   Params: ${JSON.stringify(params)}`);
+    logger.info(`   Params: ${JSON.stringify(params)}`);
   }
-  console.log('');
+  logger.info('');
   
   // TODO: 实际执行策略
   
@@ -287,77 +289,77 @@ async function cmdRun(args: string[]): Promise<void> {
 
 async function cmdTest(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab test <strategy-id>');
+    logger.error('Usage: qlab test <strategy-id>');
     process.exit(1);
   }
   
   const strategyId = args[0];
   
-  console.log(`🧪 Testing strategy: ${strategyId} (dry-run)`);
-  console.log('');
+  logger.info(`🧪 Testing strategy: ${strategyId} (dry-run)`);
+  logger.info('');
   
   // TODO: 测试运行，不实际下单/修改状态
   
-  console.log('✅ Test passed');
-  console.log('   Execution time: 1.2s');
-  console.log('   API calls: 2');
-  console.log('   Would place orders: 0 (dry-run)');
+  logger.info('✅ Test passed');
+  logger.info('   Execution time: 1.2s');
+  logger.info('   API calls: 2');
+  logger.info('   Would place orders: 0 (dry-run)');
 }
 
 // ========== Timer Management ==========
 
 async function cmdStart(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab start <strategy-id>');
+    logger.error('Usage: qlab start <strategy-id>');
     process.exit(1);
   }
   
   const strategyId = args[0];
   
-  console.log(`⏰ Starting timer for ${strategyId}...`);
+  logger.info(`⏰ Starting timer for ${strategyId}...`);
   
   // TODO: 使用 TimerScheduler 创建定时任务
   
-  console.log(`✅ Timer started: ${strategyId}`);
-  console.log('   Schedule: every 30 minutes');
-  console.log('   Next run: 21:00:00');
+  logger.info(`✅ Timer started: ${strategyId}`);
+  logger.info('   Schedule: every 30 minutes');
+  logger.info('   Next run: 21:00:00');
 }
 
 async function cmdStop(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab stop <strategy-id>');
+    logger.error('Usage: qlab stop <strategy-id>');
     process.exit(1);
   }
   
   const strategyId = args[0];
   
-  console.log(`⏹️  Stopping timer for ${strategyId}...`);
+  logger.info(`⏹️  Stopping timer for ${strategyId}...`);
   
   // TODO: 停止定时任务
   
-  console.log(`✅ Timer stopped: ${strategyId}`);
+  logger.info(`✅ Timer stopped: ${strategyId}`);
 }
 
 async function cmdRestart(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab restart <strategy-id>');
+    logger.error('Usage: qlab restart <strategy-id>');
     process.exit(1);
   }
   
   const strategyId = args[0];
   
   await cmdStop([strategyId]);
-  console.log('');
+  logger.info('');
   await cmdStart([strategyId]);
 }
 
 async function cmdTimers(args: string[]): Promise<void> {
   // TODO: 使用 TimerScheduler.listTimers()
   
-  console.log('⏰ Active Timers:');
-  console.log('');
-  console.log('STRATEGY                     SCHEDULE    NEXT RUN    STATUS');
-  console.log('───────────────────────────────────────────────────────────────');
+  logger.info('⏰ Active Timers:');
+  logger.info('');
+  logger.info('STRATEGY                     SCHEDULE    NEXT RUN    STATUS');
+  logger.info('───────────────────────────────────────────────────────────────');
   
   // 调用 systemctl 获取真实数据
   try {
@@ -368,12 +370,12 @@ async function cmdTimers(args: string[]): Promise<void> {
     const { stdout } = await execAsync('systemctl --user list-timers --all | grep quantlab- || echo "No active timers"');
     
     if (stdout.includes('No active timers')) {
-      console.log('(No active timers)');
+      logger.info('(No active timers)');
     } else {
-      console.log(stdout);
+      logger.info(stdout);
     }
   } catch {
-    console.log('(systemctl not available)');
+    logger.info('(systemctl not available)');
   }
 }
 
@@ -381,7 +383,7 @@ async function cmdTimers(args: string[]): Promise<void> {
 
 async function cmdLogs(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: qlab logs <strategy-id> [-f] [-n 100]');
+    logger.error('Usage: qlab logs <strategy-id> [-f] [-n 100]');
     process.exit(1);
   }
   
@@ -391,12 +393,12 @@ async function cmdLogs(args: string[]): Promise<void> {
   const nIndex = args.findIndex(a => a === '-n' || a === '--lines');
   const lines = nIndex !== -1 && args[nIndex + 1] ? parseInt(args[nIndex + 1]) : 50;
   
-  console.log(`📜 Logs for ${strategyId}:`);
-  console.log('');
+  logger.info(`📜 Logs for ${strategyId}:`);
+  logger.info('');
   
   if (follow) {
-    console.log('👁️  Following logs (Ctrl+C to exit)...');
-    console.log('');
+    logger.info('👁️  Following logs (Ctrl+C to exit)...');
+    logger.info('');
     
     // TODO: 使用 journalctl -f
     try {
@@ -412,7 +414,7 @@ async function cmdLogs(args: string[]): Promise<void> {
         journalctl.on('close', resolve);
       });
     } catch (error) {
-      console.error('❌ Failed to follow logs:', error);
+      logger.error('❌ Failed to follow logs:', error);
     }
   } else {
     // 显示历史日志
@@ -424,55 +426,55 @@ async function cmdLogs(args: string[]): Promise<void> {
       const { stdout } = await execAsync(
         `journalctl --user -u quantlab-${strategyId}.service --no-pager -n ${lines}`
       );
-      console.log(stdout);
+      logger.info(stdout);
     } catch (error) {
-      console.error('❌ Failed to get logs:', error);
+      logger.error('❌ Failed to get logs:', error);
     }
   }
 }
 
 async function cmdStatus(args: string[]): Promise<void> {
-  console.log('📊 Quant-Lab Status');
-  console.log('');
+  logger.info('📊 Quant-Lab Status');
+  logger.info('');
   
   // 系统状态
-  console.log('System:');
-  console.log('  Version:    1.0.0');
-  console.log('  PID:        ' + process.pid);
-  console.log('  Work dir:   ' + process.cwd());
-  console.log('');
+  logger.info('System:');
+  logger.info('  Version:    1.0.0');
+  logger.info('  PID:        ' + process.pid);
+  logger.info('  Work dir:   ' + process.cwd());
+  logger.info('');
   
   // 策略统计
-  console.log('Strategies:');
-  console.log('  Total:      3');
-  console.log('  Active:     2');
-  console.log('  Running:    1');
-  console.log('  Failed:     0');
-  console.log('');
+  logger.info('Strategies:');
+  logger.info('  Total:      3');
+  logger.info('  Active:     2');
+  logger.info('  Running:    1');
+  logger.info('  Failed:     0');
+  logger.info('');
   
   // 定时任务
-  console.log('Timers:');
+  logger.info('Timers:');
   try {
     const { exec } = await import('child_process');
     const { promisify } = await import('util');
     const execAsync = promisify(exec);
     
     const { stdout } = await execAsync('systemctl --user list-timers --all --no-pager | grep quantlab- | wc -l');
-    console.log(`  Active:     ${stdout.trim()}`);
+    logger.info(`  Active:     ${stdout.trim()}`);
   } catch {
-    console.log('  Active:     N/A');
+    logger.info('  Active:     N/A');
   }
-  console.log('');
+  logger.info('');
   
   // 最近执行
-  console.log('Recent Executions:');
-  console.log('  20:03:00  bybit-positions-monitor  SUCCESS  1.2s');
-  console.log('  19:33:00  bybit-positions-monitor  SUCCESS  1.1s');
-  console.log('  19:03:00  bybit-positions-monitor  SUCCESS  1.3s');
+  logger.info('Recent Executions:');
+  logger.info('  20:03:00  bybit-positions-monitor  SUCCESS  1.2s');
+  logger.info('  19:33:00  bybit-positions-monitor  SUCCESS  1.1s');
+  logger.info('  19:03:00  bybit-positions-monitor  SUCCESS  1.3s');
 }
 
 async function cmdMonit(args: string[]): Promise<void> {
-  console.log('👁️  Starting monitoring dashboard...');
+  logger.info('👁️  Starting monitoring dashboard...');
   
   // 调用 tmux-dashboard
   try {
@@ -486,15 +488,15 @@ async function cmdMonit(args: string[]): Promise<void> {
       dashboard.on('close', resolve);
     });
   } catch (error) {
-    console.error('❌ Failed to start dashboard:', error);
+    logger.error('❌ Failed to start dashboard:', error);
   }
 }
 
 // ========== System ==========
 
 async function cmdDoctor(args: string[]): Promise<void> {
-  console.log('🔍 Quant-Lab Doctor');
-  console.log('');
+  logger.info('🔍 Quant-Lab Doctor');
+  logger.info('');
   
   const checks = [
     { name: 'Node.js/Bun', check: () => process.versions.bun || process.version },
@@ -516,22 +518,22 @@ async function cmdDoctor(args: string[]): Promise<void> {
     try {
       const result = await check();
       if (result) {
-        console.log('✅');
+        logger.info('✅');
       } else {
-        console.log('❌');
+        logger.info('❌');
       }
     } catch {
-      console.log('❌');
+      logger.info('❌');
     }
   }
   
-  console.log('');
-  console.log('✅ All checks passed!');
+  logger.info('');
+  logger.info('✅ All checks passed!');
 }
 
 async function cmdInit(args: string[]): Promise<void> {
-  console.log('🚀 Initializing Quant-Lab...');
-  console.log('');
+  logger.info('🚀 Initializing Quant-Lab...');
+  logger.info('');
   
   // 创建目录结构
   const dirs = ['pools', 'strategies/active', 'strategies/examples', 'runtime/logs', 'runtime/state'];
@@ -540,18 +542,18 @@ async function cmdInit(args: string[]): Promise<void> {
     if (!existsSync(dir)) {
       const { mkdirSync } = await import('fs');
       mkdirSync(dir, { recursive: true });
-      console.log(`  Created: ${dir}`);
+      logger.info(`  Created: ${dir}`);
     }
   }
   
-  console.log('');
-  console.log('✅ Quant-Lab initialized!');
-  console.log('');
-  console.log('Next steps:');
-  console.log('  1. Create a strategy: qlab add strategies/my-strategy.ts');
-  console.log('  2. Run it: qlab run my-strategy');
-  console.log('  3. Start timer: qlab start my-strategy');
+  logger.info('');
+  logger.info('✅ Quant-Lab initialized!');
+  logger.info('');
+  logger.info('Next steps:');
+  logger.info('  1. Create a strategy: qlab add strategies/my-strategy.ts');
+  logger.info('  2. Run it: qlab run my-strategy');
+  logger.info('  3. Start timer: qlab start my-strategy');
 }
 
 // 运行主函数
-main().catch(console.error);
+main().catch(logger.error);

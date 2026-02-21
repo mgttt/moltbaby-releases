@@ -1,4 +1,6 @@
 // ============================================================
+import { createLogger } from '../utils/logger';
+const logger = createLogger('LiveEngine');
 // 实盘引擎
 // ============================================================
 
@@ -105,7 +107,7 @@ export class LiveEngine {
    * 启动实盘引擎
    */
   async start(): Promise<void> {
-    console.log(`[LiveEngine] 启动实盘引擎: ${this.strategy.name}`);
+    logger.info(`[LiveEngine] 启动实盘引擎: ${this.strategy.name}`);
     console.log(`  品种: ${this.config.symbols.join(', ')}`);
     console.log(`  周期: ${this.config.interval}`);
     

@@ -1,4 +1,6 @@
 // ============================================================
+import { createLogger } from '../utils/logger';
+const logger = createLogger('BYBIT');
 // Bybit Trading Provider - 连接 Bybit 交易所
 // ============================================================
 
@@ -89,7 +91,7 @@ export class BybitProvider implements TradingProvider {
       // 公共数据流仍用主网 (demo 只支持私有流)
       this.baseUrl = 'https://api-demo.bybit.com';
       this.wsUrl = `wss://stream.bybit.com/v5/public/${this.category}`;
-      console.log('[BybitProvider] Demo Trading 模式');
+      logger.info('[BybitProvider] Demo Trading 模式');
     } else if (config.testnet) {
       this.baseUrl = 'https://api-testnet.bybit.com';
       this.wsUrl = `wss://stream-testnet.bybit.com/v5/public/${this.category}`;
@@ -99,8 +101,8 @@ export class BybitProvider implements TradingProvider {
     }
 
     if (config.proxy) {
-      console.log(`[BybitProvider] 使用代理: ${config.proxy} (curl)`);
-      console.log(`[BybitProvider] 使用代理: ${config.proxy}`);
+      logger.info(`[BybitProvider] 使用代理: ${config.proxy} (curl)`);
+      logger.info(`[BybitProvider] 使用代理: ${config.proxy}`);
     }
     
     // Phase 1: 初始化ndtsdb状态持久化
@@ -109,9 +111,9 @@ export class BybitProvider implements TradingProvider {
         baseDir: join(config.stateDir, 'ndtsdb'),
       });
       this.currentRunId = config.runId;
-      console.log(`[BybitProvider] ndtsdb状态持久化已启用: runId=${config.runId}`);
+      logger.info(`[BybitProvider] ndtsdb状态持久化已启用: runId=${config.runId}`);
     } else {
-      console.log('[BybitProvider] ndtsdb状态持久化未启用(缺少stateDir或runId)');
+      logger.info('[BybitProvider] ndtsdb状态持久化未启用(缺少stateDir或runId)');
     }
   }
   
@@ -161,7 +163,7 @@ export class BybitProvider implements TradingProvider {
    * 保留订阅的回调，重新连接WebSocket
    */
   async reload(): Promise<void> {
-    console.log('[BybitProvider] 热更新：重建连接...');
+    logger.info('[BybitProvider] 热更新：重建连接...');
     
     // 保存当前订阅
     const subscribedTickers = Array.from(this.tickCallbacks.keys());
@@ -186,11 +188,11 @@ export class BybitProvider implements TradingProvider {
       }
       if (subscribedKlines.length > 0) {
         // K线需要interval参数，这里简化处理
-        console.log('[BybitProvider] 热更新：K线订阅需手动重新订阅');
+        logger.info('[BybitProvider] 热更新：K线订阅需手动重新订阅');
       }
-      console.log('[BybitProvider] 热更新完成 ✅');
+      logger.info('[BybitProvider] 热更新完成 ✅');
     } catch (e) {
-      console.error('[BybitProvider] 热更新失败:', e);
+      logger.error('[BybitProvider] 热更新失败:', e);
       throw e;
     }
   }
@@ -203,12 +205,12 @@ export class BybitProvider implements TradingProvider {
     this.isConnecting = true;
     
     try {
-      console.log(`[BybitProvider] 连接 WebSocket: ${this.wsUrl}`);
+      logger.info(`[BybitProvider] 连接 WebSocket: ${this.wsUrl}`);
       
       this.ws = new WebSocket(this.wsUrl);
       
       this.ws.onopen = () => {
-        console.log(`[BybitProvider] WebSocket 已连接`);
+        logger.info(`[BybitProvider] WebSocket 已连接`);
         this.isConnecting = false;
         
         // 订阅主题
@@ -227,24 +229,24 @@ export class BybitProvider implements TradingProvider {
           const data = JSON.parse(event.data as string);
           this.handleMessage(data);
         } catch (error) {
-          console.error(`[BybitProvider] 解析消息失败:`, error);
+          logger.error(`[BybitProvider] 解析消息失败:`, error);
         }
       };
       
       this.ws.onerror = (error) => {
-        console.error(`[BybitProvider] WebSocket 错误:`, error);
+        logger.error(`[BybitProvider] WebSocket 错误:`, error);
         this.isConnecting = false;
       };
       
       this.ws.onclose = () => {
         if (this.shuttingDown) return;
-        console.log(`[BybitProvider] WebSocket 已断开，5秒后重连...`);
+        logger.info(`[BybitProvider] WebSocket 已断开，5秒后重连...`);
         this.isConnecting = false;
         this.stopHeartbeat();
         this.scheduleReconnect(topics);
       };
     } catch (error) {
-      console.error(`[BybitProvider] 连接失败:`, error);
+      logger.error(`[BybitProvider] 连接失败:`, error);
       this.isConnecting = false;
       this.scheduleReconnect(topics);
     }
@@ -366,9 +368,9 @@ export class BybitProvider implements TradingProvider {
     }
     
     // P0 DEBUG：确认 orderLinkId 是否被传递
-    console.log(`[BybitProvider] [P0 DEBUG] buy() 参数:`, { symbol, quantity, price, orderLinkId });
-    console.log(`[BybitProvider] [P0 DEBUG] buy() params:`, params);
-    console.log(`[BybitProvider] 下单请求: Buy ${quantity} ${symbol} @ ${price || 'Market'}`);
+    logger.info(`[BybitProvider] [P0 DEBUG] buy() 参数:`, { symbol, quantity, price, orderLinkId });
+    logger.info(`[BybitProvider] [P0 DEBUG] buy() params:`, params);
+    logger.info(`[BybitProvider] 下单请求: Buy ${quantity} ${symbol} @ ${price || 'Market'}`);
     
     let result: any;
     try {
@@ -377,29 +379,29 @@ export class BybitProvider implements TradingProvider {
       // P0修复：110072幂等成功处理（OrderLinkedID is duplicate）
       if (error.message?.includes('110072') || error.message?.includes('OrderLinkedID is duplicate')) {
         if (params.orderLinkId) {
-          console.log(`[BybitProvider] 110072幂等处理：查询订单 orderLinkId=${params.orderLinkId}`);
+          logger.info(`[BybitProvider] 110072幂等处理：查询订单 orderLinkId=${params.orderLinkId}`);
           const existingOrder = await this.getOrderByLinkId(params.orderLinkId);
           if (existingOrder) {
-            console.log(`[BybitProvider] 110072幂等成功：返回已存在订单 ${existingOrder.orderId}`);
+            logger.info(`[BybitProvider] 110072幂等成功：返回已存在订单 ${existingOrder.orderId}`);
             return existingOrder;
           }
         }
       }
-      console.error(`[BybitProvider] 下单失败: ${error.message}`);
+      logger.error(`[BybitProvider] 下单失败: ${error.message}`);
       throw error;
     }
     
     if (!result || !result.result) {
-      console.error(`[BybitProvider] 下单响应异常:`, result);
+      logger.error(`[BybitProvider] 下单响应异常:`, result);
       throw new Error('Order response missing result field');
     }
     
     if (!result.result.orderId) {
-      console.error(`[BybitProvider] 下单响应缺少 orderId:`, result.result);
+      logger.error(`[BybitProvider] 下单响应缺少 orderId:`, result.result);
       throw new Error('Order response missing orderId');
     }
     
-    console.log(`[BybitProvider] 下单成功: orderId=${result.result.orderId}`);
+    logger.info(`[BybitProvider] 下单成功: orderId=${result.result.orderId}`);
     
     // Phase 1: 记录订单到ndtsdb
     const order = this.parseOrder({
@@ -441,9 +443,9 @@ export class BybitProvider implements TradingProvider {
     }
     
     // P0 DEBUG：确认 orderLinkId 是否被传递
-    console.log(`[BybitProvider] [P0 DEBUG] sell() 参数:`, { symbol, quantity, price, orderLinkId });
-    console.log(`[BybitProvider] [P0 DEBUG] sell() params:`, params);
-    console.log(`[BybitProvider] 下单请求: Sell ${quantity} ${symbol} @ ${price || 'Market'}`);
+    logger.info(`[BybitProvider] [P0 DEBUG] sell() 参数:`, { symbol, quantity, price, orderLinkId });
+    logger.info(`[BybitProvider] [P0 DEBUG] sell() params:`, params);
+    logger.info(`[BybitProvider] 下单请求: Sell ${quantity} ${symbol} @ ${price || 'Market'}`);
     
     let result: any;
     try {
@@ -452,29 +454,29 @@ export class BybitProvider implements TradingProvider {
       // P0修复：110072幂等成功处理（OrderLinkedID is duplicate）
       if (error.message?.includes('110072') || error.message?.includes('OrderLinkedID is duplicate')) {
         if (params.orderLinkId) {
-          console.log(`[BybitProvider] 110072幂等处理：查询订单 orderLinkId=${params.orderLinkId}`);
+          logger.info(`[BybitProvider] 110072幂等处理：查询订单 orderLinkId=${params.orderLinkId}`);
           const existingOrder = await this.getOrderByLinkId(params.orderLinkId);
           if (existingOrder) {
-            console.log(`[BybitProvider] 110072幂等成功：返回已存在订单 ${existingOrder.orderId}`);
+            logger.info(`[BybitProvider] 110072幂等成功：返回已存在订单 ${existingOrder.orderId}`);
             return existingOrder;
           }
         }
       }
-      console.error(`[BybitProvider] 下单失败: ${error.message}`);
+      logger.error(`[BybitProvider] 下单失败: ${error.message}`);
       throw error;
     }
     
     if (!result || !result.result) {
-      console.error(`[BybitProvider] 下单响应异常:`, result);
+      logger.error(`[BybitProvider] 下单响应异常:`, result);
       throw new Error('Order response missing result field');
     }
     
     if (!result.result.orderId) {
-      console.error(`[BybitProvider] 下单响应缺少 orderId:`, result.result);
+      logger.error(`[BybitProvider] 下单响应缺少 orderId:`, result.result);
       throw new Error('Order response missing orderId');
     }
     
-    console.log(`[BybitProvider] 下单成功: orderId=${result.result.orderId}`);
+    logger.info(`[BybitProvider] 下单成功: orderId=${result.result.orderId}`);
     
     // Phase 1: 记录订单到ndtsdb
     const order = this.parseOrder({
@@ -496,7 +498,7 @@ export class BybitProvider implements TradingProvider {
   async cancelOrder(orderId: string): Promise<void> {
     // 检测 pending 订单（本地临时 ID，还未提交到交易所）
     if (orderId.startsWith('pending-')) {
-      console.log(`[BybitProvider] 跳过撤单：pending 订单未提交到交易所 (${orderId})`);
+      logger.info(`[BybitProvider] 跳过撤单：pending 订单未提交到交易所 (${orderId})`);
       return;
     }
     
@@ -504,7 +506,7 @@ export class BybitProvider implements TradingProvider {
     const parts = orderId.split(':');
     
     if (parts.length !== 2) {
-      console.error(`[BybitProvider] Invalid orderId format: ${orderId} (expected "symbol:id")`);
+      logger.error(`[BybitProvider] Invalid orderId format: ${orderId} (expected "symbol:id")`);
       throw new Error(`Invalid orderId format: ${orderId} (expected "symbol:id")`);
     }
     
@@ -514,7 +516,7 @@ export class BybitProvider implements TradingProvider {
       throw new Error(`Invalid orderId: missing symbol or id (${orderId})`);
     }
     
-    console.log(`[BybitProvider] 撤单请求: ${orderId} (symbol=${symbolPart}, id=${id})`);
+    logger.info(`[BybitProvider] 撤单请求: ${orderId} (symbol=${symbolPart}, id=${id})`);
     
     const params = {
       category: this.category,
@@ -524,16 +526,16 @@ export class BybitProvider implements TradingProvider {
     
     try {
       await this.request('POST', '/v5/order/cancel', params);
-      console.log(`[BybitProvider] 撤单成功: ${orderId}`);
+      logger.info(`[BybitProvider] 撤单成功: ${orderId}`);
     } catch (error: any) {
       // 正常竞态：订单在撤单前已成交/过期/不存在
       if (error.message && error.message.includes('order not exists or too late to cancel')) {
-        console.log(`[BybitProvider] 撤单已完成（订单已不存在）: ${orderId} - ${error.message}`);
+        logger.info(`[BybitProvider] 撤单已完成（订单已不存在）: ${orderId} - ${error.message}`);
         return;  // 不抛出异常，视为成功
       }
       
       // 其他真正的撤单错误：继续抛出
-      console.error(`[BybitProvider] 撤单失败: ${orderId} - ${error.message}`);
+      logger.error(`[BybitProvider] 撤单失败: ${orderId} - ${error.message}`);
       throw error;
     }
   }
@@ -606,9 +608,9 @@ export class BybitProvider implements TradingProvider {
     }
     
     // P1 调试：打印完整的 Bybit API 响应（仅前 3 个持仓）
-    console.log('[BybitProvider] getPositions raw response (first 3):');
+    logger.info('[BybitProvider] getPositions raw response (first 3):');
     result.result.list.slice(0, 3).forEach((p: any, i: number) => {
-      console.log(`  [${i}] symbol=${p.symbol}, side=${p.side}, size=${p.size}, positionValue=${p.positionValue}`);
+      logger.info(`  [${i}] symbol=${p.symbol}, side=${p.side}, size=${p.size}, positionValue=${p.positionValue}`);
     });
     
     return result.result.list
@@ -682,7 +684,7 @@ export class BybitProvider implements TradingProvider {
       // 返回第一个匹配订单
       return this.parseOrder(orders[0]);
     } catch (error: any) {
-      console.error(`[BybitProvider] 查询订单失败（orderLinkId=${orderLinkId}）: ${error.message}`);
+      logger.error(`[BybitProvider] 查询订单失败（orderLinkId=${orderLinkId}）: ${error.message}`);
       return null;
     }
   }
@@ -704,10 +706,10 @@ export class BybitProvider implements TradingProvider {
 
       const result = await this.request('GET', '/v5/order/realtime', params);
       const list = result.result?.list || [];
-      console.log(`[BybitProvider] getOpenOrders: ${list.length} 个未完成订单`);
+      logger.info(`[BybitProvider] getOpenOrders: ${list.length} 个未完成订单`);
       return list;
     } catch (error: any) {
-      console.error(`[BybitProvider] getOpenOrders failed: ${error.message}`);
+      logger.error(`[BybitProvider] getOpenOrders failed: ${error.message}`);
       return [];
     }
   }
@@ -731,10 +733,10 @@ export class BybitProvider implements TradingProvider {
 
       const result = await this.request('GET', '/v5/execution/list', params);
       const list = result.result?.list || [];
-      console.log(`[BybitProvider] getExecutions: ${list.length} 个成交记录`);
+      logger.info(`[BybitProvider] getExecutions: ${list.length} 个成交记录`);
       return list;
     } catch (error: any) {
-      console.error(`[BybitProvider] getExecutions failed: ${error.message}`);
+      logger.error(`[BybitProvider] getExecutions failed: ${error.message}`);
       return [];
     }
   }
@@ -789,8 +791,8 @@ export class BybitProvider implements TradingProvider {
     
     // P0 DEBUG：打印实际发送的 body（特别是下单请求）
     if (method === 'POST' && endpoint === '/v5/order/create') {
-      console.log(`[BybitProvider] [P0 DEBUG] 下单请求 body:`, body);
-      console.log(`[BybitProvider] [P0 DEBUG] 下单请求 params:`, params);
+      logger.info(`[BybitProvider] [P0 DEBUG] 下单请求 body:`, body);
+      logger.info(`[BybitProvider] [P0 DEBUG] 下单请求 params:`, params);
     }
     
     // 直接使用 curl（避免 undici fetch 被 CloudFront WAF 拦截）
@@ -874,7 +876,7 @@ export class BybitProvider implements TradingProvider {
       // - backoffMs: 250ms * 2^(consecutive-1), capped at 5000ms
       // - 连续错误恢复条件：一次成功请求会把 consecutiveCurlErrors 重置为0（见下方成功分支）
       const backoffMs = Math.min(5000, 250 * Math.pow(2, Math.max(0, this.consecutiveCurlErrors - 1)));
-      console.warn(
+      logger.warn(
         `[BybitProvider] [BACKOFF] curl exit35 detected → backoff=${backoffMs}ms | ` +
           `recoverOn=next_success | ` +
           `method=${method} | url=${url} | duration=${requestDuration}ms | ` +
@@ -887,7 +889,7 @@ export class BybitProvider implements TradingProvider {
       // 15min窗口统计建议后续在更上层（策略进程）做限流聚合。
       if (this.consecutiveCurlErrors >= 3) {
         const pauseMinutes = 3;
-        console.error(
+        logger.error(
           `[BybitProvider] [P0][CIRCUIT_BREAK] exit35 threshold hit → pauseOrders=${pauseMinutes}m | ` +
             `reason=consecutiveExit35>=3 | ` +
             `method=${method} | url=${url} | ` +
@@ -912,7 +914,7 @@ export class BybitProvider implements TradingProvider {
       if (hasSSL35InStderr) {
         this.curlError35Count++;
         this.consecutiveCurlErrors++;
-        console.warn(
+        logger.warn(
           `[BybitProvider] [WARNING] Curl success but SSL error in stderr: ` +
           `method=${method} | ` +
           `url=${url} | ` +
@@ -921,7 +923,7 @@ export class BybitProvider implements TradingProvider {
           `consecutiveErrors=${this.consecutiveCurlErrors}`,
         );
       } else {
-        console.warn(
+        logger.warn(
           `[BybitProvider] Curl success with stderr: ` +
           `method=${method} | ` +
           `url=${url} | ` +
@@ -953,7 +955,7 @@ export class BybitProvider implements TradingProvider {
         `consecutiveErrors=${this.consecutiveCurlErrors} | ` +
         `stderr="${errorMsg.slice(0, 150)}"`,
       );
-      console.error(`[BybitProvider] Command: curl ${args.join(' ')}`);
+      logger.error(`[BybitProvider] Command: curl ${args.join(' ')}`);
       throw new Error(`Bybit API request failed (curl exit ${result.status}): ${errorMsg}`);
     }
 
@@ -964,7 +966,7 @@ export class BybitProvider implements TradingProvider {
 
     // P2: 慢请求警告（超过5秒）
     if (requestDuration > 5000) {
-      console.warn(
+      logger.warn(
         `[BybitProvider] Slow request warning: ` +
         `method=${method} | ` +
         `url=${url} | ` +
@@ -983,7 +985,7 @@ export class BybitProvider implements TradingProvider {
       
       // 检查 Bybit API 错误响应
       if (result.retCode !== 0) {
-        console.error(`[BybitProvider] API error: ${result.retMsg} (code: ${result.retCode})`);
+        logger.error(`[BybitProvider] API error: ${result.retMsg} (code: ${result.retCode})`);
         throw new Error(`Bybit API error: ${result.retMsg}`);
       }
       
@@ -1010,7 +1012,7 @@ export class BybitProvider implements TradingProvider {
    */
   private parseOrder(data: any): Order {
     if (!data || !data.symbol) {
-      console.warn('[BybitProvider] parseOrder: invalid data', data);
+      logger.warn('[BybitProvider] parseOrder: invalid data', data);
       throw new Error('Invalid order data: missing symbol');
     }
     return {
@@ -1077,10 +1079,10 @@ export class BybitProvider implements TradingProvider {
       };
 
       await this.stateStore.upsertOrder(orderState);
-      console.log(`[BybitProvider] ndtsdb记录订单: ${orderState.orderKey}`);
+      logger.info(`[BybitProvider] ndtsdb记录订单: ${orderState.orderKey}`);
     } catch (e) {
       // ndtsdb写入失败不影响主流程，仅记录日志
-      console.error(`[BybitProvider] ndtsdb记录订单失败: ${e}`);
+      logger.error(`[BybitProvider] ndtsdb记录订单失败: ${e}`);
     }
   }
   
@@ -1102,7 +1104,7 @@ export class BybitProvider implements TradingProvider {
     const positionValue = parseFloat(data.positionValue);
     
     // P1 调试：打印完整的 data 对象（关键字段）
-    console.log(`[BybitProvider] parsePosition raw data:`, {
+    logger.info(`[BybitProvider] parsePosition raw data:`, {
       symbol: data.symbol,
       side: data.side,
       size: data.size,
@@ -1119,7 +1121,7 @@ export class BybitProvider implements TradingProvider {
     const side = data.side === 'Buy' ? 'LONG' : 'SHORT';
     
     // P0 调试日志（增强：包含 side 信息）
-    console.log(`[BybitProvider] parsePosition: symbol=${data.symbol}, side=${data.side} → ${side}, size=${size}, positionValue=${positionValue}, markPrice=${data.markPrice}`);
+    logger.info(`[BybitProvider] parsePosition: symbol=${data.symbol}, side=${data.side} → ${side}, size=${size}, positionValue=${positionValue}, markPrice=${data.markPrice}`);
     
     return {
       symbol: this.fromExchangeSymbol(data.symbol),
@@ -1146,7 +1148,7 @@ export class BybitProvider implements TradingProvider {
    */
   private fromExchangeSymbol(symbol: string): string {
     if (!symbol || typeof symbol !== 'string') {
-      console.warn('[BybitProvider] fromExchangeSymbol: invalid symbol', symbol);
+      logger.warn('[BybitProvider] fromExchangeSymbol: invalid symbol', symbol);
       return symbol || 'UNKNOWN';
     }
     if (symbol.endsWith('USDT')) {

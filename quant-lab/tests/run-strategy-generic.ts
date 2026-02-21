@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { createLogger } from '../utils/logger';
+const logger = createLogger('RUN_STRATEGY_GENERIC');
 /**
  * 通用策略启动器
  * 
@@ -39,7 +41,7 @@ import { hotReloadAPI } from '../src/api/hot-reload-api';
 const args = process.argv.slice(2);
 
 if (args.length === 0) {
-  console.error('用法: run-strategy-generic.ts <strategy-file> [--live] [params-json] [exchange] [account]');
+  logger.error('用法: run-strategy-generic.ts <strategy-file> [--live] [params-json] [exchange] [account]');
   process.exit(1);
 }
 
@@ -71,7 +73,7 @@ if (!accountId) {
 
 // 验证策略文件
 if (!existsSync(strategyFile)) {
-  console.error(`策略文件不存在: ${strategyFile}`);
+  logger.error(`策略文件不存在: ${strategyFile}`);
   process.exit(1);
 }
 
@@ -80,7 +82,7 @@ let params;
 try {
   params = JSON.parse(paramsJson);
 } catch (e) {
-  console.error(`参数 JSON 格式错误: ${e}`);
+  logger.error(`参数 JSON 格式错误: ${e}`);
   process.exit(1);
 }
 
@@ -98,7 +100,7 @@ function loadAccounts(): Record<string, any> {
     }
     return map;
   } catch (e) {
-    console.error(`无法读取账号配置: ${configPath}`);
+    logger.error(`无法读取账号配置: ${configPath}`);
     return {};
   }
 }
@@ -110,14 +112,14 @@ const ACCOUNTS = loadAccounts();
 // ================================
 
 async function main() {
-  console.log('======================================================================');
-  console.log('   通用策略启动器');
-  console.log('======================================================================\n');
+  logger.info('======================================================================');
+  logger.info('   通用策略启动器');
+  logger.info('======================================================================\n');
 
   // 检查 DRY_RUN 环境变量
   const isDryRun = process.env.DRY_RUN !== 'false';
 
-  console.log('[配置]', {
+  logger.info('[配置]', {
     strategyFile,
     params,
     exchange,
@@ -131,21 +133,21 @@ async function main() {
   if (liveMode && isDryRun) {
     const allowPaperOnLive = process.env.ALLOW_PAPER_ON_LIVE === 'true';
     if (!allowPaperOnLive) {
-      console.error('❌ [P0 fail-fast] --live 模式但 DRY_RUN=true（纸盘）');
-      console.error('   如确实需要在live模式使用纸盘，请设置环境变量:');
-      console.error('   ALLOW_PAPER_ON_LIVE=true bun tests/run-strategy-generic.ts ...');
-      console.error('   否则请设置 DRY_RUN=false 启用真实订单流');
+      logger.error('❌ [P0 fail-fast] --live 模式但 DRY_RUN=true（纸盘）');
+      logger.error('   如确实需要在live模式使用纸盘，请设置环境变量:');
+      logger.error('   ALLOW_PAPER_ON_LIVE=true bun tests/run-strategy-generic.ts ...');
+      logger.error('   否则请设置 DRY_RUN=false 启用真实订单流');
       process.exit(1);
     }
-    console.warn('⚠️  [ALLOW_PAPER_ON_LIVE] --live 模式但 DRY_RUN=true，将使用 Paper Trade');
+    logger.warn('⚠️  [ALLOW_PAPER_ON_LIVE] --live 模式但 DRY_RUN=true，将使用 Paper Trade');
   }
 
   if (liveMode && !isDryRun) {
-    console.warn('🔴 [实盘模式] 连接真实订单流！');
+    logger.warn('🔴 [实盘模式] 连接真实订单流！');
   }
 
   if (demoMode) {
-    console.warn('🟡 [Demo Trading 模式] 使用 api-demo.bybit.com');
+    logger.warn('🟡 [Demo Trading 模式] 使用 api-demo.bybit.com');
   }
 
   // 1. 初始化交易所连接
@@ -158,7 +160,7 @@ async function main() {
       const demoApiSecret = process.env.BYBIT_DEMO_API_SECRET;
       
       if (!demoApiKey || !demoApiSecret) {
-        console.error('错误: Demo 模式需要设置 BYBIT_DEMO_API_KEY 和 BYBIT_DEMO_API_SECRET 环境变量');
+        logger.error('错误: Demo 模式需要设置 BYBIT_DEMO_API_KEY 和 BYBIT_DEMO_API_SECRET 环境变量');
         process.exit(1);
       }
 
@@ -173,11 +175,11 @@ async function main() {
         runId: Date.now().toString(),
       });
 
-      console.log('[Exchange] Bybit Provider 初始化完成 (Demo Trading)\n');
+      logger.info('[Exchange] Bybit Provider 初始化完成 (Demo Trading)\n');
     } else {
       const accountConfig = ACCOUNTS[accountId as keyof typeof ACCOUNTS];
       if (!accountConfig) {
-        console.error(`未找到账号配置: ${accountId}`);
+        logger.error(`未找到账号配置: ${accountId}`);
         process.exit(1);
       }
 
@@ -192,10 +194,10 @@ async function main() {
         runId: Date.now().toString(),
       });
 
-      console.log(`[Exchange] Bybit Provider 初始化完成 (${accountId})\n`);
+      logger.info(`[Exchange] Bybit Provider 初始化完成 (${accountId})\n`);
     }
   } else {
-    console.error(`暂不支持的交易所: ${exchange}`);
+    logger.error(`暂不支持的交易所: ${exchange}`);
     process.exit(1);
   }
 
@@ -216,7 +218,7 @@ async function main() {
   });
 
   // 4. 创建 BybitStrategyContext 并初始化策略
-  console.log('[QuickJS] 创建策略上下文（BybitStrategyContext）...');
+  logger.info('[QuickJS] 创建策略上下文（BybitStrategyContext）...');
   
   const context = new BybitStrategyContext({
     provider,
@@ -226,9 +228,9 @@ async function main() {
     minQty: 1,       // MYX 规格
   });
   
-  console.log('[QuickJS] 初始化沙箱...');
+  logger.info('[QuickJS] 初始化沙箱...');
   await strategy.onInit(context);
-  console.log('[QuickJS] 策略初始化完成\n');
+  logger.info('[QuickJS] 策略初始化完成\n');
 
   // P1修复: 热更新HTTP API端口分配策略
   // - RELOAD_API_PORT=0: 禁用HTTP server（live默认）
@@ -240,15 +242,15 @@ async function main() {
   if (process.env.RELOAD_API_PORT === '0') {
     // 显式禁用
     apiPort = 0;
-    console.log('[HotReloadAPI] HTTP服务已禁用 (RELOAD_API_PORT=0)');
+    logger.info('[HotReloadAPI] HTTP服务已禁用 (RELOAD_API_PORT=0)');
   } else if (process.env.RELOAD_API_PORT) {
     // 显式指定端口
     apiPort = parseInt(process.env.RELOAD_API_PORT);
   } else if (liveMode && !isDryRun) {
     // Live模式默认禁用（避免端口冲突）
     apiPort = 0;
-    console.log('[HotReloadAPI] Live模式默认禁用HTTP服务（避免端口冲突）');
-    console.log('[HotReloadAPI] 如需启用，请设置 RELOAD_API_PORT=<port>');
+    logger.info('[HotReloadAPI] Live模式默认禁用HTTP服务（避免端口冲突）');
+    logger.info('[HotReloadAPI] 如需启用，请设置 RELOAD_API_PORT=<port>');
   } else {
     // Paper模式: 使用策略派生端口（避免冲突）
     // 端口范围: 10000-65535，基于strategyId哈希
@@ -260,39 +262,39 @@ async function main() {
     try {
       hotReloadAPI.registerStrategy(strategyId, strategy);
       await hotReloadAPI.start(apiPort);
-      console.log(`[HotReloadAPI] 热更新服务已启动: http://127.0.0.1:${apiPort}`);
-      console.log(`[HotReloadAPI] 策略ID: ${strategyId}`);
-      console.log(`[HotReloadAPI] 可用命令:`);
-      console.log(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/reload -H "Content-Type: application/json" -d '{"strategyId":"${strategyId}","target":"strategy"}'`);
-      console.log(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/rollback -H "Content-Type: application/json" -d '{"strategyId":"${strategyId}"}'`);
+      logger.info(`[HotReloadAPI] 热更新服务已启动: http://127.0.0.1:${apiPort}`);
+      logger.info(`[HotReloadAPI] 策略ID: ${strategyId}`);
+      logger.info(`[HotReloadAPI] 可用命令:`);
+      logger.info(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/reload -H "Content-Type: application/json" -d '{"strategyId":"${strategyId}","target":"strategy"}'`);
+      logger.info(`  curl -X POST http://127.0.0.1:${apiPort}/api/v1/rollback -H "Content-Type: application/json" -d '{"strategyId":"${strategyId}"}'`);
     } catch (error: any) {
-      console.warn(`[HotReloadAPI] 启动失败: ${error.message}`);
+      logger.warn(`[HotReloadAPI] 启动失败: ${error.message}`);
     }
   }
-  console.log('');
+  logger.info('');
 
   if (liveMode && !isDryRun) {
-    console.log('🔴 [实盘模式] 订单将发送到交易所\n');
+    logger.info('🔴 [实盘模式] 订单将发送到交易所\n');
   } else {
-    console.log(`⚠️  [Paper Trade] 模拟模式（策略内需实现 simMode 逻辑）\n`);
+    logger.info(`⚠️  [Paper Trade] 模拟模式（策略内需实现 simMode 逻辑）\n`);
   }
 
-  console.log('[按 Ctrl+C 停止]\n');
+  logger.info('[按 Ctrl+C 停止]\n');
 
   // P0修复：添加退出日志（诊断#350消失问题）
   const startTime = Date.now();
   process.on('exit', (code) => {
     const runtime = Math.floor((Date.now() - startTime) / 1000);
-    console.log(`[QuickJS] [EXIT] 进程退出 code=${code}, tickCount=${tickCount}, runtime=${runtime}s`);
+    logger.info(`[QuickJS] [EXIT] 进程退出 code=${code}, tickCount=${tickCount}, runtime=${runtime}s`);
   });
 
   process.on('beforeExit', (code) => {
     const runtime = Math.floor((Date.now() - startTime) / 1000);
-    console.log(`[QuickJS] [BEFORE_EXIT] 即将退出 code=${code}, tickCount=${tickCount}, runtime=${runtime}s`);
+    logger.info(`[QuickJS] [BEFORE_EXIT] 即将退出 code=${code}, tickCount=${tickCount}, runtime=${runtime}s`);
   });
 
   // 5. 启动心跳循环
-  console.log('[QuickJS] 策略启动...');
+  logger.info('[QuickJS] 策略启动...');
 
   let tickCount = 0;
 
@@ -308,10 +310,10 @@ async function main() {
       const runtime = Math.floor((Date.now() - startTime) / 1000);
       if (tickCount >= 345 && tickCount <= 355) {
         // 心跳#345-#355详细日志
-        console.log(`[QuickJS] [CRITICAL] 心跳 #${tickCount} - 价格: ${price}, runtime: ${runtime}s`);
+        logger.info(`[QuickJS] [CRITICAL] 心跳 #${tickCount} - 价格: ${price}, runtime: ${runtime}s`);
       } else if (tickCount % 10 === 0) {
         // 每 10 次心跳输出一次
-        console.log(`[QuickJS] 心跳 #${tickCount} - 价格: ${price}, runtime: ${runtime}s`);
+        logger.info(`[QuickJS] 心跳 #${tickCount} - 价格: ${price}, runtime: ${runtime}s`);
       }
 
       // 构造 tick
@@ -338,14 +340,14 @@ async function main() {
       if (typeof strategy.onTick === 'function') {
         await strategy.onTick(tick, context);
       } else {
-        console.error(`[QuickJS] strategy.onTick 不存在! typeof=${typeof strategy.onTick}`);
+        logger.error(`[QuickJS] strategy.onTick 不存在! typeof=${typeof strategy.onTick}`);
       }
     } catch (error: any) {
-      console.error(`[QuickJS] 心跳错误: ${error.message}`);
+      logger.error(`[QuickJS] 心跳错误: ${error.message}`);
       
       // 错误隔离：不中断循环
       if ((strategy as any).errorCount > 10) {
-        console.error(`[QuickJS] 错误次数过多，停止策略`);
+        logger.error(`[QuickJS] 错误次数过多，停止策略`);
         clearInterval(heartbeatInterval);
         process.exit(1);
       }
@@ -355,18 +357,18 @@ async function main() {
   // 6. 优雅退出
   process.on('SIGINT', async () => {
     const runtime = Math.floor((Date.now() - startTime) / 1000);
-    console.log(`\n[QuickJS] [SIGINT] 收到 SIGINT 信号，停止策略... tickCount=${tickCount}, runtime=${runtime}s`);
+    logger.info(`\n[QuickJS] [SIGINT] 收到 SIGINT 信号，停止策略... tickCount=${tickCount}, runtime=${runtime}s`);
     clearInterval(heartbeatInterval);
 
     try {
       // Day2: 停止热更新HTTP API服务
       await hotReloadAPI.stop();
-      console.log('[HotReloadAPI] 服务已停止');
+      logger.info('[HotReloadAPI] 服务已停止');
       
       await strategy.onStop(context);
-      console.log('[QuickJS] 策略已停止');
+      logger.info('[QuickJS] 策略已停止');
     } catch (e) {
-      console.error('[QuickJS] 停止失败:', e);
+      logger.error('[QuickJS] 停止失败:', e);
     }
 
     process.exit(0);
@@ -374,18 +376,18 @@ async function main() {
 
   process.on('SIGTERM', async () => {
     const runtime = Math.floor((Date.now() - startTime) / 1000);
-    console.log(`\nQuickJS] [SIGTERM] 收到 SIGTERM 信号，停止策略... tickCount=${tickCount}, runtime=${runtime}s`);
+    logger.info(`\nQuickJS] [SIGTERM] 收到 SIGTERM 信号，停止策略... tickCount=${tickCount}, runtime=${runtime}s`);
     clearInterval(heartbeatInterval);
 
     try {
       // Day2: 停止热更新HTTP API服务
       await hotReloadAPI.stop();
-      console.log('[HotReloadAPI] 服务已停止');
+      logger.info('[HotReloadAPI] 服务已停止');
       
       await strategy.onStop(context);
-      console.log('[QuickJS] 策略已停止');
+      logger.info('[QuickJS] 策略已停止');
     } catch (e) {
-      console.error('[QuickJS] 停止失败:', e);
+      logger.error('[QuickJS] 停止失败:', e);
     }
 
     process.exit(0);
@@ -393,23 +395,23 @@ async function main() {
 
   // Day2: 热更新signal处理
   process.on('SIGUSR1', async () => {
-    console.log(`\n[QuickJS] [SIGUSR1] 收到热更新信号，触发热重载...`);
+    logger.info(`\n[QuickJS] [SIGUSR1] 收到热更新信号，触发热重载...`);
     try {
       // 热更新策略层（使用新的reload方法）
       const result = await (strategy as any).reload('SIGUSR1');
       if (result.success) {
-        console.log(`[QuickJS] [SIGUSR1] 热更新完成 ✅ (${result.duration}ms)`);
-        console.log(`[QuickJS] [SIGUSR1] hash: ${result.oldHash} → ${result.newHash}`);
+        logger.info(`[QuickJS] [SIGUSR1] 热更新完成 ✅ (${result.duration}ms)`);
+        logger.info(`[QuickJS] [SIGUSR1] hash: ${result.oldHash} → ${result.newHash}`);
       } else {
-        console.error(`[QuickJS] [SIGUSR1] 热更新失败: ${result.error}`);
+        logger.error(`[QuickJS] [SIGUSR1] 热更新失败: ${result.error}`);
       }
     } catch (e) {
-      console.error('[QuickJS] 热更新失败:', e);
+      logger.error('[QuickJS] 热更新失败:', e);
     }
   });
 }
 
 main().catch((error) => {
-  console.error('[Fatal]', error);
+  logger.error('[Fatal]', error);
   process.exit(1);
 });
