@@ -81,7 +81,7 @@ export class QuickJSStrategy {
   private cachedPositions: Map<string, Position> = new Map();
   private cachedOpenOrders: any[] = [];  // P2修复：缓存openOrders（遗留订单检测）
   private cachedExecutions: any[] = [];  // P1修复：缓存成交记录（策略账本重建）
-  
+
   // P2修复：缓存就绪门闸（bot-009建议）
   private cacheReady = false;
 
@@ -110,6 +110,13 @@ export class QuickJSStrategy {
     { name: 'strategyId', type: 'string' },
   ]);
 
+  // P2新增：metrics磁盘持久化
+  private metricsBuffer: Array<{timestamp: number, name: string, value: number, strategyId: string}> = [];
+  private metricsRowCount = 0;
+  private metricsFlushTimer?: NodeJS.Timeout;
+  private readonly METRICS_FLUSH_THRESHOLD = 100; // 每100条flush
+  private readonly METRICS_FLUSH_INTERVAL_MS = 5 * 60 * 1000; // 每5分钟flush
+
   // P1新增：资金费检测状态
   private fundingRateCache: Map<string, { fundingRate: number; nextFundingTime: number; timestamp: number }> = new Map();
   private lastFundingFeeCheck: number = 0;
@@ -125,7 +132,7 @@ export class QuickJSStrategy {
   private barCache = new BarCacheLayer({
     logger: (msg) => logger.info(`[BarCache] ${msg}`),
   });
-  
+
   // 待处理订单队列（异步执行）
   private pendingOrders: Array<{
     params: any;
@@ -145,9 +152,9 @@ export class QuickJSStrategy {
 
   constructor(config: QuickJSStrategyConfig) {
     // 默认 state 目录：~/.quant-lab/state/ （支持环境变量覆盖）
-    const defaultStateDir = process.env.QUANT_STATE_DIR || 
+    const defaultStateDir = process.env.QUANT_STATE_DIR ||
                            join(process.env.HOME || process.env.USERPROFILE || '.', '.quant-lab/state');
-    
+
     this.config = {
       stateDir: defaultStateDir,
       timeoutMs: 60000,
@@ -160,7 +167,7 @@ export class QuickJSStrategy {
     };
 
     this.stateFile = join(this.config.stateDir, `${this.config.strategyId}.json`);
-    
+
     // 记录文件修改时间
     if (existsSync(this.config.strategyFile)) {
       this.fileLastModified = statSync(this.config.strategyFile).mtimeMs;
@@ -171,7 +178,7 @@ export class QuickJSStrategy {
     this.orderStateManager.onAlert((alert) => {
       logger.error(`[QuickJSStrategy] 订单异常告警:`, alert);
     });
-    
+
     // P1: 初始化遗留订单追踪器（从 state 恢复 runId）
     // 先加载状态，确保 strategyState 已填充
     this.loadState();
@@ -194,6 +201,14 @@ export class QuickJSStrategy {
     if (this.config.hotReload) {
       this.startHotReload();
     }
+
+    // P2新增：启动metrics定时flush（每5分钟）
+    this.metricsFlushTimer = setInterval(() => {
+      this.flushMetrics().catch(err => {
+        logger.error(`[QuickJSStrategy] 定时flushMetrics失败:`, err.message);
+      });
+    }, this.METRICS_FLUSH_INTERVAL_MS);
+    logger.info(`[QuickJSStrategy] metrics定时flush已启动: ${this.METRICS_FLUSH_INTERVAL_MS}ms`);
 
     // 初始化沙箱（带错误隔离）
     await this.initializeSandbox();
@@ -253,13 +268,13 @@ export class QuickJSStrategy {
       this.initialized = true;
       this.errorCount = 0;
       this.lastError = undefined;
-      
+
       logger.info(`[QuickJSStrategy] 策略初始化完成`);
     } catch (error: any) {
       this.errorCount++;
       this.lastError = error;
       logger.error(`[QuickJSStrategy] 初始化失败 (${this.errorCount}/${this.config.maxRetries}):`, error.message);
-      
+
       // 自动重试
       if (this.errorCount < this.config.maxRetries!) {
         logger.info(`[QuickJSStrategy] ${this.config.retryDelayMs}ms 后重试...`);
@@ -276,16 +291,16 @@ export class QuickJSStrategy {
    */
   /**
    * 手动触发热重载（Day 2增强版）
-   * 
+   *
    * 日志输出：策略ID/旧hash→新hash/触发人/时间戳
    */
   async reload(triggeredBy: string = 'manual'): Promise<{ success: boolean; oldHash: string; newHash: string; duration: number; error?: string }> {
     const startTime = Date.now();
     const timestamp = new Date().toISOString();
-    
+
     // 计算旧版本hash
     const oldHash = this.calculateFileHash();
-    
+
     logger.info(`[QuickJSStrategy] [RELOAD] =========================================`);
     logger.info(`[QuickJSStrategy] [RELOAD] 开始热重载`);
     logger.info(`[QuickJSStrategy] [RELOAD] 策略ID: ${this.config.strategyId}`);
@@ -340,7 +355,7 @@ export class QuickJSStrategy {
       // P1修复：runId同步由bridge_onRunIdChange即时处理
 
       const duration = Date.now() - startTime;
-      
+
       logger.info(`[QuickJSStrategy] [RELOAD] 热重载完成 ✅ (${duration}ms)`);
       logger.info(`[QuickJSStrategy] [RELOAD] hash变化: ${oldHash} → ${newHash}`);
       logger.info(`[QuickJSStrategy] [RELOAD] =========================================`);
@@ -382,10 +397,10 @@ export class QuickJSStrategy {
     if (!existsSync(snapshotDir)) {
       mkdirSync(snapshotDir, { recursive: true });
     }
-    
+
     const filename = `${this.config.strategyId}-${snapshot.timestamp}.json`;
     const filepath = join(snapshotDir, filename);
-    
+
     writeFileSync(filepath, JSON.stringify(snapshot, null, 2));
     logger.info(`[QuickJSStrategy] 快照已保存: ${filepath}`);
   }
@@ -398,16 +413,16 @@ export class QuickJSStrategy {
     logger.info(`[QuickJSStrategy] [ROLLBACK] =========================================`);
     logger.info(`[QuickJSStrategy] [ROLLBACK] 开始回滚`);
     logger.info(`[QuickJSStrategy] [ROLLBACK] 策略ID: ${this.config.strategyId}`);
-    
+
     try {
       // 获取上一版快照
       const snapshot = this.getPreviousSnapshot();
       if (!snapshot) {
         throw new Error('没有找到上一版快照');
       }
-      
+
       logger.info(`[QuickJSStrategy] [ROLLBACK] 目标hash: ${snapshot.previousHash || 'unknown'}`);
-      
+
       // 1. 调用st_stop清理当前策略
       if (this.ctx && this.initialized) {
         await this.callStrategyFunction('st_stop').catch((err) => {
@@ -441,7 +456,7 @@ export class QuickJSStrategy {
 
       const duration = Date.now() - startTime;
       const rto = duration; // RTO = 实际恢复时间
-      
+
       logger.info(`[QuickJSStrategy] [ROLLBACK] 回滚完成 ✅ (${duration}ms)`);
       logger.info(`[QuickJSStrategy] [ROLLBACK] RTO: ${rto}ms`);
       logger.info(`[QuickJSStrategy] [ROLLBACK] =========================================`);
@@ -464,16 +479,16 @@ export class QuickJSStrategy {
     if (!existsSync(snapshotDir)) {
       return null;
     }
-    
+
     const files = require('fs').readdirSync(snapshotDir)
       .filter((f: string) => f.startsWith(`${this.config.strategyId}-`) && f.endsWith('.json'))
       .sort()
       .reverse();
-    
+
     if (files.length < 2) {
       return null;
     }
-    
+
     // 返回倒数第二个（上一版）
     const path = join(snapshotDir, files[1]);
     return JSON.parse(readFileSync(path, 'utf-8'));
@@ -503,15 +518,15 @@ export class QuickJSStrategy {
    */
   private checkAndExecuteScheduledTasks(): void {
     if (!this.ctx || this.scheduleRegistry.size === 0) return;
-    
+
     const now = Date.now();
     const dueTasks: Array<{ callbackName: string; scheduleType: string; registryKey: string }> = [];
-    
+
     // 检查所有注册的任务
     for (const [registryKey, task] of this.scheduleRegistry.entries()) {
       if (now >= task.nextTrigger) {
         dueTasks.push({ callbackName: task.callbackName, scheduleType: task.scheduleType, registryKey });
-        
+
         // 更新下次触发时间
         let nextTrigger = task.nextTrigger;
         switch (task.scheduleType) {
@@ -528,24 +543,24 @@ export class QuickJSStrategy {
             }
         }
         task.nextTrigger = nextTrigger;
-        
+
         const nextTriggerStr = new Date(nextTrigger).toISOString();
         logger.info(`[QuickJSStrategy] 定时任务 ${registryKey} 下次触发: ${nextTriggerStr}`);
       }
     }
-    
+
     // 执行到期的任务
     for (const task of dueTasks) {
       try {
         // 检查策略是否实现了对应的回调函数
         const fnHandle = this.ctx!.getProp(this.ctx!.global, task.callbackName);
         const fnType = this.ctx!.typeof(fnHandle);
-        
+
         if (fnType === 'function') {
           logger.info(`[QuickJSStrategy] 执行定时任务: ${task.callbackName} (${task.scheduleType})`);
           const result = this.ctx!.callFunction(fnHandle, this.ctx!.undefined);
           fnHandle.dispose();
-          
+
           if (result.error) {
             const errorMsg = this.ctx!.dump(result.error);
             logger.error(`[QuickJSStrategy] 定时任务 ${task.callbackName} 执行失败:`, errorMsg);
@@ -569,38 +584,38 @@ export class QuickJSStrategy {
    */
   private async prepareIndicators(symbol: string): Promise<void> {
     if (!this.ctx || !this.strategyCtx?.getKlines) return;
-    
+
     try {
       // 获取K线数据（例如5分钟K线）
       const klines = await this.strategyCtx.getKlines(symbol, '5', 100);
-      
+
       if (!klines || klines.length === 0) return;
-      
+
       // 检测K线是否更新（比较最后一根K线的时间戳）
       const lastKline = klines[klines.length - 1];
       const lastTimestamp = lastKline?.timestamp || 0;
-      
+
       if (lastTimestamp <= this.lastKlineTimestamp) {
         // K线未更新，跳过
         return;
       }
-      
+
       // K线已更新，更新缓存
       this.lastKlineTimestamp = lastTimestamp;
       this.cachedKlines = klines;
-      
+
       // 检查策略是否实现了st_prepareIndicators
       const fnHandle = this.ctx.getProp(this.ctx.global, 'st_prepareIndicators');
       const isFunction = this.ctx.typeof(fnHandle) === 'function';
-      
+
       if (isFunction) {
         const klinesJson = JSON.stringify(klines);
         const argHandle = this.ctx.newString(klinesJson);
         const result = this.ctx.callFunction(fnHandle, this.ctx.undefined, argHandle);
-        
+
         fnHandle.dispose();
         argHandle.dispose();
-        
+
         if (result.error) {
           const errorMsg = this.ctx.dump(result.error);
           logger.warn(`[QuickJSStrategy] st_prepareIndicators 执行失败:`, errorMsg);
@@ -727,7 +742,7 @@ export class QuickJSStrategy {
           logger.error(`[QuickJSStrategy] [P2 GATE] cacheReady: true → false，禁止下单`);
         }
       }
-      
+
       // P2修复：订单闭环对账（bot-009/鲶鱼建议）
       await this.reconcileOrders(ctx);
     }
@@ -774,7 +789,7 @@ export class QuickJSStrategy {
       const orderJson = JSON.stringify(order);
       const code = `st_onOrderUpdate(${orderJson})`;
       const result = this.ctx.evalCode(code);
-      
+
       if (result.error) {
         const errorMsg = this.ctx.dump(result.error);
         logger.error(`[QuickJSStrategy] st_onOrderUpdate 执行失败:`, errorMsg);
@@ -803,7 +818,7 @@ export class QuickJSStrategy {
       const orderJson = JSON.stringify(orderUpdate);
       const code = `st_onOrderUpdate(${orderJson})`;
       const result = this.ctx.evalCode(code);
-      
+
       if (result.error) {
         const errorMsg = this.ctx.dump(result.error);
         logger.error(`[QuickJSStrategy] notifyOrderUpdate 执行失败:`, errorMsg);
@@ -811,7 +826,7 @@ export class QuickJSStrategy {
       } else {
         logger.info(`[QuickJSStrategy] notifyOrderUpdate 执行成功`);
         result.value.dispose();
-        
+
         // P0: 更新订单状态
         this.updateOrderStateFromNotification(orderUpdate);
       }
@@ -823,18 +838,18 @@ export class QuickJSStrategy {
   /**
    * P0: 根据通知更新订单状态
    */
-  private updateOrderStateFromNotification(orderUpdate: { 
-    orderId: string; 
+  private updateOrderStateFromNotification(orderUpdate: {
+    orderId: string;
     orderLinkId?: string;
-    status?: string; 
+    status?: string;
     cumQty?: number;
   }): void {
     const orderLinkId = orderUpdate.orderLinkId || orderUpdate.orderId;
     if (!orderLinkId) return;
-    
+
     const order = this.orderStateManager.getOrder(orderLinkId);
     if (!order) return;
-    
+
     // 根据状态更新
     switch (orderUpdate.status) {
       case 'Filled':
@@ -944,8 +959,8 @@ export class QuickJSStrategy {
         // 计算持仓时长（基于第一个订单时间）
         const now = Date.now();
         const positionEntryTime = this.getPositionEntryTime(symbol);
-        const holdingMinutes = positionEntryTime > 0 
-          ? Math.floor((now - positionEntryTime) / 60000) 
+        const holdingMinutes = positionEntryTime > 0
+          ? Math.floor((now - positionEntryTime) / 60000)
           : 0;
 
         // 构造止损数据
@@ -956,7 +971,7 @@ export class QuickJSStrategy {
           currentPrice: position.currentPrice,
           holdingMinutes,
           unrealizedPnl: position.unrealizedPnl,
-          unrealizedPnlPct: position.entryPrice > 0 
+          unrealizedPnlPct: position.entryPrice > 0
             ? (position.currentPrice - position.entryPrice) / position.entryPrice * (position.side === 'SHORT' ? -1 : 1)
             : 0,
         };
@@ -978,7 +993,7 @@ export class QuickJSStrategy {
         // 检查是否触发止损
         if (stoplossData.unrealizedPnlPct < stoplossThreshold) {
           logger.warn(`[动态止损] ${symbol} 触发止损: 当前盈亏=${(stoplossData.unrealizedPnlPct * 100).toFixed(2)}% 阈值=${(stoplossThreshold * 100).toFixed(2)}%`);
-          
+
           // 执行减仓（市价单平掉全部或部分仓位）
           await this.executeStoplossOrder(symbol, position);
         }
@@ -995,7 +1010,7 @@ export class QuickJSStrategy {
     // 从订单历史中找到该品种最早的成交订单
     const orders = this.orderStateManager.getAllOrders();
     let earliestTime = 0;
-    
+
     for (const order of orders) {
       if (order.product === symbol && order.state === 'FILLED' && order.updatedAt) {
         if (earliestTime === 0 || order.updatedAt < earliestTime) {
@@ -1003,7 +1018,7 @@ export class QuickJSStrategy {
         }
       }
     }
-    
+
     return earliestTime;
   }
 
@@ -1061,9 +1076,9 @@ export class QuickJSStrategy {
     const ctxHandle = this.ctx.getProp(this.ctx.global, 'ctx');
     const strategyHandle = this.ctx.getProp(ctxHandle, 'strategy');
     const paramsHandle = this.ctx.newString(JSON.stringify(this.config.params));
-    
+
     this.ctx.setProp(strategyHandle, 'params', paramsHandle);
-    
+
     paramsHandle.dispose();
     strategyHandle.dispose();
     ctxHandle.dispose();
@@ -1095,6 +1110,17 @@ export class QuickJSStrategy {
     // 调用 st_stop（如果存在）
     await this.callStrategyFunction('st_stop').catch(() => {});
 
+    // P2新增：最后flush metrics到磁盘（不丢数据）
+    await this.flushMetrics().catch(err => {
+      logger.error(`[QuickJSStrategy] stop时flushMetrics失败:`, err.message);
+    });
+
+    // 清理metrics定时器
+    if (this.metricsFlushTimer) {
+      clearInterval(this.metricsFlushTimer);
+      this.metricsFlushTimer = undefined;
+    }
+
     // 刷新状态
     this.flushState();
 
@@ -1116,18 +1142,18 @@ export class QuickJSStrategy {
     try {
       // 检测 ctx 类型：如果有 getAccountAsync，说明是 BybitStrategyContext
       const hasAsyncAPI = 'getAccountAsync' in ctx && typeof (ctx as any).getAccountAsync === 'function';
-      
+
       if (hasAsyncAPI) {
         // BybitStrategyContext: 使用异步 API
         this.cachedAccount = await (ctx as any).getAccountAsync();
-        
+
         // 获取所有持仓
         const positions = await (ctx as any).getPositionsAsync();
         this.cachedPositions.clear();
         for (const pos of positions) {
           // P0 修复：同时存储两种 symbol 格式（兼容带/不带斜杠）
           this.cachedPositions.set(pos.symbol, pos);
-          
+
           // 如果 symbol 包含斜杠（如 MYX/USDT），也存储无斜杠版本（MYXUSDT）
           if (pos.symbol.includes('/')) {
             const noSlash = pos.symbol.replace('/', '');
@@ -1138,22 +1164,22 @@ export class QuickJSStrategy {
             const withSlash = `${pos.symbol.slice(0, -4)}/${pos.symbol.slice(-4)}`;
             this.cachedPositions.set(withSlash, pos);
           }
-          
+
           logger.info(`[QuickJSStrategy] 持仓缓存: symbol=${pos.symbol}, quantity=${pos.quantity}`);
         }
-        
+
         logger.info(`[QuickJSStrategy] 缓存刷新成功: ${positions.length} 个持仓`);
       } else {
         // LiveEngine/BacktestEngine: 使用同步 API
         this.cachedAccount = ctx.getAccount();
-        
+
         // LiveEngine 没有 getPositions() 方法，需要从 Account 获取
         const account = this.cachedAccount;
         this.cachedPositions.clear();
         for (const pos of account.positions) {
           // P0 修复：同时存储两种 symbol 格式（兼容带/不带斜杠）
           this.cachedPositions.set(pos.symbol, pos);
-          
+
           // 如果 symbol 包含斜杠（如 MYX/USDT），也存储无斜杠版本（MYXUSDT）
           if (pos.symbol.includes('/')) {
             const noSlash = pos.symbol.replace('/', '');
@@ -1165,10 +1191,10 @@ export class QuickJSStrategy {
             this.cachedPositions.set(withSlash, pos);
           }
         }
-        
+
         logger.info(`[QuickJSStrategy] 缓存刷新成功: ${account.positions.length} 个持仓`);
       }
-      
+
       // P2修复：缓存刷新成功后设置门闸（bot-009建议）
       this.cacheReady = true;
     } catch (error: any) {
@@ -1187,30 +1213,30 @@ export class QuickJSStrategy {
     try {
       // 检测 ctx 类型：只有 BybitStrategyContext 有 getOpenOrders/getExecutions
       const hasOrderAPI = 'getOpenOrders' in ctx && typeof (ctx as any).getOpenOrders === 'function';
-      
+
       if (!hasOrderAPI) {
         // LiveEngine/BacktestEngine 没有这些 API，跳过
         return;
       }
-      
+
       // 拉取未完成订单
       const openOrders = await (ctx as any).getOpenOrders();
       this.cachedOpenOrders = openOrders;  // P2修复：缓存openOrders（遗留订单检测）
       logger.info(`[QuickJSStrategy] [Order Reconcile] 未完成订单: ${openOrders.length} 个`);
-      
+
       if (openOrders.length > 0) {
         for (const order of openOrders.slice(0, 5)) {
           logger.info(`[QuickJSStrategy] [Order Reconcile] - orderId=${order.orderId}, orderLinkId=${order.orderLinkId}, symbol=${order.symbol}, side=${order.side}, qty=${order.qty}, price=${order.price}, status=${order.orderStatus}`);
         }
       }
-      
+
       // 拉取成交记录（最近50条）
       // NOTE: Bybit API对execution/list的startTime有限制，报错"Can't query earlier than 2 years"
       // 临时回退不传startTime，恢复监控能力（TODO: 研究Bybit API文档找到正确用法）
       const executions = await (ctx as any).getExecutions();
       this.cachedExecutions = executions;
       logger.info(`[QuickJSStrategy] [Order Reconcile] 成交记录: ${executions.length} 个`);
-      
+
       // P1修复：过滤只处理本策略execution（按策略方向前缀）
       const strategyId = this.config.strategyId || '';
       const direction = strategyId.split('-').pop() || 'neutral';
@@ -1220,54 +1246,54 @@ export class QuickJSStrategy {
         return exec.orderLinkId.startsWith(strategyPrefix);
       });
       logger.info(`[QuickJSStrategy] [Order Reconcile] 本策略成交: ${myExecutions.length} 个 (过滤后)`);
-      
+
       if (myExecutions.length > 0) {
         for (const exec of myExecutions.slice(0, 5)) {
           logger.info(`[QuickJSStrategy] [Order Reconcile] - execId=${exec.execId}, orderLinkId=${exec.orderLinkId}, symbol=${exec.symbol}, side=${exec.side}, execQty=${exec.execQty}, execPrice=${exec.execPrice}, execTime=${exec.execTime}`);
         }
-        
+
         // NOTE: 不在Order Reconcile时处理历史executions，避免重复计算仓位
         // st_onExecution只在实时成交时通过WebSocket回调调用
       }
-      
+
       // P0: 订单状态一致性检查
       this.checkOrderStateConsistency(openOrders);
-      
+
       // P1: 遗留订单追踪（自动消警）
       if (this.legacyOrderTracker) {
         const alerts = this.legacyOrderTracker.check(openOrders);
         for (const alert of alerts) {
           logger.info(`[QuickJSStrategy] ${alert.message}`);
           // 发送 Telegram 告警（异步不阻塞）
-          this.legacyOrderTracker.sendAlert(alert).catch(err => 
+          this.legacyOrderTracker.sendAlert(alert).catch(err =>
             logger.error(`[QuickJSStrategy] 遗留订单告警发送失败:`, err)
           );
         }
       }
-      
+
       // P0: 启动异常单检测（首次调用）
       if (!this.orderStateManager['checkInterval']) {
         this.orderStateManager.startDetection(30000); // 30秒检测一次
       }
-      
+
     } catch (error: any) {
       logger.error(`[QuickJSStrategy] [Order Reconcile] 对账失败:`, error.message);
       // 不抛出错误，避免影响策略运行
     }
   }
-  
+
   /**
    * P0: 检查订单状态一致性
    */
   private checkOrderStateConsistency(exchangeOrders: any[]): void {
     const strategyOrders = this.orderStateManager.getActiveOrders();
-    
+
     for (const strategyOrder of strategyOrders) {
       // 在交易所订单中查找
       const exchangeOrder = exchangeOrders.find(
         (e: any) => e.orderLinkId === strategyOrder.orderLinkId
       );
-      
+
       if (!exchangeOrder) {
         // 策略有但交易所没有 - 可能已成交或已撤单
         // P1修复：不再标记ABNORMAL，而是标记为CANCELLED（假设已撤单）
@@ -1279,18 +1305,18 @@ export class QuickJSStrategy {
         }
         continue;
       }
-      
+
       // 检查状态是否一致
       const check = this.orderStateManager.checkStateConsistency(
         strategyOrder,
         exchangeOrder.orderStatus
       );
-      
+
       if (!check.consistent) {
         logger.warn(`[QuickJSStrategy] 订单状态不一致: ${strategyOrder.orderLinkId}`);
         logger.warn(`  策略状态: ${strategyOrder.state}`);
         logger.warn(`  交易所状态: ${exchangeOrder.orderStatus}`);
-        
+
         // 延迟处理，给状态同步时间
         this.orderStateManager.handleInconsistency(
           strategyOrder.orderLinkId,
@@ -1305,12 +1331,12 @@ export class QuickJSStrategy {
    */
   private async processPendingOrders(): Promise<void> {
     if (!this.strategyCtx) return;
-    
+
     // P2修复：缓存就绪门闸检查（bot-009建议）
     if (!this.cacheReady) {
       logger.warn(`[QuickJSStrategy] [P2 GATE] 缓存未就绪，禁止下单（pending orders: ${this.pendingOrders.length}）`);
       logger.warn(`[QuickJSStrategy] [P2 GATE] 缓存刷新失败时未知真实仓位，强制拒绝下单避免风险`);
-      
+
       // 拒绝所有pending orders
       const orders = [...this.pendingOrders];
       this.pendingOrders = [];
@@ -1319,7 +1345,7 @@ export class QuickJSStrategy {
       }
       return;
     }
-    
+
     const orders = [...this.pendingOrders];
     this.pendingOrders = [];
 
@@ -1334,11 +1360,11 @@ export class QuickJSStrategy {
         }
 
         let order: Order;
-        
+
         logger.info(`[QuickJSStrategy] processPendingOrders: 下单参数`, params);
         logger.info(`[QuickJSStrategy] [P0 DEBUG] 准备调用 ${params.side}(symbol=${params.symbol}, qty=${params.qty}, price=${params.price}, orderLinkId=${params.orderLinkId})`);
         logger.info(`[QuickJSStrategy] [P0 DEBUG] gridId=${params.gridId}`);
-        
+
         if (params.side === 'Buy') {
           order = await this.strategyCtx.buy(
             params.symbol,
@@ -1430,12 +1456,12 @@ export class QuickJSStrategy {
       const name = this.ctx!.getString(nameHandle);
       const dataJson = this.ctx!.getString(dataHandle);
       const paramsJson = this.ctx!.getString(paramsHandle);
-      
+
       const data = JSON.parse(dataJson);
       const params = JSON.parse(paramsJson);
-      
+
       let result: any;
-      
+
       try {
         switch (name) {
           case 'sma':
@@ -1482,40 +1508,40 @@ export class QuickJSStrategy {
     // bridge_getFundingRate - 获取资金费率
     const bridge_getFundingRate = this.ctx.newFunction('bridge_getFundingRate', (symbolHandle) => {
       const symbol = this.ctx!.getString(symbolHandle);
-      
+
       // 返回 Promise handle（QuickJS async bridge）
       const promiseHandle = this.ctx!.newPromise();
-      
+
       if (this.strategyCtx?.getFundingRate) {
         this.strategyCtx.getFundingRate(symbol).then((result) => {
-          const response = JSON.stringify({ 
-            fundingRate: result.fundingRate, 
+          const response = JSON.stringify({
+            fundingRate: result.fundingRate,
             nextFundingTime: result.nextFundingTime,
-            symbol 
+            symbol
           });
           promiseHandle.resolve(this.ctx!.newString(response));
           this.ctx!.runtime.executePendingJobs();
         }).catch((error: any) => {
-          const response = JSON.stringify({ 
-            fundingRate: 0, 
+          const response = JSON.stringify({
+            fundingRate: 0,
             nextFundingTime: 0,
             symbol,
-            error: error.message 
+            error: error.message
           });
           promiseHandle.reject(this.ctx!.newString(response));
           this.ctx!.runtime.executePendingJobs();
         });
       } else {
         // 未实现时返回0值
-        const response = JSON.stringify({ 
-          fundingRate: 0, 
+        const response = JSON.stringify({
+          fundingRate: 0,
           nextFundingTime: 0,
-          symbol 
+          symbol
         });
         promiseHandle.resolve(this.ctx!.newString(response));
         this.ctx!.runtime.executePendingJobs();
       }
-      
+
       const h = promiseHandle.handle;
       promiseHandle.dispose();
       return h;
@@ -1526,27 +1552,27 @@ export class QuickJSStrategy {
     // bridge_getBestBidAsk - 获取最优买卖价
     const bridge_getBestBidAsk = this.ctx.newFunction('bridge_getBestBidAsk', (symbolHandle) => {
       const symbol = this.ctx!.getString(symbolHandle);
-      
+
       // 返回 Promise handle（QuickJS async bridge）
       const promiseHandle = this.ctx!.newPromise();
-      
+
       if (this.strategyCtx?.getBestBidAsk) {
         this.strategyCtx.getBestBidAsk(symbol).then((result) => {
-          const response = JSON.stringify({ 
-            bid: result.bid, 
-            ask: result.ask, 
+          const response = JSON.stringify({
+            bid: result.bid,
+            ask: result.ask,
             spread: result.spread,
-            symbol 
+            symbol
           });
           promiseHandle.resolve(this.ctx!.newString(response));
           this.ctx!.runtime.executePendingJobs();
         }).catch((error: any) => {
-          const response = JSON.stringify({ 
-            bid: 0, 
-            ask: 0, 
+          const response = JSON.stringify({
+            bid: 0,
+            ask: 0,
             spread: 0,
             symbol,
-            error: error.message 
+            error: error.message
           });
           promiseHandle.reject(this.ctx!.newString(response));
           this.ctx!.runtime.executePendingJobs();
@@ -1558,17 +1584,17 @@ export class QuickJSStrategy {
         const bid = midPrice * (1 - spreadPct / 2);
         const ask = midPrice * (1 + spreadPct / 2);
         const spread = ask - bid;
-        
-        const response = JSON.stringify({ 
-          bid, 
-          ask, 
+
+        const response = JSON.stringify({
+          bid,
+          ask,
           spread,
-          symbol 
+          symbol
         });
         promiseHandle.resolve(this.ctx!.newString(response));
         this.ctx!.runtime.executePendingJobs();
       }
-      
+
       const h = promiseHandle.handle;
       promiseHandle.dispose();
       return h;
@@ -1670,17 +1696,17 @@ export class QuickJSStrategy {
     const bridge_getPosition = this.ctx.newFunction('bridge_getPosition', (symbolHandle) => {
       const symbol = this.ctx!.getString(symbolHandle);
       const position = this.cachedPositions.get(symbol);
-      
+
       // P0 调试日志
       logger.info(`[QuickJSStrategy] bridge_getPosition(${symbol}): found=${!!position}`);
       if (!position) {
         logger.info(`[QuickJSStrategy] bridge_getPosition: cachedPositions keys:`, Array.from(this.cachedPositions.keys()));
       }
-      
+
       if (!position) {
         return this.ctx!.newString('null');
       }
-      
+
       return this.ctx!.newString(JSON.stringify(position));
     });
     this.ctx.setProp(this.ctx.global, 'bridge_getPosition', bridge_getPosition);
@@ -1733,7 +1759,7 @@ export class QuickJSStrategy {
 
       // 加入待处理队列（下次 tick 时执行）
       const tempId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-      
+
       this.pendingOrders.push({
         params,
         resolve: (result) => {
@@ -1794,7 +1820,7 @@ export class QuickJSStrategy {
       const orderId = this.ctx!.getString(orderIdHandle);
       const price = priceHandle ? this.ctx!.getNumber(priceHandle) : undefined;
       const qty = qtyHandle ? this.ctx!.getNumber(qtyHandle) : undefined;
-      
+
       logger.info(`[QuickJSStrategy] 改单请求: ${orderId}, price=${price}, qty=${qty}`);
 
       // 返回 Promise handle（QuickJS async bridge）
@@ -1830,7 +1856,7 @@ export class QuickJSStrategy {
     // bridge_cancelAllOrders - 批量撤单（异步执行）
     const bridge_cancelAllOrders = this.ctx.newFunction('bridge_cancelAllOrders', (symbolHandle) => {
       const symbol = symbolHandle ? this.ctx!.getString(symbolHandle) : undefined;
-      
+
       logger.info(`[QuickJSStrategy] 批量撤单请求: symbol=${symbol || 'all'}`);
 
       // 返回 Promise handle（QuickJS async bridge）
@@ -1869,7 +1895,7 @@ export class QuickJSStrategy {
     const bridge_orderToTarget = this.ctx.newFunction('bridge_orderToTarget', (sideHandle, targetNotionalHandle) => {
       const side = this.ctx!.getString(sideHandle) as 'BUY' | 'SELL';
       const targetNotional = this.ctx!.getNumber(targetNotionalHandle);
-      
+
       logger.info(`[QuickJSStrategy] 目标仓位下单: side=${side}, targetNotional=${targetNotional}`);
 
       // 返回 Promise handle（QuickJS async bridge）
@@ -1908,10 +1934,10 @@ export class QuickJSStrategy {
       const side = this.ctx!.getString(sideHandle) as 'BUY' | 'SELL';
       const symbol = symbolHandle ? this.ctx!.getString(symbolHandle) : 'UNKNOWN';
       const timestamp = Date.now();
-      
+
       // 计算本次成交PnL
       let tradePnl = 0;
-      
+
       if (this.simPosition.side === 'FLAT' || this.simPosition.symbol !== symbol) {
         // 新开仓
         this.simPosition = { symbol, side: side === 'BUY' ? 'LONG' : 'SHORT', qty, avgPrice: price };
@@ -1953,24 +1979,24 @@ export class QuickJSStrategy {
           }
         }
       }
-      
+
       this.runningSimPnl += tradePnl;
-      
+
       const trade = { price, qty, side, symbol, timestamp, pnl: tradePnl };
       this.simTrades.push(trade);
-      
+
       // 保留最近1000条记录
       if (this.simTrades.length > 1000) {
         this.simTrades.shift();
       }
-      
+
       logger.info(`[QuickJSStrategy] 模拟成交: ${symbol} ${side} ${qty}@${price}, PnL=${tradePnl.toFixed(4)}, 累计=${this.runningSimPnl.toFixed(4)}`);
-      
-      return this.ctx!.newString(JSON.stringify({ 
-        success: true, 
+
+      return this.ctx!.newString(JSON.stringify({
+        success: true,
         trade,
         runningPnl: this.runningSimPnl,
-        position: this.simPosition 
+        position: this.simPosition
       }));
     });
     this.ctx.setProp(this.ctx.global, 'bridge_recordSimTrade', bridge_recordSimTrade);
@@ -1982,10 +2008,21 @@ export class QuickJSStrategy {
       const value = this.ctx!.getNumber(valueHandle);
       const timestamp = Date.now();
       const strategyId = this.config.strategyId;
-      
+      const row = { timestamp, name, value, strategyId };
+
       try {
-        this.metricsTable.append({ timestamp, name, value, strategyId });
-        logger.debug(`[QuickJSStrategy] 写入指标: ${name}=${value}, strategy=${strategyId}`);
+        this.metricsTable.append(row);
+        this.metricsBuffer.push(row); // P2新增：同时推入buffer用于flush
+        this.metricsRowCount++;
+        logger.debug(`[QuickJSStrategy] 写入指标: ${name}=${value}, strategy=${strategyId}, count=${this.metricsRowCount}`);
+
+        // P2新增：达到阈值时触发flush
+        if (this.metricsRowCount >= this.METRICS_FLUSH_THRESHOLD) {
+          this.flushMetrics().catch(err => {
+            logger.error(`[QuickJSStrategy] flushMetrics失败:`, err.message);
+          });
+        }
+
         return this.ctx!.newString(JSON.stringify({ success: true }));
       } catch (error: any) {
         logger.error(`[QuickJSStrategy] 写入指标失败:`, error.message);
@@ -2005,7 +2042,7 @@ export class QuickJSStrategy {
         logger.warn(`[QuickJSStrategy] bridge_tgSend blocked by policy (set STRATEGY_TG_ENABLED=1 to enable)`);
         return this.ctx!.newString('blocked');
       }
-      
+
       try {
         // 调用tg命令发送消息
         const from = 'bot-001'; // 策略通知默认来自bot-001（投资组长）
@@ -2015,7 +2052,7 @@ export class QuickJSStrategy {
       } catch (error: any) {
         logger.error(`[QuickJSStrategy] bridge_tgSend failed:`, error.message);
       }
-      
+
       return this.ctx!.newString('ok');
     });
     this.ctx.setProp(this.ctx.global, 'bridge_tgSend', bridge_tgSend);
@@ -2024,19 +2061,19 @@ export class QuickJSStrategy {
     // P0修复：bridge_onExecution - 成交明细回调
     const bridge_onExecution = this.ctx.newFunction('bridge_onExecution', (execJsonHandle) => {
       const execJson = this.ctx!.getString(execJsonHandle);
-      
+
       // 调用策略的st_onExecution函数
       try {
         const fnHandle = this.ctx!.getProp(this.ctx!.global, 'st_onExecution');
         const fnType = this.ctx!.typeof(fnHandle);
-        
+
         if (fnType === 'function') {
           const argHandle = this.ctx!.newString(execJson);
           const result = this.ctx!.callFunction(fnHandle, this.ctx!.undefined, argHandle);
-          
+
           fnHandle.dispose();
           argHandle.dispose();
-          
+
           if (result.error) {
             result.error.dispose();
           }
@@ -2047,12 +2084,12 @@ export class QuickJSStrategy {
       } catch (error: any) {
         logger.error(`[QuickJSStrategy] bridge_onExecution failed:`, error.message);
       }
-      
+
       return this.ctx!.newString('ok');
     });
     this.ctx.setProp(this.ctx.global, 'bridge_onExecution', bridge_onExecution);
     bridge_onExecution.dispose();
-    
+
     // P1修复：bridge_onRunIdChange - runId变化时立即同步到tracker
     const bridge_onRunIdChange = this.ctx.newFunction('bridge_onRunIdChange', (runIdHandle) => {
       try {
@@ -2074,10 +2111,10 @@ export class QuickJSStrategy {
     const bridge_scheduleAt = this.ctx.newFunction('bridge_scheduleAt', (scheduleTypeHandle, callbackNameHandle) => {
       const scheduleType = this.ctx!.getString(scheduleTypeHandle);
       const callbackName = this.ctx!.getString(callbackNameHandle);
-      
+
       const now = Date.now();
       let nextTrigger = 0;
-      
+
       switch (scheduleType) {
         case 'HOURLY':
           // 下一个整点
@@ -2105,13 +2142,13 @@ export class QuickJSStrategy {
             return this.ctx!.newString(JSON.stringify({ success: false, error: 'Unknown scheduleType' }));
           }
       }
-      
+
       const registryKey = `${scheduleType}:${callbackName}`;
       this.scheduleRegistry.set(registryKey, { nextTrigger, callbackName, scheduleType });
-      
+
       const nextTriggerStr = new Date(nextTrigger).toISOString();
       logger.info(`[QuickJSStrategy] bridge_scheduleAt: 注册定时任务 ${registryKey}, 下次触发: ${nextTriggerStr}`);
-      
+
       return this.ctx!.newString(JSON.stringify({ success: true, nextTrigger, registryKey }));
     });
     this.ctx.setProp(this.ctx.global, 'bridge_scheduleAt', bridge_scheduleAt);
@@ -2313,5 +2350,81 @@ export class QuickJSStrategy {
    */
   getMetricsTable(): ColumnarTable {
     return this.metricsTable;
+  }
+
+  /**
+   * P2新增：flush metrics到磁盘（ndtsdb-cli write-json）
+   */
+  async flushMetrics(): Promise<void> {
+    // 使用额外的数组来缓冲metrics数据
+    // 由于ColumnarTable没有clear方法且rowCount私有，我们在bridge_writeMetric时同时推入buffer
+    // 这里直接检查buffer长度
+    if (!this.metricsBuffer || this.metricsBuffer.length === 0) {
+      logger.debug(`[QuickJSStrategy] flushMetrics: 无数据，跳过`);
+      return;
+    }
+
+    const strategyId = this.config.strategyId;
+    const metricsDir = join(getHomeDir(), '.quant-lib', 'metrics', strategyId);
+
+    try {
+      // 确保目录存在
+      if (!existsSync(metricsDir)) {
+        mkdirSync(metricsDir, { recursive: true });
+      }
+
+      // 获取buffer中的数据
+      const data = this.metricsBuffer;
+
+      // 转换为ndtsdb格式：每行JSON {symbol:name, interval:'metric', timestamp, open:value, high:value, low:value, close:value, volume:0}
+      const lines = data.map((row: any) => JSON.stringify({
+        symbol: row.name,
+        interval: 'metric',
+        timestamp: row.timestamp,
+        open: row.value,
+        high: row.value,
+        low: row.value,
+        close: row.value,
+        volume: 0
+      })).join('\n') + '\n';
+
+      // 调用ndtsdb-cli write-json
+      const { spawn } = await import('child_process');
+      const ndtsdbCli = '/home/devali/moltbaby/ndtsdb-cli/ndtsdb-cli';
+
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(ndtsdbCli, ['write-json', '--database', metricsDir], {
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let stderr = '';
+        proc.stderr.on('data', (data) => { stderr += data; });
+
+        proc.on('close', (code) => {
+          if (code !== 0) {
+            reject(new Error(`ndtsdb-cli write-json failed: ${stderr}`));
+          } else {
+            resolve();
+          }
+        });
+
+        proc.on('error', (err) => {
+          reject(new Error(`Failed to spawn ndtsdb-cli: ${err.message}`));
+        });
+
+        // 写入JSON Lines到stdin
+        proc.stdin.write(lines);
+        proc.stdin.end();
+      });
+
+      // 清空buffer
+      this.metricsBuffer = [];
+      this.metricsRowCount = 0;
+
+      logger.info(`[QuickJSStrategy] flushMetrics成功: ${data.length}条数据写入${metricsDir}`);
+    } catch (error: any) {
+      logger.error(`[QuickJSStrategy] flushMetrics失败:`, error.message);
+      throw error;
+    }
   }
 }
