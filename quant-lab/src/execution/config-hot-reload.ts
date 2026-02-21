@@ -425,8 +425,15 @@ export class ConfigHotReloadManager {
       this.config = newConfig;
       this.currentVersion++;
 
-      // 6. 触发事件
+      // 5.1 记录变更详情（运维审计）
       this.log(`[ConfigHotReload] ✅ 配置已重载，版本: ${this.currentVersion}, 变更: ${changes.length} 项`);
+      for (const change of changes) {
+        const oldVal = typeof change.oldValue === 'object' ? JSON.stringify(change.oldValue) : change.oldValue;
+        const newVal = typeof change.newValue === 'object' ? JSON.stringify(change.newValue) : change.newValue;
+        this.log(`  - ${change.key}: ${oldVal} → ${newVal}`);
+      }
+
+      // 6. 触发事件
       this.events.onConfigChange?.(changes);
       this.events.onConfigReload?.(this.config);
 
