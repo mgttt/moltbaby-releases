@@ -2882,8 +2882,15 @@ function getEffectiveMagnetDistance() {
  * @returns {boolean} true=可以下单，false=条件不满足
  */
 function shouldPlaceOrder(grid, distance) {
-  // ADX市场状态检测：极强趋势时暂停下单
-  if (shouldSuspendGridTrading()) {
+  // 杠杆硬顶/熔断blockNewOrders：优先拦截，并打印准确原因
+  if (circuitBreakerState.blockNewOrders) {
+    var blockReason = (circuitBreakerState.leverageHardCapTriggeredAt > 0) ? '杠杆硬顶' : '仓位熔断';
+    logWarn('[' + blockReason + '] 禁止新订单 gridId=' + grid.id);
+    return false;
+  }
+
+  // ADX市场状态检测：极强趋势时暂停下单（仅在enableMarketRegime时生效）
+  if (CONFIG.enableMarketRegime && marketRegimeState.currentRegime === 'STRONG_TREND') {
     logWarn('[ADX] 极强趋势，暂停网格下单 gridId=' + grid.id);
     return false;
   }

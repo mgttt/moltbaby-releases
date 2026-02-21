@@ -966,14 +966,14 @@ static void write_partition_file(const char* filepath,
     int pos = 0;
     pos += snprintf(json+pos, sizeof(json)-pos,
         "{\"columns\":["
+        "{\"name\":\"symbol\",\"type\":\"int32\"},"
+        "{\"name\":\"interval\",\"type\":\"int32\"},"
         "{\"name\":\"timestamp\",\"type\":\"int64\"},"
         "{\"name\":\"open\",\"type\":\"float64\"},"
         "{\"name\":\"high\",\"type\":\"float64\"},"
         "{\"name\":\"low\",\"type\":\"float64\"},"
         "{\"name\":\"close\",\"type\":\"float64\"},"
-        "{\"name\":\"volume\",\"type\":\"float64\"},"
-        "{\"name\":\"symbol\",\"type\":\"string\"},"
-        "{\"name\":\"interval\",\"type\":\"string\"}"
+        "{\"name\":\"volume\",\"type\":\"float64\"}"
         "],\"totalRows\":%u,\"chunkCount\":1,\"stringDicts\":{", n_rows);
 
     pos += snprintf(json+pos, sizeof(json)-pos, "\"symbol\":[");
@@ -1008,14 +1008,14 @@ static void write_partition_file(const char* filepath,
     /* chunk_start: 用于计算chunk的CRC32 */
     uint8_t* chunk_buf;
     size_t chunk_size = 4  /* row_count */
+        + n_rows * 4   /* symbol: int32 */
+        + n_rows * 4   /* interval: int32 */
         + n_rows * 8   /* timestamp: int64 */
         + n_rows * 8   /* open: float64 */
         + n_rows * 8   /* high: float64 */
         + n_rows * 8   /* low: float64 */
         + n_rows * 8   /* close: float64 */
-        + n_rows * 8   /* volume: float64 */
-        + n_rows * 4   /* symbol: int32 */
-        + n_rows * 4;  /* interval: int32 */
+        + n_rows * 8;  /* volume: float64 */
 
     chunk_buf = (uint8_t*)malloc(chunk_size);
     if (!chunk_buf) { fclose(f); return; }
@@ -1025,6 +1025,14 @@ static void write_partition_file(const char* filepath,
     /* row_count */
     memcpy(p, &n_rows, 4); p += 4;
 
+    /* symbol列（int32字典id） */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &sym_ids[i], 4); p += 4;
+    }
+    /* interval列（int32字典id） */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &itv_ids[i], 4); p += 4;
+    }
     /* timestamp列 */
     for (uint32_t i = 0; i < n_rows; i++) {
         memcpy(p, &rows[i].timestamp, 8); p += 8;
@@ -1048,14 +1056,6 @@ static void write_partition_file(const char* filepath,
     /* volume列 */
     for (uint32_t i = 0; i < n_rows; i++) {
         memcpy(p, &rows[i].volume, 8); p += 8;
-    }
-    /* symbol列（int32字典id） */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &sym_ids[i], 4); p += 4;
-    }
-    /* interval列（int32字典id） */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &itv_ids[i], 4); p += 4;
     }
 
     fwrite(chunk_buf, 1, chunk_size, f);
@@ -1122,27 +1122,176 @@ NDTSDB* ndtsdb_open(const char* path) {
     // 检测路径类型
     db->is_dir = path_is_dir(path);
     
-    // 只在文件模式下读取数据（目录模式暂不读取，Phase 1 只实现写入兼容）
-    if (!db->is_dir) {
-        // 尝试加载现有文件（如果存在）
+    if (db->is_dir) {
+        /* === 目录模式：读取所有分区文件（Phase 2，Bun版格式） === */
+        DIR* dir = opendir(path);
+        if (!dir) return db;  // 目录不存在，返回空DB（后续写入时创建）
+        
+        struct dirent* ent;
+        while ((ent = readdir(dir)) != NULL) {
+            // 只处理 .ndts 文件
+            if (!strstr(ent->d_name, ".ndts")) continue;
+            
+            char filepath[512];
+            snprintf(filepath, sizeof(filepath), "%s/%s", path, ent->d_name);
+            
+            FILE* f = fopen(filepath, "rb");
+            if (!f) continue;
+            
+            // 1. 验证 magic
+            char magic[4];
+            if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "NDTS", 4) != 0) {
+                fclose(f);
+                continue;
+            }
+            
+            // 2. 读 header_len
+            uint32_t header_len;
+            if (fread(&header_len, 4, 1, f) != 1) {
+                fclose(f);
+                continue;
+            }
+            
+            // 3. 读 header_json
+            char* header_json = (char*)malloc(header_len + 1);
+            if (!header_json || fread(header_json, 1, header_len, f) != header_len) {
+                free(header_json);
+                fclose(f);
+                continue;
+            }
+            header_json[header_len] = '\0';
+            
+            // 4. 解析 stringDicts
+            char* sym_dict[100];
+            char* itv_dict[100];
+            int n_sym = 0, n_itv = 0;
+            
+            // 提取 symbol 数组
+            char* sym_start = strstr(header_json, "\"symbol\":[");
+            if (sym_start) {
+                sym_start += 10;
+                char* sym_end = strchr(sym_start, ']');
+                if (sym_end) {
+                    char* p = sym_start;
+                    while (p < sym_end && n_sym < 100) {
+                        char* quote1 = strchr(p, '"');
+                        if (!quote1 || quote1 >= sym_end) break;
+                        char* quote2 = strchr(quote1 + 1, '"');
+                        if (!quote2 || quote2 >= sym_end) break;
+                        
+                        *quote2 = '\0';
+                        sym_dict[n_sym++] = strdup(quote1 + 1);
+                        *quote2 = '"';
+                        p = quote2 + 1;
+                    }
+                }
+            }
+            
+            // 提取 interval 数组
+            char* itv_start = strstr(header_json, "\"interval\":[");
+            if (itv_start) {
+                itv_start += 12;
+                char* itv_end = strchr(itv_start, ']');
+                if (itv_end) {
+                    char* p = itv_start;
+                    while (p < itv_end && n_itv < 100) {
+                        char* quote1 = strchr(p, '"');
+                        if (!quote1 || quote1 >= itv_end) break;
+                        char* quote2 = strchr(quote1 + 1, '"');
+                        if (!quote2 || quote2 >= itv_end) break;
+                        
+                        *quote2 = '\0';
+                        itv_dict[n_itv++] = strdup(quote1 + 1);
+                        *quote2 = '"';
+                        p = quote2 + 1;
+                    }
+                }
+            }
+            
+            free(header_json);
+            
+            // 5. 跳到 chunks 起始位置（固定偏移4100 = 4096 + 4字节CRC）
+            fseek(f, 4100, SEEK_SET);
+            
+            // 6. 循环读取所有 chunks
+            while (!feof(f)) {
+                uint32_t row_count = 0;
+                if (fread(&row_count, 4, 1, f) != 1 || row_count == 0) break;
+                
+                // 分配列缓冲区
+                int32_t* sym_ids = (int32_t*)malloc(row_count * 4);
+                int32_t* itv_ids = (int32_t*)malloc(row_count * 4);
+                int64_t* timestamps = (int64_t*)malloc(row_count * 8);
+                double* opens = (double*)malloc(row_count * 8);
+                double* highs = (double*)malloc(row_count * 8);
+                double* lows = (double*)malloc(row_count * 8);
+                double* closes = (double*)malloc(row_count * 8);
+                double* volumes = (double*)malloc(row_count * 8);
+                
+                if (!sym_ids || !itv_ids || !timestamps || !opens || !highs || !lows || !closes || !volumes) {
+                    free(sym_ids); free(itv_ids); free(timestamps); free(opens);
+                    free(highs); free(lows); free(closes); free(volumes);
+                    break;
+                }
+                
+                // 读取列数据（Bun版顺序）
+                fread(sym_ids, 4, row_count, f);
+                fread(itv_ids, 4, row_count, f);
+                fread(timestamps, 8, row_count, f);
+                fread(opens, 8, row_count, f);
+                fread(highs, 8, row_count, f);
+                fread(lows, 8, row_count, f);
+                fread(closes, 8, row_count, f);
+                fread(volumes, 8, row_count, f);
+                
+                // 跳过 chunk CRC32
+                uint32_t chunk_crc;
+                fread(&chunk_crc, 4, 1, f);
+                
+                // 还原rows并写入 g_symbols
+                for (uint32_t i = 0; i < row_count && g_symbol_count < MAX_SYMBOLS; i++) {
+                    const char* sym = (sym_ids[i] >= 0 && sym_ids[i] < n_sym) ? sym_dict[sym_ids[i]] : "UNKNOWN";
+                    const char* itv = (itv_ids[i] >= 0 && itv_ids[i] < n_itv) ? itv_dict[itv_ids[i]] : "UNKNOWN";
+                    
+                    SymbolData* sd = find_or_create_symbol(sym, itv);
+                    if (sd && sd->count < MAX_KLINES_PER_SYMBOL) {
+                        sd->klines[sd->count].timestamp = timestamps[i];
+                        sd->klines[sd->count].open = opens[i];
+                        sd->klines[sd->count].high = highs[i];
+                        sd->klines[sd->count].low = lows[i];
+                        sd->klines[sd->count].close = closes[i];
+                        sd->klines[sd->count].volume = volumes[i];
+                        sd->count++;
+                    }
+                }
+                
+                // 清理当前chunk
+                free(sym_ids); free(itv_ids); free(timestamps); free(opens);
+                free(highs); free(lows); free(closes); free(volumes);
+            }
+            
+            fclose(f);
+            
+            // 注意：不释放 sym_dict/itv_dict，因为 g_symbols 引用了这些字符串
+        }
+        
+        closedir(dir);
+    } else {
+        // 文件模式：读取旧格式（Phase 1已实现）
         FILE* f = fopen(path, "rb");
         if (f) {
-            // 读取魔数
             char magic[4];
             if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "NDTS", 4) == 0) {
-                // 读取版本号和symbol数量
                 uint32_t version, count;
                 fread(&version, 4, 1, f);
                 fread(&count, 4, 1, f);
                 
-                // 读取每个symbol
                 for (uint32_t i = 0; i < count && g_symbol_count < MAX_SYMBOLS; i++) {
                     SymbolData* sd = &g_symbols[g_symbol_count];
                     fread(sd->symbol, 32, 1, f);
                     fread(sd->interval, 16, 1, f);
                     fread(&sd->count, 4, 1, f);
                     
-                    // 读取K线数据
                     if (sd->count > MAX_KLINES_PER_SYMBOL) sd->count = MAX_KLINES_PER_SYMBOL;
                     fread(sd->klines, sizeof(KlineRow), sd->count, f);
                     

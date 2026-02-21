@@ -29,6 +29,10 @@ export interface TradingProvider {
   buy(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order>;
   sell(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order>;
   cancelOrder(orderId: string): Promise<void>;
+  amendOrder?(orderId: string, price?: number, qty?: number): Promise<{ success: boolean; orderId: string }>;
+  cancelAllOrders?(symbol?: string): Promise<{ cancelledCount: number }>;
+  getFundingRate?(symbol: string): Promise<{ fundingRate: number; nextFundingTime: number }>;
+  getBestBidAsk?(symbol: string): Promise<{ bid: number; ask: number; spread: number }>;
   getAccount(): Promise<Account>;
   getPosition(symbol: string): Promise<Position | null>;
   getPositions(): Promise<Position[]>;
@@ -70,6 +74,11 @@ export class LiveEngine {
   private orderPollInterval: number = 5000; // 5秒轮询一次
   private orderPollTimer?: NodeJS.Timeout;
   private trackedOrderIds: Set<string> = new Set(); // 跟踪未完成订单
+  
+  // P1新增：资金费结算检测
+  private fundingFeeCheckInterval: number = 60000; // 1分钟检查一次
+  private fundingFeeCheckTimer?: NodeJS.Timeout;
+  private lastFundingFeeTime: Map<string, number> = new Map(); // symbol -> last checked timestamp
   
   constructor(strategy: Strategy, config: LiveConfig, provider?: TradingProvider) {
     this.strategy = strategy;
@@ -132,6 +141,9 @@ export class LiveEngine {
     // P0-3: 启动订单状态轮询
     this.startOrderPolling();
     
+    // P1新增：启动资金费结算检测
+    this.startFundingFeeCheck();
+    
     console.log(`[LiveEngine] 实盘引擎启动完成`);
   }
   
@@ -149,6 +161,9 @@ export class LiveEngine {
       clearInterval(this.orderPollTimer);
       this.orderPollTimer = undefined;
     }
+    
+    // P1新增：停止资金费结算检测
+    this.stopFundingFeeCheck();
     
     // 调用策略停止
     const ctx = this.createContext();
@@ -319,6 +334,71 @@ export class LiveEngine {
       getBars: (symbol: string, limit: number) => {
         const cache = this.barCache.get(symbol) || [];
         return cache.slice(-limit);
+      },
+      getFundingRate: async (symbol: string) => {
+        if (this.provider?.getFundingRate) {
+          return await this.provider.getFundingRate(symbol);
+        }
+        return { fundingRate: 0, nextFundingTime: 0 };
+      },
+      getBestBidAsk: async (symbol: string) => {
+        if (this.provider?.getBestBidAsk) {
+          return await this.provider.getBestBidAsk(symbol);
+        }
+        const bar = this.lastBarCache.get(symbol);
+        if (bar) {
+          const spreadPct = 0.001;
+          const bid = bar.close * (1 - spreadPct / 2);
+          const ask = bar.close * (1 + spreadPct / 2);
+          return { bid, ask, spread: ask - bid };
+        }
+        return { bid: 0, ask: 0, spread: 0 };
+      },
+      orderToTarget: async (side: 'BUY' | 'SELL', targetNotional: number) => {
+        // P1新增：目标仓位下单
+        try {
+          // 获取当前持仓
+          const symbol = this.config.symbols[0]; // 默认使用第一个品种
+          const position = this.positions.get(symbol);
+          const currentNotional = position ? position.quantity * position.currentPrice : 0;
+          
+          // 计算需要调整的仓位
+          let deltaNotional = 0;
+          if (side === 'BUY') {
+            deltaNotional = targetNotional - currentNotional;
+          } else {
+            deltaNotional = currentNotional - targetNotional;
+          }
+          
+          if (Math.abs(deltaNotional) < 1) {
+            return { success: true, executedQty: 0, message: 'No adjustment needed' };
+          }
+          
+          // 获取当前价格
+          const bar = this.lastBarCache.get(symbol);
+          if (!bar) {
+            return { success: false, error: 'No price available' };
+          }
+          
+          const price = side === 'BUY' ? bar.close * 1.001 : bar.close * 0.999; // 轻微滑点
+          const qty = deltaNotional / price;
+          
+          // 执行订单
+          let order: Order;
+          if (side === 'BUY') {
+            order = await this.buy(symbol, qty, price);
+          } else {
+            order = await this.sell(symbol, qty, price);
+          }
+          
+          return { 
+            success: true, 
+            orderId: order.orderId, 
+            executedQty: order.filledQuantity 
+          };
+        } catch (error: any) {
+          return { success: false, error: error.message };
+        }
       },
       getIndicator: this.indicators ? (symbol: string, name: string) => {
         // TODO: 实现指标访问
@@ -708,6 +788,92 @@ export class LiveEngine {
       }
     } catch (error: any) {
       console.error(`[LiveEngine] 订单状态轮询异常:`, error.message);
+    }
+  }
+  
+  /**
+   * P1新增：启动资金费结算检测
+   */
+  private startFundingFeeCheck(): void {
+    if (!this.provider || !this.provider.getFundingRate) {
+      console.log(`[LiveEngine] Provider 不支持资金费率查询，跳过资金费检测`);
+      return;
+    }
+    
+    if (!this.strategy.onFundingFee) {
+      console.log(`[LiveEngine] 策略未实现 onFundingFee，跳过资金费检测`);
+      return;
+    }
+    
+    console.log(`[LiveEngine] 启动资金费结算检测（间隔 ${this.fundingFeeCheckInterval}ms）`);
+    
+    this.fundingFeeCheckTimer = setInterval(() => {
+      this.checkFundingFee().catch((err) => {
+        console.error(`[LiveEngine] 资金费检测失败:`, err.message);
+      });
+    }, this.fundingFeeCheckInterval);
+  }
+  
+  /**
+   * P1新增：检测资金费结算
+   * Bybit每8小时结算一次（08:00, 16:00, 00:00 UTC）
+   */
+  private async checkFundingFee(): Promise<void> {
+    if (!this.provider || !this.provider.getFundingRate || !this.strategy.onFundingFee) {
+      return;
+    }
+    
+    const symbols = this.config.symbols;
+    const now = Date.now();
+    
+    for (const symbol of symbols) {
+      try {
+        // 获取资金费率信息
+        const { fundingRate, nextFundingTime } = await this.provider.getFundingRate(symbol);
+        
+        // 检查是否已经过了结算时间
+        const lastChecked = this.lastFundingFeeTime.get(symbol) || 0;
+        
+        // 如果当前时间已经超过了nextFundingTime，说明已经结算
+        if (now >= nextFundingTime && lastChecked < nextFundingTime) {
+          // 计算资金费（需要持仓信息）
+          const position = this.positions.get(symbol);
+          let fundingFee = 0;
+          
+          if (position && position.quantity > 0) {
+            // 资金费 = 持仓价值 * 资金费率
+            const positionValue = position.quantity * position.currentPrice;
+            fundingFee = positionValue * fundingRate * (position.side === 'LONG' ? -1 : 1);
+          }
+          
+          console.log(`[LiveEngine] 资金费结算: ${symbol}, rate=${fundingRate}, fee=${fundingFee}`);
+          
+          // 触发策略回调
+          const ctx = this.createContext();
+          await this.strategy.onFundingFee!({
+            symbol,
+            fundingRate,
+            fundingFee,
+            timestamp: nextFundingTime,
+          }, ctx);
+          
+          // 更新最后检查时间
+          this.lastFundingFeeTime.set(symbol, now);
+        }
+      } catch (error: any) {
+        console.error(`[LiveEngine] 检测 ${symbol} 资金费失败:`, error.message);
+      }
+    }
+  }
+  
+  /**
+   * P1新增：停止资金费结算检测
+   */
+  private stopFundingFeeCheck(): void {
+    if (this.fundingFeeCheckTimer) {
+      clearInterval(this.fundingFeeCheckTimer);
+      this.fundingFeeCheckTimer = undefined;
+      console.log(`[LiveEngine] 资金费结算检测已停止`);
     }
   }
 }

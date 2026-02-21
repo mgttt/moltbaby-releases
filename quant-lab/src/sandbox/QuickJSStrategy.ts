@@ -20,6 +20,7 @@ function getHomeDir(): string {
 import type { QuickJSContext as QuickJSContextType } from 'quickjs-emscripten';
 import type { Kline } from '../../../quant-lib/src';
 import type { StrategyContext, Order, Position, Account } from '../engine/types';
+import { sma, ema, rsi, macd, bollingerBands, atr, stdDev, wma } from '../../quant-lib/src/indicators/indicators';
 import { OrderStateManager, globalOrderManager } from '../engine/OrderStateManager';
 import { LegacyOrderTracker } from '../engine/LegacyOrderTracker';
 
@@ -82,6 +83,23 @@ export class QuickJSStrategy {
   
   // P2修复：缓存就绪门闸（bot-009建议）
   private cacheReady = false;
+
+  // P2新增：模拟成交PnL追踪
+  private simTrades: Array<{
+    price: number;
+    qty: number;
+    side: 'BUY' | 'SELL';
+    symbol: string;
+    timestamp: number;
+    pnl: number;
+  }> = [];
+  private simPosition: {
+    symbol: string;
+    side: 'LONG' | 'SHORT' | 'FLAT';
+    qty: number;
+    avgPrice: number;
+  } = { symbol: '', side: 'FLAT', qty: 0, avgPrice: 0 };
+  private runningSimPnl = 0;
 
   // bar 缓存层（历史K线 REST→ndtsdb，不影响WS tick路径）
   private barCache = new BarCacheLayer({
@@ -1074,6 +1092,157 @@ export class QuickJSStrategy {
     this.ctx.setProp(this.ctx.global, 'bridge_getPrice', bridge_getPrice);
     bridge_getPrice.dispose();
 
+    // bridge_getIndicator - 指标计算桥接（sma/ema/rsi/macd/bb/atr/stdDev/wma）
+    const bridge_getIndicator = this.ctx.newFunction('bridge_getIndicator', (nameHandle, dataHandle, paramsHandle) => {
+      const name = this.ctx!.getString(nameHandle);
+      const dataJson = this.ctx!.getString(dataHandle);
+      const paramsJson = this.ctx!.getString(paramsHandle);
+      
+      const data = JSON.parse(dataJson);
+      const params = JSON.parse(paramsJson);
+      
+      let result: any;
+      
+      try {
+        switch (name) {
+          case 'sma':
+            result = sma(data, params.period || 14);
+            break;
+          case 'ema':
+            result = ema(data, params.period || 14);
+            break;
+          case 'rsi':
+            result = rsi(data, params.period || 14);
+            break;
+          case 'macd':
+            result = macd(data, params.fastPeriod || 12, params.slowPeriod || 26, params.signalPeriod || 9);
+            break;
+          case 'bb':
+          case 'bollingerBands':
+            result = bollingerBands(data, params.period || 20, params.stdDev || 2);
+            break;
+          case 'atr':
+            // ATR需要high/low/close，这里简化处理：如果data是数组的数组，则解构
+            if (Array.isArray(data) && data.length === 3 && Array.isArray(data[0])) {
+              result = atr(data[0], data[1], data[2], params.period || 14);
+            } else {
+              throw new Error('atr requires [high[], low[], close[]] format');
+            }
+            break;
+          case 'stdDev':
+            result = stdDev(data, params.period || 14);
+            break;
+          case 'wma':
+            result = wma(data, params.period || 14);
+            break;
+          default:
+            throw new Error(`Unknown indicator: ${name}`);
+        }
+        return this.ctx!.newString(JSON.stringify({ success: true, data: result }));
+      } catch (e: any) {
+        return this.ctx!.newString(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getIndicator', bridge_getIndicator);
+    bridge_getIndicator.dispose();
+
+    // bridge_getFundingRate - 获取资金费率
+    const bridge_getFundingRate = this.ctx.newFunction('bridge_getFundingRate', (symbolHandle) => {
+      const symbol = this.ctx!.getString(symbolHandle);
+      
+      // 返回 Promise handle（QuickJS async bridge）
+      const promiseHandle = this.ctx!.newPromise();
+      
+      if (this.strategyCtx?.getFundingRate) {
+        this.strategyCtx.getFundingRate(symbol).then((result) => {
+          const response = JSON.stringify({ 
+            fundingRate: result.fundingRate, 
+            nextFundingTime: result.nextFundingTime,
+            symbol 
+          });
+          promiseHandle.resolve(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        }).catch((error: any) => {
+          const response = JSON.stringify({ 
+            fundingRate: 0, 
+            nextFundingTime: 0,
+            symbol,
+            error: error.message 
+          });
+          promiseHandle.reject(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        });
+      } else {
+        // 未实现时返回0值
+        const response = JSON.stringify({ 
+          fundingRate: 0, 
+          nextFundingTime: 0,
+          symbol 
+        });
+        promiseHandle.resolve(this.ctx!.newString(response));
+        this.ctx!.runtime.executePendingJobs();
+      }
+      
+      const h = promiseHandle.handle;
+      promiseHandle.dispose();
+      return h;
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getFundingRate', bridge_getFundingRate);
+    bridge_getFundingRate.dispose();
+
+    // bridge_getBestBidAsk - 获取最优买卖价
+    const bridge_getBestBidAsk = this.ctx.newFunction('bridge_getBestBidAsk', (symbolHandle) => {
+      const symbol = this.ctx!.getString(symbolHandle);
+      
+      // 返回 Promise handle（QuickJS async bridge）
+      const promiseHandle = this.ctx!.newPromise();
+      
+      if (this.strategyCtx?.getBestBidAsk) {
+        this.strategyCtx.getBestBidAsk(symbol).then((result) => {
+          const response = JSON.stringify({ 
+            bid: result.bid, 
+            ask: result.ask, 
+            spread: result.spread,
+            symbol 
+          });
+          promiseHandle.resolve(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        }).catch((error: any) => {
+          const response = JSON.stringify({ 
+            bid: 0, 
+            ask: 0, 
+            spread: 0,
+            symbol,
+            error: error.message 
+          });
+          promiseHandle.reject(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        });
+      } else {
+        // 未实现时基于lastPrice估算（假设spread为0.1%）
+        const midPrice = this.lastPrice;
+        const spreadPct = 0.001; // 0.1%
+        const bid = midPrice * (1 - spreadPct / 2);
+        const ask = midPrice * (1 + spreadPct / 2);
+        const spread = ask - bid;
+        
+        const response = JSON.stringify({ 
+          bid, 
+          ask, 
+          spread,
+          symbol 
+        });
+        promiseHandle.resolve(this.ctx!.newString(response));
+        this.ctx!.runtime.executePendingJobs();
+      }
+      
+      const h = promiseHandle.handle;
+      promiseHandle.dispose();
+      return h;
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getBestBidAsk', bridge_getBestBidAsk);
+    bridge_getBestBidAsk.dispose();
+
     // bridge_getKlines - 获取历史K线（缓存层 → REST 回源）
     // 用于策略指标warmup；不影响WS tick实时路径
     // DISABLE_BAR_CACHE=1 → 直接REST bypass
@@ -1106,6 +1275,53 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_getKlines', bridge_getKlines);
     bridge_getKlines.dispose();
+
+    // bridge_getMultiKlines - 批量获取K线（并行请求多品种/多时间框架）
+    const bridge_getMultiKlines = this.ctx.newFunction('bridge_getMultiKlines', (requestsHandle) => {
+      const requestsJson = this.ctx!.getString(requestsHandle);
+      const requests = JSON.parse(requestsJson) as Array<{symbol: string; interval: string; limit?: number}>;
+
+      // 返回 Promise handle（QuickJS async bridge）
+      const promiseHandle = this.ctx!.newPromise();
+
+      // 并行执行所有K线请求
+      const promises = requests.map(async (req) => {
+        const { symbol, interval, limit = 100 } = req;
+        const key = `${symbol}_${interval}`;
+
+        try {
+          const { bars, fromCache } = await this.barCache.getBars(symbol, interval, limit, async () => {
+            if (typeof this.strategyCtx?.getKlines === 'function') {
+              return await this.strategyCtx.getKlines(symbol, interval, limit);
+            }
+            throw new Error('bridge_getMultiKlines: strategyCtx.getKlines not available');
+          });
+
+          return { key, bars, fromCache, success: true };
+        } catch (error: any) {
+          return { key, bars: [], fromCache: false, success: false, error: error.message };
+        }
+      });
+
+      Promise.all(promises).then((results) => {
+        const resultMap: Record<string, { bars: any[]; fromCache: boolean; success: boolean; error?: string }> = {};
+        for (const r of results) {
+          resultMap[r.key] = { bars: r.bars, fromCache: r.fromCache, success: r.success, error: r.error };
+        }
+        const response = JSON.stringify(resultMap);
+        promiseHandle.resolve(this.ctx!.newString(response));
+        this.ctx!.runtime.executePendingJobs();
+      }).catch((e: Error) => {
+        promiseHandle.reject(this.ctx!.newString(String(e)));
+        this.ctx!.runtime.executePendingJobs();
+      });
+
+      const h = promiseHandle.handle;
+      promiseHandle.dispose();
+      return h;
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getMultiKlines', bridge_getMultiKlines);
+    bridge_getMultiKlines.dispose();
 
     // bridge_getAccount - 获取账户信息
     const bridge_getAccount = this.ctx.newFunction('bridge_getAccount', () => {
@@ -1239,6 +1455,193 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_cancelOrder', bridge_cancelOrder);
     bridge_cancelOrder.dispose();
+
+    // bridge_amendOrder - 改单（异步执行）
+    const bridge_amendOrder = this.ctx.newFunction('bridge_amendOrder', (orderIdHandle, priceHandle, qtyHandle) => {
+      const orderId = this.ctx!.getString(orderIdHandle);
+      const price = priceHandle ? this.ctx!.getNumber(priceHandle) : undefined;
+      const qty = qtyHandle ? this.ctx!.getNumber(qtyHandle) : undefined;
+      
+      logger.info(`[QuickJSStrategy] 改单请求: ${orderId}, price=${price}, qty=${qty}`);
+
+      // 返回 Promise handle（QuickJS async bridge）
+      const promiseHandle = this.ctx!.newPromise();
+
+      if (this.strategyCtx?.amendOrder) {
+        this.strategyCtx.amendOrder(orderId, price, qty).then((result) => {
+          logger.info(`[QuickJSStrategy] 改单成功: ${orderId}`);
+          const response = JSON.stringify({ success: true, orderId: result.orderId });
+          promiseHandle.resolve(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        }).catch((error: any) => {
+          logger.error(`[QuickJSStrategy] 改单失败:`, error.message);
+          const response = JSON.stringify({ success: false, error: error.message });
+          promiseHandle.reject(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        });
+      } else {
+        // simMode或未实现：直接返回成功
+        logger.info(`[QuickJSStrategy] 改单模拟模式: ${orderId}`);
+        const response = JSON.stringify({ success: true, orderId });
+        promiseHandle.resolve(this.ctx!.newString(response));
+        this.ctx!.runtime.executePendingJobs();
+      }
+
+      const h = promiseHandle.handle;
+      promiseHandle.dispose();
+      return h;
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_amendOrder', bridge_amendOrder);
+    bridge_amendOrder.dispose();
+
+    // bridge_cancelAllOrders - 批量撤单（异步执行）
+    const bridge_cancelAllOrders = this.ctx.newFunction('bridge_cancelAllOrders', (symbolHandle) => {
+      const symbol = symbolHandle ? this.ctx!.getString(symbolHandle) : undefined;
+      
+      logger.info(`[QuickJSStrategy] 批量撤单请求: symbol=${symbol || 'all'}`);
+
+      // 返回 Promise handle（QuickJS async bridge）
+      const promiseHandle = this.ctx!.newPromise();
+
+      if (this.strategyCtx?.cancelAllOrders) {
+        this.strategyCtx.cancelAllOrders(symbol).then((result) => {
+          logger.info(`[QuickJSStrategy] 批量撤单成功: ${result.cancelledCount} 单`);
+          const response = JSON.stringify({ cancelledCount: result.cancelledCount });
+          promiseHandle.resolve(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        }).catch((error: any) => {
+          logger.error(`[QuickJSStrategy] 批量撤单失败:`, error.message);
+          const response = JSON.stringify({ cancelledCount: 0, error: error.message });
+          promiseHandle.reject(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        });
+      } else {
+        // simMode或未实现：清空本地openOrders
+        logger.info(`[QuickJSStrategy] 批量撤单模拟模式: 清空 ${this.cachedOpenOrders.length} 单`);
+        const count = this.cachedOpenOrders.length;
+        this.cachedOpenOrders = [];
+        const response = JSON.stringify({ cancelledCount: count });
+        promiseHandle.resolve(this.ctx!.newString(response));
+        this.ctx!.runtime.executePendingJobs();
+      }
+
+      const h = promiseHandle.handle;
+      promiseHandle.dispose();
+      return h;
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_cancelAllOrders', bridge_cancelAllOrders);
+    bridge_cancelAllOrders.dispose();
+
+    // P1新增：bridge_orderToTarget - 目标仓位下单
+    const bridge_orderToTarget = this.ctx.newFunction('bridge_orderToTarget', (sideHandle, targetNotionalHandle) => {
+      const side = this.ctx!.getString(sideHandle) as 'BUY' | 'SELL';
+      const targetNotional = this.ctx!.getNumber(targetNotionalHandle);
+      
+      logger.info(`[QuickJSStrategy] 目标仓位下单: side=${side}, targetNotional=${targetNotional}`);
+
+      // 返回 Promise handle（QuickJS async bridge）
+      const promiseHandle = this.ctx!.newPromise();
+
+      if (this.strategyCtx?.orderToTarget) {
+        this.strategyCtx.orderToTarget(side, targetNotional).then((result) => {
+          logger.info(`[QuickJSStrategy] 目标仓位下单成功: ${result.orderId}`);
+          const response = JSON.stringify({ success: true, orderId: result.orderId, executedQty: result.executedQty });
+          promiseHandle.resolve(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        }).catch((error: any) => {
+          logger.error(`[QuickJSStrategy] 目标仓位下单失败:`, error.message);
+          const response = JSON.stringify({ success: false, error: error.message });
+          promiseHandle.reject(this.ctx!.newString(response));
+          this.ctx!.runtime.executePendingJobs();
+        });
+      } else {
+        // 未实现时返回错误
+        const response = JSON.stringify({ success: false, error: 'orderToTarget not available' });
+        promiseHandle.reject(this.ctx!.newString(response));
+        this.ctx!.runtime.executePendingJobs();
+      }
+
+      const h = promiseHandle.handle;
+      promiseHandle.dispose();
+      return h;
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_orderToTarget', bridge_orderToTarget);
+    bridge_orderToTarget.dispose();
+
+    // P2新增：bridge_recordSimTrade - 记录模拟成交并计算PnL
+    const bridge_recordSimTrade = this.ctx.newFunction('bridge_recordSimTrade', (priceHandle, qtyHandle, sideHandle, symbolHandle) => {
+      const price = this.ctx!.getNumber(priceHandle);
+      const qty = this.ctx!.getNumber(qtyHandle);
+      const side = this.ctx!.getString(sideHandle) as 'BUY' | 'SELL';
+      const symbol = symbolHandle ? this.ctx!.getString(symbolHandle) : 'UNKNOWN';
+      const timestamp = Date.now();
+      
+      // 计算本次成交PnL
+      let tradePnl = 0;
+      
+      if (this.simPosition.side === 'FLAT' || this.simPosition.symbol !== symbol) {
+        // 新开仓
+        this.simPosition = { symbol, side: side === 'BUY' ? 'LONG' : 'SHORT', qty, avgPrice: price };
+        tradePnl = 0;
+      } else if (this.simPosition.side === 'LONG') {
+        if (side === 'BUY') {
+          // 加仓，更新均价
+          const totalQty = this.simPosition.qty + qty;
+          const totalCost = this.simPosition.qty * this.simPosition.avgPrice + qty * price;
+          this.simPosition.avgPrice = totalCost / totalQty;
+          this.simPosition.qty = totalQty;
+          tradePnl = 0;
+        } else {
+          // 减仓/平仓，计算PnL
+          const closeQty = Math.min(qty, this.simPosition.qty);
+          tradePnl = (price - this.simPosition.avgPrice) * closeQty;
+          this.simPosition.qty -= closeQty;
+          if (this.simPosition.qty <= 0) {
+            this.simPosition.side = 'FLAT';
+            this.simPosition.qty = 0;
+          }
+        }
+      } else if (this.simPosition.side === 'SHORT') {
+        if (side === 'SELL') {
+          // 加仓，更新均价
+          const totalQty = this.simPosition.qty + qty;
+          const totalCost = this.simPosition.qty * this.simPosition.avgPrice + qty * price;
+          this.simPosition.avgPrice = totalCost / totalQty;
+          this.simPosition.qty = totalQty;
+          tradePnl = 0;
+        } else {
+          // 减仓/平仓，计算PnL
+          const closeQty = Math.min(qty, this.simPosition.qty);
+          tradePnl = (this.simPosition.avgPrice - price) * closeQty;
+          this.simPosition.qty -= closeQty;
+          if (this.simPosition.qty <= 0) {
+            this.simPosition.side = 'FLAT';
+            this.simPosition.qty = 0;
+          }
+        }
+      }
+      
+      this.runningSimPnl += tradePnl;
+      
+      const trade = { price, qty, side, symbol, timestamp, pnl: tradePnl };
+      this.simTrades.push(trade);
+      
+      // 保留最近1000条记录
+      if (this.simTrades.length > 1000) {
+        this.simTrades.shift();
+      }
+      
+      logger.info(`[QuickJSStrategy] 模拟成交: ${symbol} ${side} ${qty}@${price}, PnL=${tradePnl.toFixed(4)}, 累计=${this.runningSimPnl.toFixed(4)}`);
+      
+      return this.ctx!.newString(JSON.stringify({ 
+        success: true, 
+        trade,
+        runningPnl: this.runningSimPnl,
+        position: this.simPosition 
+      }));
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_recordSimTrade', bridge_recordSimTrade);
+    bridge_recordSimTrade.dispose();
 
     // P2修复：bridge_tgSend - 发送Telegram通知
     // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，避免干扰；需显式开启 STRATEGY_TG_ENABLED=1
@@ -1477,5 +1880,32 @@ export class QuickJSStrategy {
     } catch (error: any) {
       logger.warn(`[QuickJSStrategy] 写入状态失败:`, error.message);
     }
+  }
+
+  /**
+   * P2新增：获取模拟PnL数据
+   */
+  getSimPnlData(): {
+    trades: typeof this.simTrades;
+    position: typeof this.simPosition;
+    runningPnl: number;
+    tradeCount: number;
+  } {
+    return {
+      trades: this.simTrades,
+      position: this.simPosition,
+      runningPnl: this.runningSimPnl,
+      tradeCount: this.simTrades.length,
+    };
+  }
+
+  /**
+   * P2新增：重置模拟PnL数据
+   */
+  resetSimPnl(): void {
+    this.simTrades = [];
+    this.simPosition = { symbol: '', side: 'FLAT', qty: 0, avgPrice: 0 };
+    this.runningSimPnl = 0;
+    logger.info(`[QuickJSStrategy] 模拟PnL已重置`);
   }
 }

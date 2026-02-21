@@ -635,6 +635,38 @@ export class BybitProvider implements TradingProvider {
   }
 
   /**
+   * 获取资金费率
+   */
+  async getFundingRate(symbol: string): Promise<{ fundingRate: number; nextFundingTime: number }> {
+    const result = await this.request('GET', '/v5/market/funding-rate', {
+      category: this.category,
+      symbol,
+    });
+    const rate = result.result?.list?.[0];
+    if (!rate) throw new Error(`Funding rate not found: ${symbol}`);
+    return {
+      fundingRate: parseFloat(rate.fundingRate || '0'),
+      nextFundingTime: parseInt(rate.nextFundingTime || '0'),
+    };
+  }
+
+  /**
+   * 获取最优买卖价
+   */
+  async getBestBidAsk(symbol: string): Promise<{ bid: number; ask: number; spread: number }> {
+    const result = await this.request('GET', '/v5/market/tickers', {
+      category: this.category,
+      symbol,
+    });
+    const ticker = result.result?.list?.[0];
+    if (!ticker) throw new Error(`Ticker not found: ${symbol}`);
+    const bid = parseFloat(ticker.bid1Price || '0');
+    const ask = parseFloat(ticker.ask1Price || '0');
+    const spread = ask - bid;
+    return { bid, ask, spread };
+  }
+
+  /**
    * REST 获取历史K线（用于指标warmup + 缓存层回源）
    * @param symbol  交易对（e.g. MYXUSDT）
    * @param interval Kline周期（e.g. '1m','5m','1h'）

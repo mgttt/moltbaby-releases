@@ -1,13 +1,110 @@
 /**
  * WeQuant Tushare Proxy 数据提供者
- *
+ * 
  * 提供港股分钟线数据（1min/5min/15min/30min/60min）
  * 通过 WeQuant 代理访问 Tushare Pro API
- *
- * 特点：
- * - 支持港股全量分钟级 K 线
- * - 自动分批获取（单次最大 8000 条）
- * - 与 ndtsdb 集成，支持 UPSERT
+ * 
+ * ## 配置信息（见 ~/env.jsonl）
+ * ```json
+ * {"wequant@tushare": {
+ *   "type": "quant_data",
+ *   "provider": "wequant",
+ *   "source": "tushare",
+ *   "proxy_url": "https://wequant.fun/api/proxy/tushare",
+ *   "token": "a5ac0833-859b-4034-a9fd-7562f90b6258",
+ *   "proxy": "http://127.0.0.1:8890"
+ * }}
+ * ```
+ * 
+ * ## 探索过程 & 踩坑记录
+ * 
+ * ### 1. 速率限制（重要！）
+ * - **免费用户限制**: 每小时 2 次调用（不是每分钟！）
+ * - 首次测试时发现：连续调用 2 次后，第 3 次报错 "每小时最多访问该接口2次"
+ * - Provider 已内置速率限制器（`rateLimit()`），自动排队等待
+ * - 批量获取大量数据时会非常慢，建议：
+ *   - 使用 systemd timer 定时分批次拉取
+ *   - 或升级 Tushare 积分获取更多额度
+ * 
+ * ### 2. 接口格式
+ * - 端点: POST https://wequant.fun/api/proxy/tushare
+ * - 请求体: `{api_name: "hk_mins", token: "...", params: {...}}`
+ * - 无需使用 Tushare SDK，纯 HTTP POST 即可
+ * 
+ * ### 3. 数据范围
+ * - 港股分钟线接口: `hk_mins`
+ * - 单次最大返回: 8000 条
+ * - 支持频率: 1min, 5min, 15min, 30min, 60min
+ * - 时间格式: "YYYY-MM-DD HH:MM:SS"（注意是北京时间）
+ * 
+ * ### 4. 权限要求
+ * - 需要 Tushare Pro 账号（免费注册）
+ * - 港股分钟线需要 120 积分（通过邀请等任务获取）
+ * - 积分详情: https://tushare.pro/document/1?doc_id=108
+ * 
+ * ### 5. 股票代码格式
+ * - Tushare 格式: `00001.HK` (5位数字.HK)
+ * - Provider 内部标准化: `00001/HKD`
+ * - 支持自动转换
+ * 
+ * ## 使用示例
+ * 
+ * ```typescript
+ * import { WeQuantTushareProvider } from 'quant-lib/providers';
+ * 
+ * const provider = new WeQuantTushareProvider({
+ *   token: 'a5ac0833-859b-4034-a9fd-7562f90b6258',
+ *   proxy: 'http://127.0.0.1:8890',
+ *   timeout: 60,
+ * });
+ * 
+ * // 获取单只股票 1 分钟 K 线
+ * const klines = await provider.getKlines({
+ *   symbol: '00001.HK',  // 长和
+ *   interval: '1m',
+ *   limit: 1000,
+ *   startTime: Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60, // 7天前
+ * });
+ * 
+ * // 获取腾讯 5 分钟 K 线
+ * const klines = await provider.getKlines({
+ *   symbol: '00700.HK',
+ *   interval: '5m',
+ *   limit: 500,
+ * });
+ * ```
+ * 
+ * ## ndtsdb 集成
+ * 
+ * 批量收集脚本位于: `quant-lib/scripts/collect-hk-mins.ts`
+ * 
+ * ```bash
+ * # 单只股票
+ * bun run scripts/collect-hk-mins.ts --symbol 00001.HK --interval 1m --days 7
+ * 
+ * # 批量收集（受限于每小时2次，建议用 systemd timer 定时执行）
+ * bun run scripts/collect-hk-mins.ts --symbol-list ./hk-stocks.txt --interval 5m --days 30
+ * ```
+ * 
+ * ## 数据存储格式
+ * 
+ * ndtsdb 表结构:
+ * - symbol: string (标准化格式如 "00001/HKD")
+ * - timestamp: int64 (毫秒级 Unix 时间戳)
+ * - open, high, low, close: float64
+ * - volume: float64 (成交量)
+ * - amount: float64 (成交额)
+ * 
+ * UPSERT 冲突键: symbol + timestamp（避免重复数据）
+ * 
+ * ## 故障排查
+ * 
+ * | 错误信息 | 原因 | 解决方案 |
+ * |---------|------|---------|
+ * | "每小时最多访问该接口2次" | 免费用户速率限制 | 等待1小时或升级积分 |
+ * | "权限不足" | 积分不够或无港股权限 | 完成 Tushare 任务获取积分 |
+ * | "您还没有填写手机" | 账号未完成认证 | 登录 Tushare 官网绑定手机 |
+ * | 返回空数组 | 该时间段无交易数据 | 检查是否为交易日 |
  */
 
 import { $ } from 'bun';
@@ -19,13 +116,13 @@ import { NetworkError, RateLimitError } from '../types/common.js';
 export interface WeQuantTushareConfig extends Partial<ProviderConfig> {
   /** WeQuant API Token（必需） */
   token: string;
-
+  
   /** 代理地址（可选） */
   proxy?: string;
-
+  
   /** 超时时间（秒，默认30秒） */
   timeout?: number;
-
+  
   /** API 基础 URL */
   baseUrl?: string;
 }
@@ -57,7 +154,7 @@ export class WeQuantTushareProvider extends RestDataProvider {
   private token: string;
   private proxy?: string;
   private timeout: number;
-
+  
   // 速率限制控制
   private requestTimestamps: number[] = [];
   private readonly maxRequestsPerHour = 2;  // Tushare 免费用户限制：每小时 2 次
@@ -79,7 +176,7 @@ export class WeQuantTushareProvider extends RestDataProvider {
       console.log(`  🌐 使用代理: ${this.proxy}`);
     }
   }
-
+  
   /**
    * 等待直到可以发送请求（速率限制）
    */
@@ -118,10 +215,14 @@ export class WeQuantTushareProvider extends RestDataProvider {
 
   /**
    * 获取 K 线数据（港股分钟线）
-   *
+   * 
    * 注意：Tushare 港股分钟线接口限制：
    * - 单次最大 8000 条
+   * - 每小时最多 2 次调用（免费用户）
    * - 需要通过日期循环获取大量数据
+   * 
+   * @param query - K线查询参数
+   * @returns K线数组
    */
   async getKlines(query: KlineQuery): Promise<Kline[]> {
     const { symbol, interval, limit = 8000, startTime, endTime } = query;
@@ -146,6 +247,11 @@ export class WeQuantTushareProvider extends RestDataProvider {
 
   /**
    * 分批获取大量 K 线数据
+   * 
+   * 策略：
+   * 1. 估算每天产生的 K 线数量（根据 interval）
+   * 2. 每次请求估算需要的时间范围
+   * 3. 自动 rateLimit 控制请求频率
    */
   private async getKlinesBatched(
     tsCode: string,
@@ -159,7 +265,6 @@ export class WeQuantTushareProvider extends RestDataProvider {
 
     // 默认获取最近 30 天的数据
     let currentEndTime = endTime || Math.floor(Date.now() / 1000);
-    let currentStartTime = startTime;
 
     while (remaining > 0 && currentEndTime > (startTime || 0)) {
       const batchSize = Math.min(remaining, 8000);
@@ -178,10 +283,10 @@ export class WeQuantTushareProvider extends RestDataProvider {
       const batchEndDate = this.formatDateTime(currentEndTime);
 
       const batch = await this.fetchHKMins(
-        tsCode,
-        freq,
-        batchSize,
-        batchStartDate,
+        tsCode, 
+        freq, 
+        batchSize, 
+        batchStartDate, 
         batchEndDate
       );
 
@@ -194,7 +299,7 @@ export class WeQuantTushareProvider extends RestDataProvider {
       const earliestTs = Math.min(...batch.map(k => Math.floor(k.timestamp / 1000)));
       currentEndTime = Math.floor(earliestTs / 1000) - 60; // 往前一分钟
 
-      // rateLimit 会自动处理请求间隔
+      // rateLimit 会自动处理请求间隔（每小时2次限制）
     }
 
     // 按时间排序
@@ -202,11 +307,11 @@ export class WeQuantTushareProvider extends RestDataProvider {
   }
 
   /**
-   * 获取每根 K 线代表的天数
+   * 获取每根 K 线代表的天数（港股约 4 小时交易时间）
    */
   private getBarsPerDay(freq: string): number {
     const map: Record<string, number> = {
-      '1min': 240,
+      '1min': 240,   // 09:30-12:00, 13:00-16:00 ≈ 4小时
       '5min': 48,
       '15min': 16,
       '30min': 8,
@@ -217,6 +322,8 @@ export class WeQuantTushareProvider extends RestDataProvider {
 
   /**
    * 调用 Tushare 港股分钟线接口
+   * 
+   * 注意：此函数会自动处理速率限制，调用前无需手动检查
    */
   private async fetchHKMins(
     tsCode: string,
@@ -248,7 +355,7 @@ export class WeQuantTushareProvider extends RestDataProvider {
     try {
       const payload = JSON.stringify(params);
 
-      // 构建 curl 命令
+      // 构建 curl 命令（Bun 的 fetch 不支持代理，使用 curl）
       let curlCmd = [
         'curl', '-s', '--max-time', String(this.timeout),
         '-X', 'POST',
@@ -295,7 +402,7 @@ export class WeQuantTushareProvider extends RestDataProvider {
       return this.transformKlines(rawData, freq);
 
     } catch (error: any) {
-      if (error.message?.includes('积分')) {
+      if (error.message?.includes('积分') || error.message?.includes('每小时')) {
         throw new RateLimitError(`Tushare API 限流: ${error.message}`);
       }
       throw new NetworkError(`获取 ${tsCode} K线失败: ${error.message}`, error);
@@ -310,7 +417,8 @@ export class WeQuantTushareProvider extends RestDataProvider {
       const normalized = this.normalizeSymbol(row.ts_code);
       const [base, quote] = normalized.split('/');
 
-      // 解析交易时间
+      // 解析交易时间（北京时间）
+      // trade_time 格式: "2023-03-13 16:10:00"
       const tradeTime = new Date(row.trade_time.replace(' ', 'T') + '+08:00');
       const timestamp = tradeTime.getTime();
 
@@ -336,7 +444,9 @@ export class WeQuantTushareProvider extends RestDataProvider {
 
   /**
    * 转换时间间隔格式
-   * 支持：1m, 5m, 15m, 30m, 1h, 60m
+   * 
+   * 支持输入：1m, 5m, 15m, 30m, 1h, 60m
+   * 转换为：1min, 5min, 15min, 30min, 60min
    */
   private convertInterval(interval: string): string {
     const map: Record<string, string> = {
@@ -356,7 +466,7 @@ export class WeQuantTushareProvider extends RestDataProvider {
   }
 
   /**
-   * 标准化符号：00001.HK → 00001/HK
+   * 标准化符号：00001.HK → 00001/HKD
    */
   normalizeSymbol(symbol: string): string {
     if (symbol.includes('/')) return symbol;
@@ -379,6 +489,8 @@ export class WeQuantTushareProvider extends RestDataProvider {
 
   /**
    * 格式化时间戳为 Tushare 格式
+   * 
+   * 输出格式: "YYYY-MM-DD HH:MM:SS"
    */
   private formatDateTime(timestamp: number): string {
     const date = new Date(timestamp * 1000);
@@ -401,18 +513,12 @@ export class WeQuantTushareProvider extends RestDataProvider {
   }
 
   /**
-   * 延迟函数
-   */
-  protected delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  /**
    * 健康检查（港股专用）
+   * 
+   * 使用 00001.HK (长和) 作为测试标的
    */
   async healthCheck(): Promise<boolean> {
     try {
-      // 使用 00001.HK (长和) 作为测试
       const klines = await this.getKlines({
         symbol: '00001.HK',
         interval: '1m',
@@ -426,7 +532,14 @@ export class WeQuantTushareProvider extends RestDataProvider {
   }
 
   /**
-   * Dummy implementation
+   * 延迟函数
+   */
+  protected delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Dummy implementation (curl-based provider)
    */
   protected async request<T = any>(
     method: string,

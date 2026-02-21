@@ -93,12 +93,23 @@ export interface StrategyContext {
   buy(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order>;
   sell(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order>;
   cancelOrder(orderId: string): Promise<void>;
+  amendOrder?(orderId: string, price?: number, qty?: number): Promise<{ success: boolean; orderId: string }>;
+  cancelAllOrders?(symbol?: string): Promise<{ cancelledCount: number }>;
+  
+  // P1新增：目标仓位下单
+  orderToTarget?(side: 'BUY' | 'SELL', targetNotional: number): Promise<{ success: boolean; orderId?: string; executedQty?: number; error?: string }>;
   
   // 数据查询
   getLastBar(symbol: string): Kline | null;
   getBars(symbol: string, limit: number): Kline[];
   /** 历史K线（REST回源，供缓存层使用） */
   getKlines?(symbol: string, interval: string, limit: number): Promise<Kline[]>;
+  
+  // 资金费率查询
+  getFundingRate?(symbol: string): Promise<{ fundingRate: number; nextFundingTime: number }>;
+  
+  // 最优买卖价查询
+  getBestBidAsk?(symbol: string): Promise<{ bid: number; ask: number; spread: number }>;
   
   // 指标访问（如果使用 StreamingIndicators）
   getIndicator?(symbol: string, name: string): number | undefined;
@@ -135,6 +146,17 @@ export interface Strategy {
    * 订单状态更新（可选）
    */
   onOrder?(order: Order, ctx: StrategyContext): Promise<void>;
+  
+  /**
+   * 资金费结算回调（可选）
+   * Bybit每8小时结算一次（08:00, 16:00, 00:00 UTC）
+   */
+  onFundingFee?(data: {
+    symbol: string;
+    fundingRate: number;
+    fundingFee: number;
+    timestamp: number;
+  }, ctx: StrategyContext): Promise<void>;
   
   /**
    * 策略停止（清理资源）
