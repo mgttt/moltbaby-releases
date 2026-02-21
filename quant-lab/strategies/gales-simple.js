@@ -475,9 +475,148 @@ function saveState() {
   }
 }
 
-// ================================
-// P0新增: 熔断运行时控制
-// ================================
+// P2新增：指标缓存（Freqtrade风格 populate_indicators 分离）
+let cachedIndicators = {
+  adx: 0,
+  sma20: 0,
+  sma50: 0,
+  rsi14: 0,
+  timestamp: 0,
+  klineCount: 0,
+};
+
+/**
+ * 指标准备函数（Freqtrade风格）
+ * 框架层在每次K线更新时调用，计算指标并存入 cachedIndicators
+ * 
+ * @param {string} klinesJson - JSON格式的K线数据数组 [{timestamp, open, high, low, close, volume}, ...]
+ */
+function st_prepareIndicators(klinesJson) {
+  try {
+    const klines = (typeof klinesJson === 'string') ? JSON.parse(klinesJson) : klinesJson;
+    
+    if (!Array.isArray(klines) || klines.length < 50) {
+      logDebug('[st_prepareIndicators] K线数据不足50根，跳过计算');
+      return;
+    }
+    
+    // 提取收盘价序列
+    const closes = klines.map(k => Number(k.close) || 0);
+    const highs = klines.map(k => Number(k.high) || 0);
+    const lows = klines.map(k => Number(k.low) || 0);
+    
+    // 计算SMA
+    cachedIndicators.sma20 = calculateSMA(closes, 20);
+    cachedIndicators.sma50 = calculateSMA(closes, 50);
+    
+    // 计算RSI
+    cachedIndicators.rsi14 = calculateRSI(closes, 14);
+    
+    // 计算ADX（使用K线数据中的high/low/close）
+    cachedIndicators.adx = calculateADXFromKlines(klines, 14);
+    
+    cachedIndicators.timestamp = Date.now();
+    cachedIndicators.klineCount = klines.length;
+    
+    logDebug('[st_prepareIndicators] 指标已更新: ADX=' + cachedIndicators.adx.toFixed(2) + 
+             ' SMA20=' + cachedIndicators.sma20.toFixed(4) + 
+             ' RSI=' + cachedIndicators.rsi14.toFixed(2));
+  } catch (e) {
+    logWarn('[st_prepareIndicators] 计算失败: ' + e);
+  }
+}
+
+/**
+ * 计算SMA（简单移动平均）
+ */
+function calculateSMA(data, period) {
+  if (data.length < period) return 0;
+  let sum = 0;
+  for (let i = data.length - period; i < data.length; i++) {
+    sum += data[i];
+  }
+  return sum / period;
+}
+
+/**
+ * 计算RSI（相对强弱指数）
+ */
+function calculateRSI(closes, period) {
+  if (closes.length < period + 1) return 50;
+  
+  let gains = 0;
+  let losses = 0;
+  
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const change = closes[i] - closes[i - 1];
+    if (change > 0) gains += change;
+    else losses -= change;
+  }
+  
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+
+/**
+ * 从K线数据计算ADX（专用版本）
+ */
+function calculateADXFromKlines(klines, period) {
+  if (klines.length < period * 2) return 0;
+  
+  const dmArray = [];
+  for (let i = 1; i < klines.length; i++) {
+    const current = klines[i];
+    const previous = klines[i - 1];
+    
+    const upMove = Number(current.high) - Number(previous.high);
+    const downMove = Number(previous.low) - Number(current.low);
+    
+    const plusDM = (upMove > downMove && upMove > 0) ? upMove : 0;
+    const minusDM = (downMove > upMove && downMove > 0) ? downMove : 0;
+    
+    const tr = Math.max(
+      Number(current.high) - Number(current.low),
+      Math.abs(Number(current.high) - Number(previous.close)),
+      Math.abs(Number(current.low) - Number(previous.close))
+    );
+    
+    dmArray.push({ plusDM, minusDM, tr });
+  }
+  
+  // 平滑计算
+  const smoothedData = [];
+  for (let i = period - 1; i < dmArray.length; i++) {
+    let sumPlusDM = 0, sumMinusDM = 0, sumTR = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      sumPlusDM += dmArray[j].plusDM;
+      sumMinusDM += dmArray[j].minusDM;
+      sumTR += dmArray[j].tr;
+    }
+    smoothedData.push({ plusDM: sumPlusDM, minusDM: sumMinusDM, tr: sumTR });
+  }
+  
+  // 计算DI和DX
+  const diArray = [];
+  for (const data of smoothedData) {
+    const plusDI = (data.tr > 0) ? (data.plusDM / data.tr) * 100 : 0;
+    const minusDI = (data.tr > 0) ? (data.minusDM / data.tr) * 100 : 0;
+    const diSum = plusDI + minusDI;
+    const dx = (diSum > 0) ? (Math.abs(plusDI - minusDI) / diSum) * 100 : 0;
+    diArray.push(dx);
+  }
+  
+  // 计算ADX（DX的平均）
+  if (diArray.length < period) return 0;
+  let adx = 0;
+  for (let i = diArray.length - period; i < diArray.length; i++) {
+    adx += diArray[i];
+  }
+  return adx / period;
+}
 
 function setCircuitBreakerActive(active) {
   const oldValue = circuitBreakerState.active;

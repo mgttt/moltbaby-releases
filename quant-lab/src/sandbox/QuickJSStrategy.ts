@@ -108,6 +108,10 @@ export class QuickJSStrategy {
   // bridge_scheduleAt 定时任务注册表
   private scheduleRegistry: Map<string, { nextTrigger: number; callbackName: string; scheduleType: string }> = new Map();
 
+  // P2新增：K线缓存（用于检测K线更新，触发st_prepareIndicators）
+  private cachedKlines: any[] = [];
+  private lastKlineTimestamp: number = 0;
+
   // bar 缓存层（历史K线 REST→ndtsdb，不影响WS tick路径）
   private barCache = new BarCacheLayer({
     logger: (msg) => logger.info(`[BarCache] ${msg}`),
@@ -551,6 +555,61 @@ export class QuickJSStrategy {
   }
 
   /**
+   * P2新增：调用策略的st_prepareIndicators准备指标
+   * 只在K线更新时才调用，避免重复计算
+   */
+  private async prepareIndicators(symbol: string): Promise<void> {
+    if (!this.ctx || !this.strategyCtx?.getKlines) return;
+    
+    try {
+      // 获取K线数据（例如5分钟K线）
+      const klines = await this.strategyCtx.getKlines(symbol, '5', 100);
+      
+      if (!klines || klines.length === 0) return;
+      
+      // 检测K线是否更新（比较最后一根K线的时间戳）
+      const lastKline = klines[klines.length - 1];
+      const lastTimestamp = lastKline?.timestamp || 0;
+      
+      if (lastTimestamp <= this.lastKlineTimestamp) {
+        // K线未更新，跳过
+        return;
+      }
+      
+      // K线已更新，更新缓存
+      this.lastKlineTimestamp = lastTimestamp;
+      this.cachedKlines = klines;
+      
+      // 检查策略是否实现了st_prepareIndicators
+      const fnHandle = this.ctx.getProp(this.ctx.global, 'st_prepareIndicators');
+      const isFunction = this.ctx.typeof(fnHandle) === 'function';
+      
+      if (isFunction) {
+        const klinesJson = JSON.stringify(klines);
+        const argHandle = this.ctx.newString(klinesJson);
+        const result = this.ctx.callFunction(fnHandle, this.ctx.undefined, argHandle);
+        
+        fnHandle.dispose();
+        argHandle.dispose();
+        
+        if (result.error) {
+          const errorMsg = this.ctx.dump(result.error);
+          logger.warn(`[QuickJSStrategy] st_prepareIndicators 执行失败:`, errorMsg);
+          result.error.dispose();
+        } else {
+          result.value.dispose();
+          logger.debug(`[QuickJSStrategy] st_prepareIndicators 执行成功 (${klines.length} 根K线)`);
+        }
+      } else {
+        fnHandle.dispose();
+        // 策略未实现st_prepareIndicators，静默跳过
+      }
+    } catch (error: any) {
+      logger.warn(`[QuickJSStrategy] prepareIndicators 失败:`, error.message);
+    }
+  }
+
+  /**
    * K线更新
    */
   async onBar(bar: Kline, ctx: StrategyContext): Promise<void> {
@@ -582,6 +641,9 @@ export class QuickJSStrategy {
 
       // P1新增：检查并执行定时任务（在heartbeat之前）
       this.checkAndExecuteScheduledTasks();
+
+      // P2新增：准备指标数据（只在K线更新时调用）
+      await this.prepareIndicators(bar.symbol || 'UNKNOWN');
 
       // 调用 st_heartbeat
       await this.callStrategyFunction('st_heartbeat', tick);
