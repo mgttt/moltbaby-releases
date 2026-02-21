@@ -1399,6 +1399,7 @@ void ndtsdb_close(NDTSDB* db) {
             KlineRow row;
             char symbol[32];
             char interval[16];
+            char day[12];  // 预计算day，避免重复转换
         } FlatRow;
 
         FlatRow* flat = (FlatRow*)malloc(total * sizeof(FlatRow));
@@ -1412,97 +1413,89 @@ void ndtsdb_close(NDTSDB* db) {
                 flat[fi].symbol[31] = '\0';
                 strncpy(flat[fi].interval, g_symbols[i].interval, 15);
                 flat[fi].interval[15] = '\0';
+                ts_to_day(flat[fi].row.timestamp, flat[fi].day);
                 fi++;
             }
         }
 
-        /* 收集唯一天 */
-        char days[365][12];
-        int n_days = 0;
-
-        for (uint32_t i = 0; i < total; i++) {
-            char day[12];
-            ts_to_day(flat[i].row.timestamp, day);
-            int found = 0;
-            for (int d = 0; d < n_days; d++) {
-                if (strcmp(days[d], day) == 0) { found = 1; break; }
-            }
-            if (!found && n_days < 365) {
-                strncpy(days[n_days], day, 11);
-                days[n_days][11] = '\0';
-                n_days++;
-            }
+        /* 按timestamp排序，使相同day的数据连续 */
+        int compare_by_timestamp(const void* a, const void* b) {
+            const FlatRow* ra = (const FlatRow*)a;
+            const FlatRow* rb = (const FlatRow*)b;
+            if (ra->row.timestamp < rb->row.timestamp) return -1;
+            if (ra->row.timestamp > rb->row.timestamp) return 1;
+            return 0;
         }
+        qsort(flat, total, sizeof(FlatRow), compare_by_timestamp);
 
         /* 确保目录存在 */
         mkdir(db->path, 0755);
 
-        /* 对每一天写一个分区文件 */
-        for (int d = 0; d < n_days; d++) {
-            /* 收集该天的行 */
-            uint32_t day_n = 0;
-            for (uint32_t i = 0; i < total; i++) {
-                char day[12]; 
-                ts_to_day(flat[i].row.timestamp, day);
-                if (strcmp(day, days[d]) == 0) day_n++;
+        /* 线性扫描：按day分组，一次性写出 */
+        uint32_t i = 0;
+        while (i < total) {
+            /* 找到当前day的范围 [i, j) */
+            const char* current_day = flat[i].day;
+            uint32_t j = i + 1;
+            while (j < total && strcmp(flat[j].day, current_day) == 0) {
+                j++;
             }
+            uint32_t day_n = j - i;
 
+            /* 分配该天的缓冲区 */
             KlineRow* day_rows = (KlineRow*)malloc(day_n * sizeof(KlineRow));
             int32_t* sym_ids = (int32_t*)malloc(day_n * sizeof(int32_t));
             int32_t* itv_ids = (int32_t*)malloc(day_n * sizeof(int32_t));
 
             if (!day_rows || !sym_ids || !itv_ids) {
                 free(day_rows); free(sym_ids); free(itv_ids);
+                i = j;
                 continue;
             }
 
-            /* 建字典 */
+            /* 建字典并填充数据 */
             char* sym_dict[64]; int n_sym = 0;
             char* itv_dict[16]; int n_itv = 0;
 
-            uint32_t ri = 0;
-            for (uint32_t i = 0; i < total; i++) {
-                char day[12]; 
-                ts_to_day(flat[i].row.timestamp, day);
-                if (strcmp(day, days[d]) != 0) continue;
+            for (uint32_t k = 0; k < day_n; k++) {
+                day_rows[k] = flat[i + k].row;
 
-                day_rows[ri] = flat[i].row;
-
-                /* symbol 字典查询 */
+                /* symbol 字典查询/插入 */
                 int si = -1;
                 for (int s = 0; s < n_sym; s++) {
-                    if (strcmp(sym_dict[s], flat[i].symbol) == 0) { si = s; break; }
+                    if (strcmp(sym_dict[s], flat[i + k].symbol) == 0) { si = s; break; }
                 }
                 if (si < 0 && n_sym < 64) {
-                    sym_dict[n_sym] = strdup(flat[i].symbol);
+                    sym_dict[n_sym] = strdup(flat[i + k].symbol);
                     si = n_sym++;
                 }
-                sym_ids[ri] = si;
+                sym_ids[k] = si;
 
-                /* interval 字典 */
+                /* interval 字典查询/插入 */
                 int ii = -1;
                 for (int v = 0; v < n_itv; v++) {
-                    if (strcmp(itv_dict[v], flat[i].interval) == 0) { ii = v; break; }
+                    if (strcmp(itv_dict[v], flat[i + k].interval) == 0) { ii = v; break; }
                 }
                 if (ii < 0 && n_itv < 16) {
-                    itv_dict[n_itv] = strdup(flat[i].interval);
+                    itv_dict[n_itv] = strdup(flat[i + k].interval);
                     ii = n_itv++;
                 }
-                itv_ids[ri] = ii;
-                ri++;
+                itv_ids[k] = ii;
             }
 
             /* 写文件 */
             char filepath[512];
-            snprintf(filepath, sizeof(filepath), "%s/%s.ndts", db->path, days[d]);
+            snprintf(filepath, sizeof(filepath), "%s/%s.ndts", db->path, current_day);
             write_partition_file(filepath, day_rows, day_n,
                                   sym_dict, n_sym, itv_dict, n_itv,
                                   sym_ids, itv_ids);
 
-            /* 清理字典 */
+            /* 清理 */
             for (int s = 0; s < n_sym; s++) free(sym_dict[s]);
             for (int v = 0; v < n_itv; v++) free(itv_dict[v]);
             free(day_rows); free(sym_ids); free(itv_ids);
+
+            i = j;  // 跳到下一个day
         }
 
         free(flat);
@@ -1624,6 +1617,149 @@ void ndtsdb_free_result(QueryResult* r) {
         if (r->rows) free(r->rows);
         free(r);
     }
+}
+
+// ============ query_all: 返回所有symbol的所有数据 ============
+QueryResult* ndtsdb_query_all(NDTSDB* db) {
+    (void)db;
+    
+    // 计算总条数
+    uint32_t total_count = 0;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        total_count += g_symbols[i].count;
+    }
+    
+    if (total_count == 0) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 分配结果数组（包含symbol/interval信息）
+    // 扩展KlineRow结构以包含symbol和interval
+    typedef struct {
+        KlineRow row;
+        char symbol[32];
+        char interval[16];
+    } ResultRow;
+    
+    ResultRow* result_rows = (ResultRow*)malloc(total_count * sizeof(ResultRow));
+    if (!result_rows) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 填充数据
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        for (uint32_t j = 0; j < sd->count; j++) {
+            result_rows[idx].row = sd->klines[j];
+            strncpy(result_rows[idx].symbol, sd->symbol, 31);
+            result_rows[idx].symbol[31] = '\0';
+            strncpy(result_rows[idx].interval, sd->interval, 15);
+            result_rows[idx].interval[15] = '\0';
+            idx++;
+        }
+    }
+    
+    // 使用capacity字段存储总条数，rows指针指向扩展数据
+    // JS层需要特殊处理这种格式
+    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+    r->rows = (KlineRow*)result_rows;  // 实际指向ResultRow数组
+    r->count = total_count;
+    r->capacity = 0xDEADBEEF;  // 标记为扩展格式
+    return r;
+}
+
+// ============ query_filtered: 按symbol过滤查询 ============
+typedef struct {
+    KlineRow row;
+    char symbol[32];
+    char interval[16];
+} ResultRow;
+
+QueryResult* ndtsdb_query_filtered(NDTSDB* db, const char** symbols, int n_symbols) {
+    (void)db;
+    
+    if (!symbols || n_symbols <= 0) {
+        // 无过滤条件，返回空结果
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 先计算匹配的总条数
+    uint32_t total_count = 0;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        // 检查symbol是否在过滤列表中
+        int match = 0;
+        for (int s = 0; s < n_symbols; s++) {
+            if (strcmp(sd->symbol, symbols[s]) == 0) {
+                match = 1;
+                break;
+            }
+        }
+        if (match) {
+            total_count += sd->count;
+        }
+    }
+    
+    if (total_count == 0) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 分配结果数组
+    ResultRow* result_rows = (ResultRow*)malloc(total_count * sizeof(ResultRow));
+    if (!result_rows) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 填充匹配的数据
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        // 检查symbol是否在过滤列表中
+        int match = 0;
+        for (int s = 0; s < n_symbols; s++) {
+            if (strcmp(sd->symbol, symbols[s]) == 0) {
+                match = 1;
+                break;
+            }
+        }
+        if (!match) continue;
+        
+        for (uint32_t j = 0; j < sd->count; j++) {
+            result_rows[idx].row = sd->klines[j];
+            strncpy(result_rows[idx].symbol, sd->symbol, 31);
+            result_rows[idx].symbol[31] = '\0';
+            strncpy(result_rows[idx].interval, sd->interval, 15);
+            result_rows[idx].interval[15] = '\0';
+            idx++;
+        }
+    }
+    
+    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+    r->rows = (KlineRow*)result_rows;
+    r->count = total_count;
+    r->capacity = 0xDEADBEEF;
+    return r;
 }
 
 int64_t ndtsdb_get_latest_timestamp(NDTSDB* db, const char* symbol, const char* interval) {

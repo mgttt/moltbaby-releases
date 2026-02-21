@@ -89,6 +89,23 @@ int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, co
 QueryResult* ndtsdb_query(NDTSDB* db, const Query* query);
 
 /**
+ * 查询所有K线（所有symbol）
+ * @param db 数据库句柄
+ * @return 查询结果，需用 ndtsdb_free_result 释放
+ * @note 返回的rows实际为ResultRow*（包含symbol/interval），capacity标记为0xDEADBEEF
+ */
+QueryResult* ndtsdb_query_all(NDTSDB* db);
+
+/**
+ * 按symbol过滤查询
+ * @param db 数据库句柄
+ * @param symbols symbol名称数组
+ * @param n_symbols symbol数量
+ * @return 查询结果，需用 ndtsdb_free_result 释放
+ */
+QueryResult* ndtsdb_query_filtered(NDTSDB* db, const char** symbols, int n_symbols);
+
+/**
  * 释放查询结果
  * @param result 查询结果
  */
