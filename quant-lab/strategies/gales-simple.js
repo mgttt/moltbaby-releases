@@ -318,8 +318,20 @@ function loadState() {
         }
         if (obj.ledgerRebuildDone === undefined) state.ledgerRebuildDone = false;
         if (obj.ledgerRebuildLastTick === undefined) state.ledgerRebuildLastTick = 0;
-        // P2修复：加载initialOffset
-        if (obj.initialOffset !== undefined) {
+        
+        // P2修复：加载完整positionDiffState（7字段持久化）
+        if (obj.positionDiffState) {
+          positionDiffState.initialOffset = obj.positionDiffState.initialOffset || 0;
+          positionDiffState.lastDiff = obj.positionDiffState.lastDiff || 0;
+          positionDiffState.diffIncreaseCount = obj.positionDiffState.diffIncreaseCount || 0;
+          positionDiffState.lastAlertAt = obj.positionDiffState.lastAlertAt || 0;
+          positionDiffState.ledgerGapOverCount = obj.positionDiffState.ledgerGapOverCount || 0;
+          positionDiffState.ledgerGapHardblocked = obj.positionDiffState.ledgerGapHardblocked || false;
+          positionDiffState.lastHardblockAlertAt = obj.positionDiffState.lastHardblockAlertAt || 0;
+          logInfo('[P2] positionDiffState已加载: initialOffset=' + positionDiffState.initialOffset);
+        }
+        // 兼容旧数据：单独加载initialOffset
+        else if (obj.initialOffset !== undefined) {
           positionDiffState.initialOffset = obj.initialOffset;
         }
         
@@ -356,6 +368,16 @@ function loadState() {
 
 // 保存状态
 function saveState() {
+  // P2修复：同步positionDiffState到state，确保7字段完整持久化
+  state.positionDiffState = {
+    initialOffset: positionDiffState.initialOffset || 0,
+    lastDiff: positionDiffState.lastDiff || 0,
+    diffIncreaseCount: positionDiffState.diffIncreaseCount || 0,
+    lastAlertAt: positionDiffState.lastAlertAt || 0,
+    ledgerGapOverCount: positionDiffState.ledgerGapOverCount || 0,
+    ledgerGapHardblocked: positionDiffState.ledgerGapHardblocked || false,
+    lastHardblockAlertAt: positionDiffState.lastHardblockAlertAt || 0,
+  };
   bridge_stateSet(getStateKey(), JSON.stringify(state));
 }
 
