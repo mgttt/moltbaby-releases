@@ -2098,6 +2098,174 @@ export class QuickJSStrategy {
     this.ctx.setProp(this.ctx.global, 'bridge_readMetric', bridge_readMetric);
     bridge_readMetric.dispose();
 
+    // P3新增：bridge_getMetricStats - 获取指标统计信息（均值、趋势等）
+    const bridge_getMetricStats = this.ctx.newFunction('bridge_getMetricStats', async (nameHandle, windowSecondsHandle) => {
+      const name = this.ctx!.getString(nameHandle);
+      const windowSeconds = windowSecondsHandle ? this.ctx!.getNumber(windowSecondsHandle) : 3600;
+      const strategyId = this.config.strategyId;
+      const metricsDir = join(getHomeDir(), '.quant-lib', 'metrics', strategyId);
+      const sinceMs = Date.now() - windowSeconds * 1000;
+
+      try {
+        // 先flush确保最新数据已写入磁盘
+        await this.flushMetrics();
+
+        // 检查目录是否存在
+        if (!existsSync(metricsDir)) {
+          return this.ctx!.newString(JSON.stringify(null));
+        }
+
+        // spawn ndtsdb-cli query读取时间范围内的数据
+        const { spawn } = await import('child_process');
+        const ndtsdbCli = '/home/devali/moltbaby/ndtsdb-cli/ndtsdb-cli';
+
+        const rows: Array<{timestamp: number, value: number}> = await new Promise((resolve, reject) => {
+          const proc = spawn(ndtsdbCli, [
+            'query', '--database', metricsDir,
+            '--symbols', name,
+            '--since', String(sinceMs),
+            '--format', 'json'
+          ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+          let stdout = '';
+          let stderr = '';
+          proc.stdout.on('data', (data) => { stdout += data; });
+          proc.stderr.on('data', (data) => { stderr += data; });
+
+          proc.on('close', (code) => {
+            if (code !== 0) {
+              reject(new Error(`ndtsdb-cli query failed: ${stderr}`));
+              return;
+            }
+
+            // 解析每行JSON
+            const lines = stdout.trim().split('\n').filter(l => l.trim());
+            const result = lines.map(line => {
+              try {
+                const row = JSON.parse(line);
+                return {
+                  timestamp: Number(row.timestamp),
+                  value: Number(row.close)
+                };
+              } catch (e) {
+                return null;
+              }
+            }).filter((r): r is {timestamp: number, value: number} => r !== null);
+
+            resolve(result);
+          });
+
+          proc.on('error', (err) => {
+            reject(new Error(`Failed to spawn ndtsdb-cli: ${err.message}`));
+          });
+        });
+
+        if (rows.length === 0) {
+          return this.ctx!.newString(JSON.stringify(null));
+        }
+
+        // 计算统计数据
+        const values = rows.map(r => r.value);
+        const latest = values[values.length - 1];
+        const count = values.length;
+        const mean = values.reduce((a, b) => a + b, 0) / count;
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+
+        // 计算趋势（线性回归斜率）
+        // 使用timestamp作为x，value作为y
+        const n = rows.length;
+        const timestamps = rows.map(r => r.timestamp);
+        const minTs = Math.min(...timestamps);
+        // 归一化timestamp为秒偏移，避免大数问题
+        const x = timestamps.map(ts => (ts - minTs) / 1000);
+        const y = values;
+
+        let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+        for (let i = 0; i < n; i++) {
+          sumX += x[i];
+          sumY += y[i];
+          sumXY += x[i] * y[i];
+          sumXX += x[i] * x[i];
+        }
+
+        // 斜率 = (n*sumXY - sumX*sumY) / (n*sumXX - sumX*sumX)
+        const denominator = n * sumXX - sumX * sumX;
+        let slope = 0;
+        if (denominator !== 0) {
+          slope = (n * sumXY - sumX * sumY) / denominator;
+        }
+
+        // trend判断：斜率>0.1→up, <-0.1→down, 否则flat
+        let trend: 'up' | 'down' | 'flat' = 'flat';
+        if (slope > 0.1) trend = 'up';
+        else if (slope < -0.1) trend = 'down';
+
+        const stats = {
+          latest,
+          mean,
+          min,
+          max,
+          count,
+          trend,
+          slope
+        };
+
+        logger.debug(`[QuickJSStrategy] 指标统计: ${name}, window=${windowSeconds}s, count=${count}, trend=${trend}`);
+        return this.ctx!.newString(JSON.stringify(stats));
+      } catch (error: any) {
+        logger.error(`[QuickJSStrategy] 获取指标统计失败:`, error.message);
+        return this.ctx!.newString(JSON.stringify(null));
+      }
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getMetricStats', bridge_getMetricStats);
+    bridge_getMetricStats.dispose();
+
+    // P3新增：bridge_getConfig - 运行时配置热更新
+    const bridge_getConfig = this.ctx.newFunction('bridge_getConfig', (keyHandle, defaultHandle) => {
+      const key = this.ctx!.getString(keyHandle);
+      let defaultValue: any = undefined;
+      if (defaultHandle) {
+        try {
+          defaultValue = JSON.parse(this.ctx!.getString(defaultHandle));
+        } catch (e) {
+          defaultValue = this.ctx!.getString(defaultHandle);
+        }
+      }
+      
+      const strategyId = this.config.strategyId;
+      const configDir = join(getHomeDir(), '.quant-lib', 'config');
+      const configFile = join(configDir, `${strategyId}.json`);
+      
+      try {
+        // 检查配置文件是否存在
+        if (!existsSync(configFile)) {
+          logger.debug(`[QuickJSStrategy] getConfig: 配置文件不存在，返回默认值: ${key}`);
+          return this.ctx!.newString(JSON.stringify(defaultValue));
+        }
+        
+        // 读取并解析JSON
+        const configContent = readFileSync(configFile, 'utf-8');
+        const config = JSON.parse(configContent || '{}');
+        
+        // 获取指定key的值
+        const value = config[key];
+        
+        if (value !== undefined) {
+          logger.debug(`[QuickJSStrategy] getConfig: ${key}=${JSON.stringify(value)}`);
+          return this.ctx!.newString(JSON.stringify(value));
+        } else {
+          logger.debug(`[QuickJSStrategy] getConfig: ${key}不存在，返回默认值`);
+          return this.ctx!.newString(JSON.stringify(defaultValue));
+        }
+      } catch (error: any) {
+        logger.warn(`[QuickJSStrategy] getConfig失败: ${key}, ${error.message}`);
+        return this.ctx!.newString(JSON.stringify(defaultValue));
+      }
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_getConfig', bridge_getConfig);
+    bridge_getConfig.dispose();
+
     // P2修复：bridge_tgSend - 发送Telegram通知
     // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，避免干扰；需显式开启 STRATEGY_TG_ENABLED=1
     const bridge_tgSend = this.ctx.newFunction('bridge_tgSend', (toHandle, messageHandle) => {

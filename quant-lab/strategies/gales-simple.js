@@ -2844,6 +2844,12 @@ function st_heartbeat(tickJson) {
       bridge_writeMetric('adx', marketRegimeState.currentADX || 0);
       bridge_writeMetric('pnl', state.accountingPnl || 0);
       bridge_writeMetric('position', state.accountingPos || 0);
+      // P3新增：更多监控指标
+      bridge_writeMetric('open_orders', state.openOrders ? state.openOrders.length : 0);
+      bridge_writeMetric('gales_level', state.riskMetrics ? (state.riskMetrics.galesLevel || 0) : 0);
+      // equity：优先使用已缓存的账户净值
+      const netEq = state.riskMetrics ? state.riskMetrics.accountNetEquity : null;
+      bridge_writeMetric('equity', netEq || 0);
     } catch (e) {}
   }
 
