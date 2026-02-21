@@ -310,6 +310,14 @@ function loadState() {
         if (!state.lastPlaceTick) state.lastPlaceTick = 0;
         if (!state.lastRecenterAtMs) state.lastRecenterAtMs = 0;
         if (!state.lastRecenterTick) state.lastRecenterTick = 0;
+        // P2优化：初始化gridId索引Map
+        if (!state.ordersByGridId) state.ordersByGridId = {};
+        // P2优化：初始化活跃订单计数器
+        if (typeof state.activeOrdersCount !== 'number') {
+          state.activeOrdersCount = state.openOrders.filter(function(o) {
+            return o && o.status !== 'Filled' && o.status !== 'Canceled';
+          }).length;
+        }
         if (!state.runId) state.runId = 0;
         if (!state.orderSeq) state.orderSeq = 0;
         if (!state.exchangePosition) state.exchangePosition = 0;
@@ -376,6 +384,20 @@ function loadState() {
   
   // P0修复：清空execution去重集合，避免重启后历史数据干扰
   processedExecIds = {};
+  
+  // P2优化：从openOrders重建gridId索引
+  state.ordersByGridId = {};
+  state.activeOrdersCount = 0;
+  if (state.openOrders && state.openOrders.length > 0) {
+    for (let i = 0; i < state.openOrders.length; i++) {
+      const o = state.openOrders[i];
+      if (o && o.gridId && o.status !== 'Filled' && o.status !== 'Canceled') {
+        state.ordersByGridId[o.gridId] = o;
+        state.activeOrdersCount++;
+      }
+    }
+    logInfo('[P2优化] 重建ordersByGridId索引: ' + Object.keys(state.ordersByGridId).length + ' 条，活跃订单: ' + state.activeOrdersCount);
+  }
 }
 
 // 保存状态（P2修复：事务性保存，防止部分写入损坏）
@@ -1182,10 +1204,40 @@ function getOpenOrder(orderId) {
 
 function removeOpenOrder(orderId) {
   if (!orderId) return;
+  
+  // P2优化：先找到order获取gridId，再从索引中移除
+  const order = getOpenOrder(orderId);
+  if (order && order.gridId && state.ordersByGridId) {
+    delete state.ordersByGridId[order.gridId];
+  }
+  
+  // P2优化：同步更新活跃订单计数器（只有活跃订单才减）
+  if (order && order.status !== 'Filled' && order.status !== 'Canceled') {
+    if (typeof state.activeOrdersCount === 'number' && state.activeOrdersCount > 0) {
+      state.activeOrdersCount--;
+    }
+  }
+  
   state.openOrders = state.openOrders.filter(function(o) { return o.orderId !== orderId; });
 }
 
+/**
+ * 获取活跃订单数（P2优化：O(1)计数器）
+ * 
+ * 优化思路：
+ * - 原实现：O(n)每次遍历计算
+ * - 新实现：O(1)直接返回缓存计数器
+ * - 维护：增删订单时同步更新state.activeOrdersCount
+ * 
+ * @returns {number} 活跃订单数
+ */
 function countActiveOrders() {
+  // P2优化：使用缓存计数器，避免每次遍历
+  if (typeof state.activeOrdersCount === 'number') {
+    return state.activeOrdersCount;
+  }
+  
+  // 兼容：计数器未初始化时降级为遍历计算
   if (!state.openOrders) return 0;
   let n = 0;
   for (let i = 0; i < state.openOrders.length; i++) {
@@ -1198,7 +1250,21 @@ function countActiveOrders() {
 }
 
 function calcPendingNotional(side) {
-  if (!state.openOrders) return 0;
+  // P2优化：优先读取tick缓存（避免重复计算）
+  if (!state.tickCache) state.tickCache = {};
+  if (!state.tickCache.pendingNotional) state.tickCache.pendingNotional = {};
+  
+  // 如果缓存存在，直接返回
+  if (state.tickCache.pendingNotional[side] !== undefined) {
+    return state.tickCache.pendingNotional[side];
+  }
+
+  // 缓存不存在，计算并缓存
+  if (!state.openOrders) {
+    state.tickCache.pendingNotional[side] = 0;
+    return 0;
+  }
+  
   let sum = 0;
 
   for (let i = 0; i < state.openOrders.length; i++) {
@@ -1215,17 +1281,29 @@ function calcPendingNotional(side) {
     sum += remaining * px;
   }
 
+  // 缓存计算结果
+  state.tickCache.pendingNotional[side] = sum;
   return sum;
 }
 
+/**
+ * 通过gridId查找活跃订单（P2优化：O(1)索引查找）
+ * 
+ * 优化思路：
+ * - 原实现：O(n)线性遍历
+ * - 新实现：O(1) Map索引查找
+ * - 维护：openOrders增删时同步更新state.ordersByGridId
+ * 
+ * @param {string} gridId - 网格ID
+ * @returns {Object|null} 订单对象或null
+ */
 function findActiveOrderByGridId(gridId) {
   if (!gridId) return null;
-  for (let i = 0; i < state.openOrders.length; i++) {
-    const o = state.openOrders[i];
-    if (!o) continue;
-    if (o.gridId !== gridId) continue;
-    if (o.status === 'Filled' || o.status === 'Canceled') continue;
-    return o;
+  
+  // P2优化：使用索引Map O(1)查找
+  const order = state.ordersByGridId?.[gridId];
+  if (order && order.status !== 'Filled' && order.status !== 'Canceled') {
+    return order;
   }
   return null;
 }
@@ -1323,6 +1401,15 @@ function onOrderUpdate(order) {
   local.cumQty = nextCum;
   local.avgPrice = order.avgPrice || local.avgPrice || local.price;
   local.updatedAt = Date.now();
+
+  // P2优化：订单完成时清理索引并更新计数器
+  if ((order.status === 'Filled' || order.status === 'Canceled') && local.gridId && state.ordersByGridId) {
+    delete state.ordersByGridId[local.gridId];
+    // P2优化：活跃订单计数器减1
+    if (typeof state.activeOrdersCount === 'number' && state.activeOrdersCount > 0) {
+      state.activeOrdersCount--;
+    }
+  }
 
   if (delta > 0) {
     updatePositionFromFill(local.side, delta, local.avgPrice);
@@ -2360,6 +2447,9 @@ function st_heartbeat(tickJson) {
   state.lastPrice = tick.price;
   state.tickCount = (state.tickCount || 0) + 1;
 
+  // P2优化：清空tickCache（每tick开始时）
+  state.tickCache = {};
+
   // P1修复：恢复差值监控（原P0临时禁用，现重新启用）
   checkPositionDiff();
 
@@ -2990,6 +3080,14 @@ function placeOrder(grid) {
     };
 
     state.openOrders.push(order);
+    
+    // P2优化：同步更新gridId索引
+    if (!state.ordersByGridId) state.ordersByGridId = {};
+    state.ordersByGridId[grid.id] = order;
+    
+    // P2优化：同步更新活跃订单计数器
+    if (typeof state.activeOrdersCount !== 'number') state.activeOrdersCount = 0;
+    state.activeOrdersCount++;
 
     grid.state = 'ACTIVE';
     grid.orderId = orderId;
@@ -3049,7 +3147,7 @@ function placeOrder(grid) {
     grid.createdAt = Date.now();
 
     // 记录到 openOrders（后续由 st_onOrderUpdate 更新状态）
-    state.openOrders.push({
+    const newOrder = {
       orderId: grid.orderId,
       orderLinkId: orderLinkId,
       gridId: grid.id,
@@ -3061,7 +3159,16 @@ function placeOrder(grid) {
       avgPrice: 0,
       createdAt: grid.createdAt,
       updatedAt: grid.createdAt,
-    });
+    };
+    state.openOrders.push(newOrder);
+    
+    // P2优化：同步更新gridId索引
+    if (!state.ordersByGridId) state.ordersByGridId = {};
+    state.ordersByGridId[grid.id] = newOrder;
+    
+    // P2优化：同步更新活跃订单计数器
+    if (typeof state.activeOrdersCount !== 'number') state.activeOrdersCount = 0;
+    state.activeOrdersCount++;
 
     logInfo('✅ 挂单成功 orderId=' + grid.orderId);
     saveState();
