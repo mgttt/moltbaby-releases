@@ -537,6 +537,153 @@ describe("配置热重载 - 验收测试", () => {
     });
   });
   // P1新增结束 ========================================
+
+  // P2新增: diff日志测试 ========================================
+  describe("P2新增: diff日志功能", () => {
+    test("diff日志: 热更新时记录旧值→新值", async () => {
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+      });
+
+      // 捕获日志输出
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: any[]) => {
+        logs.push(args.join(' '));
+        originalLog(...args);
+      };
+
+      let changeDetected = false;
+      manager.setEvents({
+        onConfigChange: (changes) => {
+          changeDetected = true;
+        },
+      });
+
+      manager.startWatching();
+
+      // 修改单个参数: gridCount 10 → 15
+      const newConfig = {
+        symbol: 'BTCUSDT',
+        gridCount: 15,
+        gridSpacing: 0.01,
+        orderSize: 100,
+        maxPosition: 1000,
+      };
+
+      writeFileSync(TEST_CONFIG_PATH, JSON.stringify(newConfig, null, 2));
+
+      // 等待变更检测
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      // 恢复console.log
+      console.log = originalLog;
+
+      // 验证：变更被检测到
+      expect(changeDetected).toBe(true);
+
+      // 验证：日志中包含变更信息
+      const logText = logs.join('\n');
+      expect(logText).toContain('gridCount');
+      expect(logText).toContain('10');
+      expect(logText).toContain('15');
+
+      manager.stopWatching();
+    });
+
+    test("边界测试: 同一值更新不产生diff日志", async () => {
+      // 重置配置文件到初始状态（避免其他测试影响）
+      const initialConfig = {
+        symbol: 'BTCUSDT',
+        gridCount: 10,
+        gridSpacing: 0.01,
+        orderSize: 100,
+        maxPosition: 1000,
+      };
+      writeFileSync(TEST_CONFIG_PATH, JSON.stringify(initialConfig, null, 2));
+
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+      });
+
+      manager.startWatching();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // 重置计数器
+      let changeCount = 0;
+      manager.setEvents({
+        onConfigChange: (changes) => {
+          changeCount++;
+        },
+      });
+
+      // 写入完全相同的配置（使用同样的格式）
+      const sameConfig = {
+        symbol: 'BTCUSDT',
+        gridCount: 10,
+        gridSpacing: 0.01,
+        orderSize: 100,
+        maxPosition: 1000,
+      };
+      writeFileSync(TEST_CONFIG_PATH, JSON.stringify(sameConfig, null, 2));
+
+      // 等待变更检测（防抖1秒+余量）
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      // 验证：没有触发onConfigChange（相同配置不产生diff）
+      // 注意：由于文件系统触发机制，可能仍会触发，但detectChanges应该过滤掉
+      expect(changeCount).toBe(0);
+
+      manager.stopWatching();
+    });
+
+    test("多字段同时更新", async () => {
+      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+        backupDir: TEST_BACKUP_DIR,
+      });
+
+      // 捕获所有变更
+      let capturedChanges: any[] = [];
+      manager.setEvents({
+        onConfigChange: (changes) => {
+          capturedChanges = changes;
+        },
+      });
+
+      manager.startWatching();
+
+      // 同时修改多个参数
+      const newConfig = {
+        symbol: 'BTCUSDT',
+        gridCount: 25,      // 10 → 25
+        gridSpacing: 0.02,  // 0.01 → 0.02
+        orderSize: 200,     // 100 → 200
+        maxPosition: 2000,  // 1000 → 2000
+      };
+
+      writeFileSync(TEST_CONFIG_PATH, JSON.stringify(newConfig, null, 2));
+
+      // 等待变更检测
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      // 验证：捕获到4个变更
+      expect(capturedChanges.length).toBe(4);
+
+      // 验证：每个变更都有完整信息
+      const changeKeys = capturedChanges.map(c => c.key).sort();
+      expect(changeKeys).toEqual(['gridCount', 'gridSpacing', 'maxPosition', 'orderSize']);
+
+      // 验证：每个变更都有旧值和新值
+      for (const change of capturedChanges) {
+        expect(change.oldValue).toBeDefined();
+        expect(change.newValue).toBeDefined();
+        expect(change.oldValue).not.toBe(change.newValue);
+      }
+
+      manager.stopWatching();
+    });
+  });
+  // P2新增结束 ========================================
 });
 
 // ============ 回滚说明 ============

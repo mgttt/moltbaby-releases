@@ -89,6 +89,12 @@ const CONFIG = {
     cooldownAfterTrip: 600,     // 熔断后冷却 10 分钟
   },
 
+  // P1新增：杠杆硬顶机制
+  leverageHardCap: {
+    enabled: true,              // 是否启用杠杆硬顶
+    maxLeverage: 3.0,           // 最大杠杆倍数（硬顶阈值）
+  },
+
   // 应急方向切换 (P0 修复)
   emergencyDirection: 'auto',  // auto/long/short/neutral
 
@@ -239,6 +245,9 @@ let circuitBreakerState = {
   blockedSide: '',       // 熔断中禁止的开仓方向 ('Buy'/'Sell')
   // P0新增：运行时熔断总开关 (默认true)
   active: true,
+  // P1新增：杠杆硬顶阻止新订单标志
+  blockNewOrders: false,
+  leverageHardCapTriggeredAt: 0,  // 杠杆硬顶触发时间
 };
 
 // [硬拦截最小集] A类: API关键失败计数器（认证/签名/系统级）
@@ -350,7 +359,10 @@ function loadState() {
           circuitBreakerState.highWaterMark = 0;
           circuitBreakerState.tripped = false;          // 重启后解除熔断
           circuitBreakerState.recoveryTickCount = 0;
-          logInfo('[熔断] 重启重置: highWaterMark=0, tripped=false (防历史账本污染)');
+          // P1修复：重置杠杆硬顶状态（重启后重新评估）
+          circuitBreakerState.blockNewOrders = false;
+          circuitBreakerState.leverageHardCapTriggeredAt = 0;
+          logInfo('[熔断] 重启重置: highWaterMark=0, tripped=false, blockNewOrders=false (防历史账本污染)');
         }
       }
     }
@@ -366,19 +378,58 @@ function loadState() {
   processedExecIds = {};
 }
 
-// 保存状态
+// 保存状态（P2修复：事务性保存，防止部分写入损坏）
 function saveState() {
-  // P2修复：同步positionDiffState到state，确保7字段完整持久化
-  state.positionDiffState = {
-    initialOffset: positionDiffState.initialOffset || 0,
-    lastDiff: positionDiffState.lastDiff || 0,
-    diffIncreaseCount: positionDiffState.diffIncreaseCount || 0,
-    lastAlertAt: positionDiffState.lastAlertAt || 0,
-    ledgerGapOverCount: positionDiffState.ledgerGapOverCount || 0,
-    ledgerGapHardblocked: positionDiffState.ledgerGapHardblocked || false,
-    lastHardblockAlertAt: positionDiffState.lastHardblockAlertAt || 0,
-  };
-  bridge_stateSet(getStateKey(), JSON.stringify(state));
+  try {
+    // 1. 同步positionDiffState到state，确保7字段完整持久化
+    const positionDiffStateSnapshot = {
+      initialOffset: positionDiffState.initialOffset || 0,
+      lastDiff: positionDiffState.lastDiff || 0,
+      diffIncreaseCount: positionDiffState.diffIncreaseCount || 0,
+      lastAlertAt: positionDiffState.lastAlertAt || 0,
+      ledgerGapOverCount: positionDiffState.ledgerGapOverCount || 0,
+      ledgerGapHardblocked: positionDiffState.ledgerGapHardblocked || false,
+      lastHardblockAlertAt: positionDiffState.lastHardblockAlertAt || 0,
+    };
+    
+    // 2. 数据完整性检查：确保关键字段存在且类型正确
+    if (typeof state !== 'object' || state === null) {
+      logError('[saveState] 完整性检查失败: state不是有效对象');
+      return;
+    }
+    
+    // 3. 构建待保存数据（添加版本号用于未来兼容）
+    const stateToSave = {
+      ...state,
+      positionDiffState: positionDiffStateSnapshot,
+      _saveVersion: 1,           // 版本号，用于未来兼容
+      _saveAt: Date.now(),       // 保存时间戳
+    };
+    
+    // 4. JSON序列化（在try-catch中，失败则不覆盖）
+    let serialized;
+    try {
+      serialized = JSON.stringify(stateToSave);
+    } catch (e) {
+      logError('[saveState] JSON序列化失败: ' + e.message);
+      return;
+    }
+    
+    // 5. 反序列化验证（确保数据可恢复）
+    try {
+      JSON.parse(serialized);
+    } catch (e) {
+      logError('[saveState] 序列化数据验证失败: ' + e.message);
+      return;
+    }
+    
+    // 6. 原子写入：通过bridge_stateSet保存
+    bridge_stateSet(getStateKey(), serialized);
+    
+  } catch (e) {
+    // 任何错误都不应导致state损坏，记录后优雅失败
+    logError('[saveState] 事务性保存失败: ' + e.message);
+  }
 }
 
 // ================================
@@ -586,6 +637,11 @@ function updateMarketRegime(tick) {
  * @returns {boolean} true=应该暂停，false=可以继续
  */
 function shouldSuspendGridTrading() {
+  // P1新增：杠杆硬顶阻止新订单
+  if (circuitBreakerState.blockNewOrders) {
+    return true;
+  }
+  
   if (!CONFIG.enableMarketRegime) {
     return false;
   }
@@ -887,6 +943,62 @@ function checkCircuitBreaker() {
     }
   }
 
+  return false;
+}
+
+// ================================
+// P1新增：杠杆硬顶机制
+// ================================
+
+/**
+ * 检查杠杆硬顶
+ * 当accountLeverageRatio >= maxLeverage时阻止新订单
+ * 降回阈值以下时自动恢复
+ * 
+ * @returns {boolean} true=已触发硬顶（阻止新订单），false=未触发
+ */
+function checkLeverageHardCap() {
+  const lhc = CONFIG.leverageHardCap;
+  
+  // 未启用时跳过
+  if (!lhc || !lhc.enabled) {
+    return false;
+  }
+  
+  const now = Date.now();
+  const maxLev = lhc.maxLeverage || 3.0;
+  const currentLev = state.riskMetrics?.accountLeverageRatio;
+  
+  // 杠杆数据无效时跳过
+  if (currentLev === null || currentLev === undefined || !isFinite(currentLev)) {
+    return false;
+  }
+  
+  // 检查是否触发硬顶
+  if (currentLev >= maxLev) {
+    // 首次触发时告警
+    if (!circuitBreakerState.blockNewOrders) {
+      circuitBreakerState.blockNewOrders = true;
+      circuitBreakerState.leverageHardCapTriggeredAt = now;
+      logWarn('[杠杆硬顶触发] 当前杠杆=' + currentLev.toFixed(2) + 'x >= 阈值=' + maxLev.toFixed(2) + 'x，阻止新订单');
+      try { bridge_tgSend('9号', '[P1告警][杠杆硬顶] 杠杆=' + currentLev.toFixed(2) + 'x 超阈值=' + maxLev.toFixed(2) + 'x，已阻止新订单 (runId=' + state.runId + ')'); } catch(e){}
+      try { bridge_tgSend('1号', '[P1告警][杠杆硬顶] 杠杆=' + currentLev.toFixed(2) + 'x 超阈值 (runId=' + state.runId + ')'); } catch(e){}
+    }
+    return true;
+  }
+  
+  // 已触发过，检查是否恢复
+  if (circuitBreakerState.blockNewOrders && circuitBreakerState.leverageHardCapTriggeredAt > 0) {
+    // 降回阈值以下自动恢复（使用0.9系数避免在阈值附近震荡）
+    const recoveryThreshold = maxLev * 0.9;
+    if (currentLev < recoveryThreshold) {
+      circuitBreakerState.blockNewOrders = false;
+      circuitBreakerState.leverageHardCapTriggeredAt = 0;
+      logInfo('[杠杆硬顶恢复] 当前杠杆=' + currentLev.toFixed(2) + 'x < 恢复阈值=' + recoveryThreshold.toFixed(2) + 'x，恢复新订单');
+      try { bridge_tgSend('9号', '[P1恢复][杠杆硬顶] 杠杆=' + currentLev.toFixed(2) + 'x 恢复正常，恢复新订单 (runId=' + state.runId + ')'); } catch(e){}
+    }
+  }
+  
   return false;
 }
 
@@ -2313,6 +2425,11 @@ function st_heartbeat(tickJson) {
   }
 
   // ================================
+  // P1新增：杠杆硬顶检查
+  // ================================
+  checkLeverageHardCap();
+
+  // ================================
   // P0 修复：应急方向切换
   // ================================
   checkEmergencyDirectionSwitch();
@@ -2616,17 +2733,17 @@ function shouldPlaceOrder(grid, distance) {
 
   const distancePct = (distance * 100).toFixed(2);
 
-  // P0 Debug: 记录 Buy 网格检查
-  if (grid.side === 'Buy') {
-    logDebug('[P0 DEBUG] shouldPlaceOrder Buy gridId=' + grid.id + ' price=' + grid.price.toFixed(4) + ' distance=' + distancePct + '% state=' + grid.state);
-  }
+  // P0 Debug: 记录 Buy 网格检查（已清理）
+  // if (grid.side === 'Buy') {
+  //   logDebug('[P0 DEBUG] shouldPlaceOrder Buy gridId=' + grid.id + ' price=' + grid.price.toFixed(4) + ' distance=' + distancePct + '% state=' + grid.state);
+  // }
 
   // 1. 磁铁检查（双向）
   const magnet = getEffectiveMagnetDistance();
   if (distance > magnet) {
-    if (grid.side === 'Buy') {
-      logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 距离超磁铁: ' + distancePct + '% > ' + (magnet*100).toFixed(2) + '%');
-    }
+    // if (grid.side === 'Buy') {
+    //   logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 距离超磁铁: ' + distancePct + '% > ' + (magnet*100).toFixed(2) + '%');
+    // }
     return false;  // 距离太远
   }
 
@@ -2646,9 +2763,9 @@ function shouldPlaceOrder(grid, distance) {
     const cooldownMs = CONFIG.cooldownSec * 1000;
     const elapsed = Date.now() - grid.lastTriggerTime;
     if (elapsed < cooldownMs) {
-      if (grid.side === 'Buy') {
-        logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 冷却中: ' + (elapsed/1000).toFixed(1) + 's < ' + CONFIG.cooldownSec + 's');
-      }
+      // if (grid.side === 'Buy') {
+      //   logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 冷却中: ' + (elapsed/1000).toFixed(1) + 's < ' + CONFIG.cooldownSec + 's');
+      // }
       return false;  // 冷却中
     }
   }
@@ -2656,9 +2773,9 @@ function shouldPlaceOrder(grid, distance) {
   // 4. 防重复：如果该 grid 已存在活跃订单（但 grid 状态丢了），则修复并跳过
   const existing = findActiveOrderByGridId(grid.id);
   if (existing) {
-    if (grid.side === 'Buy') {
-      logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 已存在活跃单: ' + existing.orderId);
-    }
+    // if (grid.side === 'Buy') {
+    //   logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 已存在活跃单: ' + existing.orderId);
+    // }
     syncGridFromOrder(grid, existing);
     return false;
   }
@@ -2725,9 +2842,9 @@ function shouldPlaceOrder(grid, distance) {
   }
 
   // 6. 通过所有检查，可以触发
-  if (grid.side === 'Buy') {
-    logInfo('[P0 DEBUG] ✨ Buy gridId=' + grid.id + ' 通过所有检查，即将触发! price=' + grid.price.toFixed(4) + ' distance=' + distancePct + '%');
-  }
+  // if (grid.side === 'Buy') {
+  //   logInfo('[P0 DEBUG] ✨ Buy gridId=' + grid.id + ' 通过所有检查，即将触发! price=' + grid.price.toFixed(4) + ' distance=' + distancePct + '%');
+  // }
   logInfo('✨ 触发网格 #' + grid.id + ' ' + grid.side + ' @ ' + grid.price.toFixed(4) + ' (距离 ' + distancePct + '%)');
   return true;
 }
@@ -2776,10 +2893,37 @@ function placeOrder(grid) {
   const directionLabel = CONFIG.direction || 'neutral';
   // P0修复：orderLinkId使用锁定后的字段，确保唯一性
   // fix: Bybit orderLinkId ≤ 45 chars — 去掉 SESSION_ID，runId 取后8位
-  // 格式: gales-{symbol}-{direction}-{runId_last8}-{seq}-{side}
-  // 最长: gales-MYXUSDT-neutral-{8}-{3}-Sell = 37 chars (≤45)
+  // P2修复：使用grid.id+attempts生成确定性orderLinkId，重试时不变
+  // 格式: gales-{symbol}-{direction}-{runId_last8}-g{gridId}a{attempt}-{side}
+  // 最长: gales-MYXUSDT-neutral-12345678-g10a3-Sell = 44 chars (≤45)
   const _runSuffix = String(state.runId).slice(-8);
-  const orderLinkId = ('gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-' + _runSuffix + '-' + (state.orderSeq++) + '-' + grid.side).slice(0, 45);
+  const orderLinkId = ('gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-' + _runSuffix + '-g' + grid.id + 'a' + grid.attempts + '-' + grid.side).slice(0, 45);
+
+  // P2修复：幂等性检查 - 查询Bybit是否已有该orderLinkId的订单
+  try {
+    const fn = globalThis.bridge_getOpenOrders;
+    if (typeof fn === 'function') {
+      const ordersJson = fn(CONFIG.symbol);
+      if (ordersJson && ordersJson !== 'null' && ordersJson !== '[]') {
+        const orders = JSON.parse(ordersJson);
+        if (Array.isArray(orders)) {
+          const existingBybitOrder = orders.find(function(o) {
+            return o.orderLinkId === orderLinkId;
+          });
+          if (existingBybitOrder) {
+            // 订单已存在，同步状态并跳过下单
+            logInfo('[P2幂等] 订单已存在，同步状态: orderLinkId=' + orderLinkId + ' orderId=' + existingBybitOrder.orderId);
+            syncGridFromOrder(grid, existingBybitOrder);
+            state.isPlacingOrder = false;
+            return;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    logDebug('[P2幂等] 检查已有订单失败: ' + e.message);
+    // 继续尝试下单（不阻塞）
+  }
 
   // 记录"有下单行为"（用于 autoRecenter 判断）
   state.lastPlaceTick = state.tickCount || 0;

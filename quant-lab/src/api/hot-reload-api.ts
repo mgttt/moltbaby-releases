@@ -163,6 +163,11 @@ class HotReloadAPI {
             result = this.handleListSnapshots(requestData);
             break;
           
+          // P2新增：获取配置变更历史
+          case 'GET /api/v1/config/history':
+            result = this.handleConfigHistory(requestData);
+            break;
+          
           case 'GET /api/v1/status':
             result = this.handleStatus(requestData);
             break;
@@ -384,6 +389,49 @@ class HotReloadAPI {
       success: true,
       strategyId,
       snapshots: snapshots.sort((a, b) => b.timestamp - a.timestamp),
+    };
+  }
+
+  /**
+   * 获取配置变更历史（P2新增）
+   */
+  private handleConfigHistory(request: { strategyId: string }): any {
+    const { strategyId } = request;
+    const strategy = this.strategyMap.get(strategyId);
+    
+    if (!strategy) {
+      return {
+        success: false,
+        strategyId,
+        error: `Strategy not found: ${strategyId}`,
+      };
+    }
+
+    // 获取配置热重载管理器的变更历史
+    const configManager = (strategy as any).configManager;
+    if (!configManager || typeof configManager.getConfigHistory !== 'function') {
+      return {
+        success: true,
+        strategyId,
+        history: [],
+        message: '该策略未启用配置热重载',
+      };
+    }
+
+    const history = configManager.getConfigHistory();
+    
+    return {
+      success: true,
+      strategyId,
+      history: history.map((record: any) => ({
+        key: record.key,
+        oldValue: record.oldValue,
+        newValue: record.newValue,
+        timestamp: record.timestamp,
+        version: record.version,
+        timeFormatted: new Date(record.timestamp).toISOString(),
+      })),
+      count: history.length,
     };
   }
 

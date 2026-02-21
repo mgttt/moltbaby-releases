@@ -51,6 +51,10 @@ export interface ConfigChange {
   timestamp: number;
 }
 
+export interface ConfigChangeRecord extends ConfigChange {
+  version: number;  // P2新增：变更时的版本号
+}
+
 export interface ConfigSnapshot {
   config: Record<string, any>;
   timestamp: number;
@@ -86,6 +90,9 @@ export class ConfigHotReloadManager {
   private onValidationFail?: (errors: string[]) => void; // P1新增
   private events: Partial<ConfigHotReloadEvents> = {};
   private snapshots: ConfigSnapshot[] = [];
+  // P2新增：配置变更历史（最多10条）
+  private configHistory: ConfigChangeRecord[] = [];
+  private readonly MAX_HISTORY_SIZE = 10;
   private currentVersion: number = 0;
   private isReloading: boolean = false;
   private lastReloadTime: number = 0;
@@ -433,6 +440,9 @@ export class ConfigHotReloadManager {
         this.log(`  - ${change.key}: ${oldVal} → ${newVal}`);
       }
 
+      // P2新增：记录到配置变更历史
+      this.recordConfigHistory(changes);
+
       // 6. 触发事件
       this.events.onConfigChange?.(changes);
       this.events.onConfigReload?.(this.config);
@@ -636,6 +646,48 @@ export class ConfigHotReloadManager {
       isWatching: this.watcher !== null,
     };
   }
+
+  // P2新增：配置变更历史管理 ========================================
+
+  /**
+   * 记录配置变更历史
+   */
+  private recordConfigHistory(changes: ConfigChange[]): void {
+    const now = Date.now();
+    for (const change of changes) {
+      this.configHistory.push({
+        key: change.key,
+        oldValue: change.oldValue,
+        newValue: change.newValue,
+        timestamp: now,
+        version: this.currentVersion,
+      });
+    }
+
+    // 限制历史记录数量（最多10条）
+    if (this.configHistory.length > this.MAX_HISTORY_SIZE) {
+      this.configHistory = this.configHistory.slice(-this.MAX_HISTORY_SIZE);
+    }
+
+    this.log(`[ConfigHotReload] 已记录 ${changes.length} 项变更到历史 (共 ${this.configHistory.length} 条)`);
+  }
+
+  /**
+   * 获取配置变更历史
+   */
+  getConfigHistory(): ConfigChangeRecord[] {
+    return [...this.configHistory];
+  }
+
+  /**
+   * 清除配置变更历史
+   */
+  clearConfigHistory(): void {
+    this.configHistory = [];
+    this.log('[ConfigHotReload] 配置变更历史已清除');
+  }
+
+  // P2新增结束 ========================================
 
   /**
    * 日志
