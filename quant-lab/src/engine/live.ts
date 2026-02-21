@@ -385,7 +385,7 @@ export class LiveEngine {
       throw new Error(`Position size ${quantity} exceeds max ${this.config.maxPositionSize}`);
     }
     
-    console.log(`[LiveEngine] [P0 DEBUG] buy() 收到参数: symbol=${symbol}, qty=${quantity}, price=${price}, orderLinkId=${orderLinkId}`);
+    logger.debug(`buy() symbol=${symbol} qty=${quantity} price=${price} orderLinkId=${orderLinkId}`);
     
     let order: Order;
     
@@ -441,7 +441,7 @@ export class LiveEngine {
    * 卖出（开空仓或平多仓）
    */
   private async sell(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order> {
-    console.log(`[LiveEngine] [P0 DEBUG] sell() 收到参数: symbol=${symbol}, qty=${quantity}, price=${price}, orderLinkId=${orderLinkId}`);
+    logger.debug(`sell() symbol=${symbol} qty=${quantity} price=${price} orderLinkId=${orderLinkId}`);
     
     let order: Order;
     
