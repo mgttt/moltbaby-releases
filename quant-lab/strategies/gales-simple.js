@@ -1757,9 +1757,9 @@ function alignAccountingFromExchange() {
     const oldLedger = state.positionNotional || 0;
     state.positionNotional = signedExchangePos;
     
-    // 初始偏移设为0（因为账本已同步）
-    positionDiffState.initialOffset = 0;
-    state.initialOffset = 0;
+    // P1修复：不再这里设置initialOffset（由调用方在调用前设置）
+    // positionDiffState.initialOffset = 0;
+    // state.initialOffset = 0;
     
     logInfo('[账本对齐] 强制同步: exchangePos=' + signedExchangePos.toFixed(2) + 
             ' oldLedger=' + oldLedger.toFixed(2) + 
@@ -1954,12 +1954,36 @@ function st_init() {
     bridge_onRunIdChange(state.runId);
   }
   
-  // 差值监控基线保留为0（不影响账本本身）
-  positionDiffState.initialOffset = 0;
-  state.initialOffset = 0;
-  logInfo('[Init] 差值监控initialOffset=0（账本由回放重建）');
+  // P1修复：initialOffset由下方代码在账本对齐前计算（基于历史持仓差值）
+  // positionDiffState.initialOffset = 0;
+  // state.initialOffset = 0;
+  // logInfo('[Init] 差值监控initialOffset=0（账本由回放重建）');
 
   // P1修复：从交易所持仓对齐账本（直接同步）
+  // 注意：在对齐前计算initialOffset，确保历史差值被正确记录
+  let preAlignExchangePos = 0;
+  let preAlignLedgerPos = state.positionNotional || 0;
+  try {
+    const positionJson = bridge_getPosition(CONFIG.symbol);
+    if (positionJson && positionJson !== 'null') {
+      const position = JSON.parse(positionJson);
+      const exchangePos = position.positionNotional || 0;
+      const isShort = position.side === 'Sell' || position.side === 'SHORT';
+      preAlignExchangePos = isShort ? -Math.abs(exchangePos) : exchangePos;
+    }
+  } catch (e) {
+    logWarn('[Init] 获取交易所持仓失败: ' + e);
+  }
+  
+  // P1修复：在对齐前计算initialOffset = 交易所持仓 - 策略账本
+  // 这样对齐后，差值监控将基于"新增差异"而非历史遗留差异
+  const calculatedOffset = preAlignExchangePos - preAlignLedgerPos;
+  positionDiffState.initialOffset = calculatedOffset;
+  state.initialOffset = calculatedOffset;
+  logInfo('[Init] P1: 计算initialOffset=' + calculatedOffset.toFixed(2) + 
+          ' (exchange=' + preAlignExchangePos.toFixed(2) + ' - ledger=' + preAlignLedgerPos.toFixed(2) + ')');
+  
+  // 然后执行账本对齐
   const alignResult = alignAccountingFromExchange();
   if (alignResult.aligned) {
     logInfo('[Init][账本对齐] 强制同步完成: ledger=' + alignResult.newLedger.toFixed(2));
@@ -2165,8 +2189,8 @@ function st_heartbeat(tickJson) {
   state.lastPrice = tick.price;
   state.tickCount = (state.tickCount || 0) + 1;
 
-  // P0止血：临时禁用差值告警（避免噪声）
-  // checkPositionDiff();
+  // P1修复：恢复差值监控（原P0临时禁用，现重新启用）
+  checkPositionDiff();
 
   // P0 修复：每60心跳更新exchangePosition（从cache读取，cache由QuickJSStrategy.onTick刷新）
   if (state.tickCount % 60 === 0) {
