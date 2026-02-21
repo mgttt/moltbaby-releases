@@ -301,6 +301,16 @@ class MetricsAPI {
             break;
 
           default:
+            // 带query参数的路由单独处理
+            if (method === 'GET' && path.startsWith('/api/v1/metrics/timeseries')) {
+              const url = new URL(path, 'http://localhost');
+              const name = url.searchParams.get('name') || 'adx';
+              const limit = parseInt(url.searchParams.get('limit') || '100', 10);
+              const strategyId = url.searchParams.get('strategyId');
+              result = this.handleGetTimeseries({ name, limit, strategyId });
+              break;
+            }
+          // fallthrough to 404
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Not Found' }));
             return;
@@ -394,6 +404,29 @@ class MetricsAPI {
         count: this.strategyMap.size,
       };
     }
+  }
+
+  /**
+   * 获取时序指标（最近N条）
+   */
+  private handleGetTimeseries({ name, limit, strategyId }: { name: string; limit: number; strategyId?: string | null }): any {
+    const results: Array<{ timestamp: number; value: number; strategyId: string }> = [];
+
+    for (const [sid, strategy] of this.strategyMap.entries()) {
+      if (strategyId && sid !== strategyId) continue;
+      const table = (strategy as any).getMetricsTable?.();
+      if (!table) continue;
+      const rows: any[] = table.filter?.((row: any) => row.name === name) || [];
+      for (const row of rows) {
+        results.push({ timestamp: Number(row.timestamp), value: Number(row.value), strategyId: sid });
+      }
+    }
+
+    // 按时间升序，取最近N条
+    results.sort((a, b) => a.timestamp - b.timestamp);
+    const sliced = results.slice(-limit);
+
+    return { success: true, name, data: sliced, count: sliced.length };
   }
 
   /**

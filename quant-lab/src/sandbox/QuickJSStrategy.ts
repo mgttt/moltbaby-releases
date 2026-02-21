@@ -1984,7 +1984,7 @@ export class QuickJSStrategy {
       const strategyId = this.config.strategyId;
       
       try {
-        this.metricsTable.addRow({ timestamp, name, value, strategyId });
+        this.metricsTable.append({ timestamp, name, value, strategyId });
         logger.debug(`[QuickJSStrategy] 写入指标: ${name}=${value}, strategy=${strategyId}`);
         return this.ctx!.newString(JSON.stringify({ success: true }));
       } catch (error: any) {
@@ -2306,5 +2306,12 @@ export class QuickJSStrategy {
     this.simPosition = { symbol: '', side: 'FLAT', qty: 0, avgPrice: 0 };
     this.runningSimPnl = 0;
     logger.info(`[QuickJSStrategy] 模拟PnL已重置`);
+  }
+
+  /**
+   * P1新增：获取metricsTable（用于API层查询）
+   */
+  getMetricsTable(): ColumnarTable {
+    return this.metricsTable;
   }
 }
