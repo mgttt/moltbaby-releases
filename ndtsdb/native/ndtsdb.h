@@ -97,13 +97,24 @@ QueryResult* ndtsdb_query(NDTSDB* db, const Query* query);
 QueryResult* ndtsdb_query_all(NDTSDB* db);
 
 /**
- * 按symbol过滤查询
+ * 按时间范围查询
+ * @param db 数据库句柄
+ * @param since_ms 起始时间戳（毫秒，包含），-1表示无限制
+ * @param until_ms 结束时间戳（毫秒，包含），-1表示无限制
+ * @return 查询结果，需用 ndtsdb_free_result 释放
+ */
+QueryResult* ndtsdb_query_time_range(NDTSDB* db, int64_t since_ms, int64_t until_ms);
+
+/**
+ * 按symbol和时间范围联合过滤查询
  * @param db 数据库句柄
  * @param symbols symbol名称数组
  * @param n_symbols symbol数量
+ * @param since_ms 起始时间戳（毫秒，包含），-1表示无限制
+ * @param until_ms 结束时间戳（毫秒，包含），-1表示无限制
  * @return 查询结果，需用 ndtsdb_free_result 释放
  */
-QueryResult* ndtsdb_query_filtered(NDTSDB* db, const char** symbols, int n_symbols);
+QueryResult* ndtsdb_query_filtered_time(NDTSDB* db, const char** symbols, int n_symbols, int64_t since_ms, int64_t until_ms);
 
 /**
  * 释放查询结果

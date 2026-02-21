@@ -1762,6 +1762,147 @@ QueryResult* ndtsdb_query_filtered(NDTSDB* db, const char** symbols, int n_symbo
     return r;
 }
 
+// ============ query_time_range: 按时间范围查询 ============
+QueryResult* ndtsdb_query_time_range(NDTSDB* db, int64_t since_ms, int64_t until_ms) {
+    (void)db;
+    
+    // 计算匹配的总条数
+    uint32_t total_count = 0;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        for (uint32_t j = 0; j < sd->count; j++) {
+            int64_t ts = sd->klines[j].timestamp;
+            if ((since_ms < 0 || ts >= since_ms) && (until_ms < 0 || ts <= until_ms)) {
+                total_count++;
+            }
+        }
+    }
+    
+    if (total_count == 0) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 分配结果数组
+    ResultRow* result_rows = (ResultRow*)malloc(total_count * sizeof(ResultRow));
+    if (!result_rows) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 填充匹配的数据
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        for (uint32_t j = 0; j < sd->count; j++) {
+            int64_t ts = sd->klines[j].timestamp;
+            if ((since_ms < 0 || ts >= since_ms) && (until_ms < 0 || ts <= until_ms)) {
+                result_rows[idx].row = sd->klines[j];
+                strncpy(result_rows[idx].symbol, sd->symbol, 31);
+                result_rows[idx].symbol[31] = '\0';
+                strncpy(result_rows[idx].interval, sd->interval, 15);
+                result_rows[idx].interval[15] = '\0';
+                idx++;
+            }
+        }
+    }
+    
+    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+    r->rows = (KlineRow*)result_rows;
+    r->count = total_count;
+    r->capacity = 0xDEADBEEF;
+    return r;
+}
+
+// ============ query_filtered_time: symbol+时间联合过滤 ============
+QueryResult* ndtsdb_query_filtered_time(NDTSDB* db, const char** symbols, int n_symbols, int64_t since_ms, int64_t until_ms) {
+    (void)db;
+    
+    if (!symbols || n_symbols <= 0) {
+        // 无symbol过滤，退化为时间范围查询
+        return ndtsdb_query_time_range(db, since_ms, until_ms);
+    }
+    
+    // 计算匹配的总条数
+    uint32_t total_count = 0;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        // 检查symbol是否在过滤列表中
+        int match_symbol = 0;
+        for (int s = 0; s < n_symbols; s++) {
+            if (strcmp(sd->symbol, symbols[s]) == 0) {
+                match_symbol = 1;
+                break;
+            }
+        }
+        if (!match_symbol) continue;
+        
+        for (uint32_t j = 0; j < sd->count; j++) {
+            int64_t ts = sd->klines[j].timestamp;
+            if ((since_ms < 0 || ts >= since_ms) && (until_ms < 0 || ts <= until_ms)) {
+                total_count++;
+            }
+        }
+    }
+    
+    if (total_count == 0) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 分配结果数组
+    ResultRow* result_rows = (ResultRow*)malloc(total_count * sizeof(ResultRow));
+    if (!result_rows) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        r->rows = NULL;
+        r->count = 0;
+        r->capacity = 0;
+        return r;
+    }
+    
+    // 填充匹配的数据
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        // 检查symbol是否在过滤列表中
+        int match_symbol = 0;
+        for (int s = 0; s < n_symbols; s++) {
+            if (strcmp(sd->symbol, symbols[s]) == 0) {
+                match_symbol = 1;
+                break;
+            }
+        }
+        if (!match_symbol) continue;
+        
+        for (uint32_t j = 0; j < sd->count; j++) {
+            int64_t ts = sd->klines[j].timestamp;
+            if ((since_ms < 0 || ts >= since_ms) && (until_ms < 0 || ts <= until_ms)) {
+                result_rows[idx].row = sd->klines[j];
+                strncpy(result_rows[idx].symbol, sd->symbol, 31);
+                result_rows[idx].symbol[31] = '\0';
+                strncpy(result_rows[idx].interval, sd->interval, 15);
+                result_rows[idx].interval[15] = '\0';
+                idx++;
+            }
+        }
+    }
+    
+    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+    r->rows = (KlineRow*)result_rows;
+    r->count = total_count;
+    r->capacity = 0xDEADBEEF;
+    return r;
+}
+
 int64_t ndtsdb_get_latest_timestamp(NDTSDB* db, const char* symbol, const char* interval) {
     (void)db;
     SymbolData* sd = find_or_create_symbol(symbol, interval);
