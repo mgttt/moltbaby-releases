@@ -732,8 +732,23 @@ function cancelAllOrders() {
 // P0 修复：熔断检查
 // ================================
 
+/**
+ * 熔断检查 - 多层防护体系
+ * 
+ * 设计思路：
+ * 1. 回撤熔断是最后防线，一旦触发立即停止所有交易
+ * 2. 仓位熔断采用"软限制"，仅阻止新开仓，不撤现有单
+ * 3. 价格偏离已降级为告警（不拦截），避免误杀正常波动
+ * 4. 账本差值硬拦截用于检测策略与交易所状态不一致
+ * 
+ * 恢复机制：
+ * - 回撤熔断：需冷却期+连续3个心跳满足恢复条件
+ * - 仓位限制：仓位降回阈值以下立即恢复
+ * 
+ * @returns {boolean} true=熔断中（应停止交易），false=正常交易
+ */
 function checkCircuitBreaker() {
-  // P0新增: 运行时总开关检查
+  // P0新增: 运行时总开关检查 - 允许紧急情况下完全禁用熔断检查
   if (!circuitBreakerState.active) {
     logDebug('[熔断检查] 熔断检查已暂停(active=false)');
     return false;
@@ -744,20 +759,24 @@ function checkCircuitBreaker() {
   const now = Date.now();
   const cb = CONFIG.circuitBreaker;
   
-  // 冷却期内检查恢复条件
+  // ===== 冷却期恢复逻辑 =====
+  // 为什么需要冷却期：防止熔断后立即恢复又立即触发（震荡）
+  // 为什么用effectivePosition：取策略内部和交易所的较大值，防止单方数据异常导致误判
   if (circuitBreakerState.tripped) {
     const elapsed = (now - circuitBreakerState.tripAt) / 1000;
     if (elapsed < cb.cooldownAfterTrip) {
-      return true;  // 仍在冷却期
+      return true;  // 仍在冷却期，禁止交易
     }
     
     // P0修复：熔断震荡 - 使用effectivePosition判断恢复条件
+    // 为什么用positionRatio < maxPositionRatio：确保仓位确实回落到安全水平
     const effectivePos = Math.max(
       Math.abs(state.positionNotional || 0),
       Math.abs(state.exchangePosition || 0)
     );
     const positionRatio = effectivePos / CONFIG.maxPosition;
     if (positionRatio < cb.maxPositionRatio) {
+      // 为什么需要连续3个心跳：防止在阈值附近震荡（触发-恢复-触发循环）
       circuitBreakerState.recoveryTickCount = (circuitBreakerState.recoveryTickCount || 0) + 1;
       if (circuitBreakerState.recoveryTickCount >= 3) {
         // 连续3个心跳满足条件，重置熔断
@@ -765,9 +784,9 @@ function checkCircuitBreaker() {
         circuitBreakerState.reason = '';
         circuitBreakerState.recoveryTickCount = 0;
         circuitBreakerState.blockedSide = '';
-        // P1修复：恢复时重置highWaterMark为当前仓位，避免震荡循环
+        // P1修复：恢复时重置highWaterMark为当前仓位
+        // 为什么：避免用历史峰值计算新回撤，导致立即再次触发
         circuitBreakerState.highWaterMark = effectivePos;
-        // P1-debug: 打印详细恢复信息
         logInfo('[熔断恢复] 仓位回落，恢复交易' +
                 ' | positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
                 ' | effectivePos=' + effectivePos.toFixed(2) +
@@ -777,41 +796,45 @@ function checkCircuitBreaker() {
         return false;
       }
     } else {
-      // 不满足条件，重置计数
+      // 不满足条件，重置计数 - 为什么：确保连续满足条件，非累积
       circuitBreakerState.recoveryTickCount = 0;
     }
     
     return true;  // 冷却期结束但仓位未回落，继续熔断
   }
   
-  // P0修复：熔断机制使用effectivePosition（取策略内部和交易所的较大值）
+  // ===== 回撤熔断检查 =====
+  // 为什么用effectivePosition：策略账本和交易所数据可能不一致，取较大值更保守
   const effectivePosition = Math.max(
     Math.abs(state.positionNotional || 0),
     Math.abs(state.exchangePosition || 0)
   );
   
-  // 1. 回撤熔断
+  // 回撤计算基于highWaterMark（历史最高仓位）
+  // 为什么hwm用maxPosition初始化：避免初始小仓位时轻微回撤就触发
   if (circuitBreakerState.highWaterMark === 0) {
     // 冷启动：用当前权益初始化，没持仓时跳过回撤检查
     if (effectivePosition === 0) {
-      // 没持仓不检查回撤（避免 0/maxPosition = 100% 误触发）
+      // 为什么hwm保持0：无持仓时不计算回撤，避免0除法
       circuitBreakerState.highWaterMark = 0;
     } else {
       circuitBreakerState.highWaterMark = effectivePosition;
     }
   }
   
+  // 更新历史最高水位
   if (effectivePosition > circuitBreakerState.highWaterMark) {
     circuitBreakerState.highWaterMark = effectivePosition;
   }
   
-  // highWaterMark 为 0 时跳过回撤检查（没有持仓历史，避免 0 除法误触发）
+  // highWaterMark 为 0 时跳过回撤检查（没有持仓历史）
   if (circuitBreakerState.highWaterMark > 0) {
     const drawdown = (circuitBreakerState.highWaterMark - effectivePosition) / circuitBreakerState.highWaterMark;
     const ddPct = (drawdown * 100).toFixed(2);
     const ddBase = ' drawdown=' + ddPct + '% | hwm=' + circuitBreakerState.highWaterMark.toFixed(2) + ' | pos=' + effectivePosition.toFixed(2);
 
-    // [硬拦截最小集] D类:账户生存 — 40%最后防线（硬拦）
+    // [硬拦截最小集] D类:账户生存 — 40%最后防线
+    // 为什么是40%：基于历史回测，策略在40%回撤后恢复概率极低，保护剩余本金
     if (drawdown > cb.maxDrawdown) {
       circuitBreakerState.tripped = true;
       circuitBreakerState.reason = '回撤熔断';
@@ -823,10 +846,10 @@ function checkCircuitBreaker() {
       return true;
     }
 
-    // P0修复：恢复25%和15%预警（原99%相当于禁用）
+    // 为什么有25%/15%两级预警：给操作者足够时间干预，避免直接触发硬拦截
     if (drawdown > 0.25) {
       const lastWarn25 = circuitBreakerState.lastDrawdownWarn25At || 0;
-      if (now - lastWarn25 > 300000) {  // 5分钟防抖
+      if (now - lastWarn25 > 300000) {  // 5分钟防抖 - 为什么：避免刷屏
         circuitBreakerState.lastDrawdownWarn25At = now;
         logWarn('[告警-回撤25%]' + ddBase + ' (不拦截，继续运行)');
         try { bridge_tgSend('9号', '[告警][回撤>25%] ' + ddPct + '%，注意监控 (runId=' + state.runId + ')'); } catch(e){}
@@ -951,16 +974,23 @@ function checkCircuitBreaker() {
 // ================================
 
 /**
- * 检查杠杆硬顶
- * 当accountLeverageRatio >= maxLeverage时阻止新订单
- * 降回阈值以下时自动恢复
+ * 检查杠杆硬顶 - 防止过度杠杆导致爆仓风险
+ * 
+ * 设计思路：
+ * 1. 硬顶与熔断不同：硬顶只阻止新订单，不取消现有订单
+ * 2. 为什么用accountLeverageRatio：直接反映账户整体杠杆水平，比仓位更直观
+ * 3. 恢复阈值用0.9系数：避免在阈值附近震荡（触发-恢复-触发循环）
+ * 
+ * 与熔断的区别：
+ * - 熔断：回撤触发，停止所有交易，取消所有订单
+ * - 硬顶：杠杆触发，只阻止新订单，保留现有持仓和订单
  * 
  * @returns {boolean} true=已触发硬顶（阻止新订单），false=未触发
  */
 function checkLeverageHardCap() {
   const lhc = CONFIG.leverageHardCap;
   
-  // 未启用时跳过
+  // 未启用时跳过 - 为什么保留开关：某些策略可能不需要杠杆限制
   if (!lhc || !lhc.enabled) {
     return false;
   }
@@ -969,14 +999,15 @@ function checkLeverageHardCap() {
   const maxLev = lhc.maxLeverage || 3.0;
   const currentLev = state.riskMetrics?.accountLeverageRatio;
   
-  // 杠杆数据无效时跳过
+  // 杠杆数据无效时跳过 - 为什么：exchange可能未返回杠杆数据，不能误拦
   if (currentLev === null || currentLev === undefined || !isFinite(currentLev)) {
     return false;
   }
   
-  // 检查是否触发硬顶
+  // ===== 硬顶触发检查 =====
+  // 为什么用>=而非>：等于阈值时也应触发，确保不超限
   if (currentLev >= maxLev) {
-    // 首次触发时告警
+    // 首次触发时告警 - 为什么检查blockNewOrders：避免重复告警刷屏
     if (!circuitBreakerState.blockNewOrders) {
       circuitBreakerState.blockNewOrders = true;
       circuitBreakerState.leverageHardCapTriggeredAt = now;
@@ -987,9 +1018,11 @@ function checkLeverageHardCap() {
     return true;
   }
   
-  // 已触发过，检查是否恢复
+  // ===== 硬顶恢复检查 =====
+  // 为什么检查leverageHardCapTriggeredAt > 0：确保是硬顶触发的block，而非其他原因
   if (circuitBreakerState.blockNewOrders && circuitBreakerState.leverageHardCapTriggeredAt > 0) {
     // 降回阈值以下自动恢复（使用0.9系数避免在阈值附近震荡）
+    // 为什么用0.9：如果阈值3.0，恢复阈值2.7，需要降0.3才恢复，避免震荡
     const recoveryThreshold = maxLev * 0.9;
     if (currentLev < recoveryThreshold) {
       circuitBreakerState.blockNewOrders = false;
@@ -2718,6 +2751,24 @@ function getEffectiveMagnetDistance() {
   return d;
 }
 
+/**
+ * 判断是否应该在该网格下单 - 多层准入检查
+ * 
+ * 设计思路：
+ * 1. 为什么分层检查：先检查"是否允许交易"（熔断/ADX/仓位限制），再检查"是否满足条件"（磁铁/冷却/防重）
+ * 2. 为什么用effectivePosition：策略账本和交易所数据可能不一致，取较大值防止 underestimation
+ * 3. 为什么考虑pending订单：防止并发下单导致超限（已挂但未成交的订单也算入风险敞口）
+ * 
+ * 检查顺序逻辑：
+ * 1. 市场状态（ADX极强趋势）→ 2. 熔断限制 → 3. 磁铁距离 → 4. 活跃订单上限 → 5. 冷却时间
+ * 6. 防重复 → 7. 方向限制 → 8. 仓位限制
+ * 
+ * 前置条件越严格越先检查，减少无效计算
+ * 
+ * @param {Object} grid - 网格对象
+ * @param {number} distance - 当前价格与网格目标价的距离（百分比）
+ * @returns {boolean} true=可以下单，false=条件不满足
+ */
 function shouldPlaceOrder(grid, distance) {
   // ADX市场状态检测：极强趋势时暂停下单
   if (shouldSuspendGridTrading()) {
@@ -2733,24 +2784,19 @@ function shouldPlaceOrder(grid, distance) {
 
   const distancePct = (distance * 100).toFixed(2);
 
-  // P0 Debug: 记录 Buy 网格检查（已清理）
-  // if (grid.side === 'Buy') {
-  //   logDebug('[P0 DEBUG] shouldPlaceOrder Buy gridId=' + grid.id + ' price=' + grid.price.toFixed(4) + ' distance=' + distancePct + '% state=' + grid.state);
-  // }
-
-  // 1. 磁铁检查（双向）
+  // ===== 1. 磁铁距离检查 =====
+  // 为什么需要磁铁：网格策略只在价格接近网格线时挂单，避免远处挂单被瞬时波动触发
   const magnet = getEffectiveMagnetDistance();
   if (distance > magnet) {
-    // if (grid.side === 'Buy') {
-    //   logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 距离超磁铁: ' + distancePct + '% > ' + (magnet*100).toFixed(2) + '%');
-    // }
-    return false;  // 距离太远
+    return false;  // 距离太远，不在磁铁范围内
   }
 
-  // 2. 活跃订单上限（治理）
+  // ===== 2. 活跃订单上限检查 =====
+  // 为什么需要上限：极端行情可能触发大量网格同时挂单，导致订单过多难以管理
   const active = countActiveOrders();
   if (CONFIG.maxActiveOrders > 0 && active >= CONFIG.maxActiveOrders) {
     const now = Date.now();
+    // 为什么5分钟防抖：避免频繁告警刷屏
     if (now - (runtime.activeOrders.lastWarnAt || 0) > 5 * 60 * 1000) {
       runtime.activeOrders.lastWarnAt = now;
       logWarn('[活跃单上限] active=' + active + ' max=' + CONFIG.maxActiveOrders + '，暂停新挂单');
@@ -2758,36 +2804,34 @@ function shouldPlaceOrder(grid, distance) {
     return false;
   }
 
-  // 3. 冷却时间检查（防止重复触发）
+  // ===== 3. 冷却时间检查 =====
+  // 为什么需要冷却：防止同一网格被频繁触发（如价格在网格线附近震荡）
   if (grid.lastTriggerTime) {
     const cooldownMs = CONFIG.cooldownSec * 1000;
     const elapsed = Date.now() - grid.lastTriggerTime;
     if (elapsed < cooldownMs) {
-      // if (grid.side === 'Buy') {
-      //   logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 冷却中: ' + (elapsed/1000).toFixed(1) + 's < ' + CONFIG.cooldownSec + 's');
-      // }
-      return false;  // 冷却中
+      return false;  // 冷却中，防止重复触发
     }
   }
 
-  // 4. 防重复：如果该 grid 已存在活跃订单（但 grid 状态丢了），则修复并跳过
+  // ===== 4. 防重复检查 =====
+  // 为什么需要：极端情况下grid状态可能丢失，但交易所已有订单，避免重复下单
   const existing = findActiveOrderByGridId(grid.id);
   if (existing) {
-    // if (grid.side === 'Buy') {
-    //   logDebug('[P0 DEBUG] Buy gridId=' + grid.id + ' 已存在活跃单: ' + existing.orderId);
-    // }
+    // 状态不一致，同步后跳过
     syncGridFromOrder(grid, existing);
     return false;
   }
 
-  // 5. 方向检查（总裁决策修改：允许止盈单）
+  // ===== 5. 方向限制检查 =====
+  // 为什么允许止盈单：long模式下有多仓时允许Sell止盈，short模式下有空仓时允许Buy回补
   if (CONFIG.direction === 'long' && grid.side === 'Sell') {
     // long模式：有多仓(>0)时允许Sell止盈，无仓(<=0)时禁止Sell开空
     if (state.positionNotional <= 0) {
       logDebug('[方向限制] long 模式下无多仓时禁止 Sell 开空 gridId=' + grid.id);
       return false;
     }
-    // 有多仓时允许Sell止盈（不return false）
+    // 有多仓时允许Sell止盈
   }
   if (CONFIG.direction === 'short' && grid.side === 'Buy') {
     // short模式：有空仓(<0)时允许Buy回补，无仓(>=0)时禁止Buy做多
@@ -2795,7 +2839,7 @@ function shouldPlaceOrder(grid, distance) {
       logDebug('[方向限制] short 模式下无空仓时禁止 Buy 做多 gridId=' + grid.id);
       return false;
     }
-    // 有空仓时允许Buy回补（不return false）
+    // 有空仓时允许Buy回补
   }
 
   // P1修复：熔断震荡 - 熔断中禁止超限方向开仓
@@ -2804,7 +2848,9 @@ function shouldPlaceOrder(grid, distance) {
     return false;
   }
 
-  // P0修复：仓位检查使用effectivePosition（考虑交易所真实持仓）
+  // ===== 6. 仓位限制检查 =====
+  // 为什么用effectivePosition：取策略账本和交易所的较大值，防止 underestimation
+  // 为什么考虑pending订单：已挂但未成交的订单也算入风险敞口，防止并发超限
   const effectivePos = Math.max(
     Math.abs(state.positionNotional || 0),
     Math.abs(state.exchangePosition || 0)
@@ -2813,25 +2859,24 @@ function shouldPlaceOrder(grid, distance) {
   const orderNotional = CONFIG.orderSize;
 
   if (grid.side === 'Buy') {
-    // short 模式下，Buy 只是虚仓，不限制
+    // short 模式下，Buy 只是虚仓（平仓），不限制 - 为什么：short策略的Buy是减少风险
     if (CONFIG.direction !== 'short') {
       const pendingBuy = calcPendingNotional('Buy');
-      // 使用effectivePosition评估最坏情况
+      // 为什么加pendingBuy：已挂但未成交的Buy订单也算入风险敞口
       const afterFill = effectivePosSigned + pendingBuy + orderNotional;
       if (afterFill > CONFIG.maxPosition) {
         warnPositionLimit('Buy', grid.id, effectivePosSigned + pendingBuy, afterFill);
         return false;
       }
     }
-    // 回到安全区后，允许下次"再次进入超限"时报警
+    // 回到安全区后，允许下次"再次进入超限"时报警 - 为什么：防止重复告警
     runtime.posLimit.buyOver = false;
   }
 
   if (grid.side === 'Sell') {
-    // long 模式下，Sell 只是虚仓，不限制
+    // long 模式下，Sell 只是虚仓（平仓），不限制 - 为什么：long策略的Sell是减少风险
     if (CONFIG.direction !== 'long') {
       const pendingSell = calcPendingNotional('Sell');
-      // 使用effectivePosition评估最坏情况
       const afterFill = effectivePosSigned - pendingSell - orderNotional;
       if (afterFill < -CONFIG.maxPosition) {
         warnPositionLimit('Sell', grid.id, effectivePosSigned - pendingSell, afterFill);
@@ -2841,10 +2886,7 @@ function shouldPlaceOrder(grid, distance) {
     runtime.posLimit.sellOver = false;
   }
 
-  // 6. 通过所有检查，可以触发
-  // if (grid.side === 'Buy') {
-  //   logInfo('[P0 DEBUG] ✨ Buy gridId=' + grid.id + ' 通过所有检查，即将触发! price=' + grid.price.toFixed(4) + ' distance=' + distancePct + '%');
-  // }
+  // ===== 通过所有检查 =====
   logInfo('✨ 触发网格 #' + grid.id + ' ' + grid.side + ' @ ' + grid.price.toFixed(4) + ' (距离 ' + distancePct + '%)');
   return true;
 }
