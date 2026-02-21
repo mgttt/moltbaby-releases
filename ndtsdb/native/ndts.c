@@ -946,11 +946,62 @@ NDTSDB* ndtsdb_open(const char* path) {
     strncpy(db->path, path, sizeof(db->path) - 1);
     db->path[sizeof(db->path) - 1] = '\0';
     
+    // 尝试加载现有文件（如果存在）
+    FILE* f = fopen(path, "rb");
+    if (f) {
+        // 读取魔数
+        char magic[4];
+        if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "NDTS", 4) == 0) {
+            // 读取版本号和symbol数量
+            uint32_t version, count;
+            fread(&version, 4, 1, f);
+            fread(&count, 4, 1, f);
+            
+            // 读取每个symbol
+            for (uint32_t i = 0; i < count && g_symbol_count < MAX_SYMBOLS; i++) {
+                SymbolData* sd = &g_symbols[g_symbol_count];
+                fread(sd->symbol, 32, 1, f);
+                fread(sd->interval, 16, 1, f);
+                fread(&sd->count, 4, 1, f);
+                
+                // 读取K线数据
+                if (sd->count > MAX_KLINES_PER_SYMBOL) sd->count = MAX_KLINES_PER_SYMBOL;
+                fread(sd->klines, sizeof(KlineRow), sd->count, f);
+                
+                g_symbol_count++;
+            }
+        }
+        fclose(f);
+    }
+    
     return db;
 }
 
 void ndtsdb_close(NDTSDB* db) {
-    if (db) free(db);
+    if (!db) return;
+    
+    // 保存数据到文件
+    FILE* f = fopen(db->path, "wb");
+    if (f) {
+        // 写入魔数和版本
+        fwrite("NDTS", 1, 4, f);
+        uint32_t version = 1;
+        fwrite(&version, 4, 1, f);
+        fwrite(&g_symbol_count, 4, 1, f);
+        
+        // 写入每个symbol
+        for (uint32_t i = 0; i < g_symbol_count; i++) {
+            SymbolData* sd = &g_symbols[i];
+            fwrite(sd->symbol, 32, 1, f);
+            fwrite(sd->interval, 16, 1, f);
+            fwrite(&sd->count, 4, 1, f);
+            fwrite(sd->klines, sizeof(KlineRow), sd->count, f);
+        }
+        
+        fclose(f);
+    }
+    
+    free(db);
 }
 
 int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const KlineRow* row) {

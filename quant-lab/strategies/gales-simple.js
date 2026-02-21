@@ -19,6 +19,15 @@ let positionDiffState = {
 // P0修复：execution去重集合（防止重复处理成交）
 let processedExecIds = {};
 
+// 市场状态检测（ADX趋势强度）
+let marketRegimeState = {
+  priceHistory: [],           // 价格历史（用于计算ADX）
+  currentADX: 0,              // 当前ADX值
+  currentRegime: 'RANGING',   // 当前市场状态：RANGING/TRENDING/STRONG_TREND
+  adxHistory: [],             // ADX历史记录
+  lastRegimeAlertAt: 0,       // 上次状态告警时间（防抖）
+};
+
 // ================================
 // 配置
 // ================================
@@ -74,7 +83,7 @@ const CONFIG = {
   // 熔断机制 (P0 修复)
   circuitBreaker: {
     enabled: true,
-    maxDrawdown: 0.99,          // [临时禁用D类] 99%永不触发; 原40%因中性网格仓位回撤≠资金回撤,待重设计
+    maxDrawdown: 0.40,          // P0修复：恢复40%回撤熔断（原99%相当于禁用）
     maxPositionRatio: 0.93,     // 保留备用（仓位熔断已注释）
     maxPriceDrift: 0.50,        // 保留配置（价格偏离已降级为告警）
     cooldownAfterTrip: 600,     // 熔断后冷却 10 分钟
@@ -82,6 +91,13 @@ const CONFIG = {
 
   // 应急方向切换 (P0 修复)
   emergencyDirection: 'auto',  // auto/long/short/neutral
+
+  // 市场状态检测（ADX趋势强度）
+  enableMarketRegime: true,   // 是否启用市场状态检测
+  adxPeriod: 14,              // ADX计算周期
+  adxTrendingThreshold: 25,   // 强趋势阈值
+  adxStrongTrendThreshold: 40, // 极强趋势阈值
+  regimeAlertCooldownSec: 300, // 市场状态告警冷却时间（秒）
 
   simMode: true,
 };
@@ -176,6 +192,9 @@ let state = {
   initialOffset: 0,        // 初始差值/历史遗留仓基准
   ledgerRebuildDone: false,
   ledgerRebuildLastTick: 0,
+
+  // P0修复：应急方向切换并发锁（防止placeOrder执行中切换方向）
+  isPlacingOrder: false,   // 正在下单标志，下单期间禁止方向切换
 
   // 2026-02-19: 风险观测指标（策略内 + 账户级）
   riskMetrics: {
@@ -374,6 +393,197 @@ function logDebug(msg) {
   bridge_log('debug', '[Gales] ' + msg);
 }
 
+// ================================
+// 市场状态检测（ADX）
+// ================================
+
+/**
+ * 计算ADX（Average Directional Index）
+ * 
+ * @returns {number} ADX值（0-100）
+ */
+function calculateADX() {
+  const history = marketRegimeState.priceHistory;
+  const period = CONFIG.adxPeriod;
+
+  // 数据不足，返回0
+  if (history.length < period * 2) {
+    return 0;
+  }
+
+  // 1. 计算+DM和-DM
+  const dmArray = [];
+  for (let i = 1; i < history.length; i++) {
+    const current = history[i];
+    const previous = history[i - 1];
+
+    const upMove = current.high - previous.high;
+    const downMove = previous.low - current.low;
+
+    const plusDM = (upMove > downMove && upMove > 0) ? upMove : 0;
+    const minusDM = (downMove > upMove && downMove > 0) ? downMove : 0;
+
+    // 计算True Range
+    const tr = Math.max(
+      current.high - current.low,
+      Math.abs(current.high - previous.close),
+      Math.abs(current.low - previous.close)
+    );
+
+    dmArray.push({ plusDM, minusDM, tr });
+  }
+
+  // 2. 计算平滑的+DM、-DM和TR
+  const smoothedData = [];
+  for (let i = period - 1; i < dmArray.length; i++) {
+    let sumPlusDM = 0;
+    let sumMinusDM = 0;
+    let sumTR = 0;
+
+    for (let j = i - period + 1; j <= i; j++) {
+      sumPlusDM += dmArray[j].plusDM;
+      sumMinusDM += dmArray[j].minusDM;
+      sumTR += dmArray[j].tr;
+    }
+
+    smoothedData.push({
+      plusDM: sumPlusDM,
+      minusDM: sumMinusDM,
+      tr: sumTR,
+    });
+  }
+
+  // 3. 计算+DI和-DI
+  const diArray = [];
+  for (const data of smoothedData) {
+    const plusDI = (data.tr > 0) ? (data.plusDM / data.tr) * 100 : 0;
+    const minusDI = (data.tr > 0) ? (data.minusDM / data.tr) * 100 : 0;
+
+    // 4. 计算DX（Directional Movement Index）
+    const diSum = plusDI + minusDI;
+    const dx = (diSum > 0) ? (Math.abs(plusDI - minusDI) / diSum) * 100 : 0;
+
+    diArray.push({ plusDI, minusDI, dx });
+  }
+
+  // 5. 计算ADX（DX的平滑平均）
+  if (diArray.length < period) {
+    return 0;
+  }
+
+  let adx = 0;
+  for (let i = diArray.length - period; i < diArray.length; i++) {
+    adx += diArray[i].dx;
+  }
+
+  adx /= period;
+
+  return adx;
+}
+
+/**
+ * 判断市场状态
+ * 
+ * @param {number} adx - ADX值
+ * @returns {string} 市场状态：RANGING/TRENDING/STRONG_TREND
+ */
+function determineMarketRegime(adx) {
+  if (adx >= CONFIG.adxStrongTrendThreshold) {
+    return 'STRONG_TREND';
+  } else if (adx >= CONFIG.adxTrendingThreshold) {
+    return 'TRENDING';
+  } else {
+    return 'RANGING';
+  }
+}
+
+/**
+ * 更新市场状态
+ * 
+ * @param {object} tick - tick数据，包含 price, high, low 等字段
+ */
+function updateMarketRegime(tick) {
+  if (!CONFIG.enableMarketRegime) {
+    return;
+  }
+
+  // 1. 更新价格历史
+  marketRegimeState.priceHistory.push({
+    high: tick.high || tick.price * 1.001,  // 如果没有high，用price*1.001估算
+    low: tick.low || tick.price * 0.999,    // 如果没有low，用price*0.999估算
+    close: tick.price,
+  });
+
+  // 限制历史长度（保留period*3的数据足够计算）
+  const maxLength = CONFIG.adxPeriod * 3;
+  if (marketRegimeState.priceHistory.length > maxLength) {
+    marketRegimeState.priceHistory.shift();
+  }
+
+  // 2. 计算ADX
+  marketRegimeState.currentADX = calculateADX();
+
+  // 3. 更新ADX历史
+  marketRegimeState.adxHistory.push(marketRegimeState.currentADX);
+  if (marketRegimeState.adxHistory.length > 100) {
+    marketRegimeState.adxHistory.shift();
+  }
+
+  // 4. 判断市场状态
+  const previousRegime = marketRegimeState.currentRegime;
+  marketRegimeState.currentRegime = determineMarketRegime(marketRegimeState.currentADX);
+
+  // 5. 触发告警（带防抖）
+  const now = Date.now();
+  const cooldownMs = CONFIG.regimeAlertCooldownSec * 1000;
+
+  if (now - marketRegimeState.lastRegimeAlertAt >= cooldownMs) {
+    // 状态变化告警
+    if (marketRegimeState.currentRegime !== previousRegime) {
+      logWarn('📊 市场状态变化: ' + previousRegime + ' → ' + marketRegimeState.currentRegime + ' | ADX=' + marketRegimeState.currentADX.toFixed(2));
+      marketRegimeState.lastRegimeAlertAt = now;
+    }
+
+    // 强趋势警告（ADX>25）
+    if (marketRegimeState.currentRegime === 'TRENDING') {
+      logWarn('⚡ 强趋势检测，注意风险！ADX=' + marketRegimeState.currentADX.toFixed(2));
+      marketRegimeState.lastRegimeAlertAt = now;
+    }
+
+    // 极强趋势警告（ADX>40）
+    if (marketRegimeState.currentRegime === 'STRONG_TREND') {
+      logWarn('⚠️ 极强趋势检测，建议暂停网格下单！ADX=' + marketRegimeState.currentADX.toFixed(2));
+      marketRegimeState.lastRegimeAlertAt = now;
+    }
+  }
+}
+
+/**
+ * 检查是否应该暂停网格下单
+ * 
+ * @returns {boolean} true=应该暂停，false=可以继续
+ */
+function shouldSuspendGridTrading() {
+  if (!CONFIG.enableMarketRegime) {
+    return false;
+  }
+
+  return marketRegimeState.currentRegime === 'STRONG_TREND';
+}
+
+/**
+ * 获取当前市场状态描述
+ * 
+ * @returns {string} 市场状态描述
+ */
+function getMarketRegimeDesc() {
+  if (!CONFIG.enableMarketRegime) {
+    return '未启用';
+  }
+
+  return marketRegimeState.currentRegime + ' (ADX=' + marketRegimeState.currentADX.toFixed(2) + ')';
+}
+
 function warnPositionLimit(side, gridId, currentNotional, afterFillNotional) {
   const now = Date.now();
   const intervalMs = 5 * 60 * 1000; // 5 分钟提醒一次足够了
@@ -535,8 +745,8 @@ function checkCircuitBreaker() {
       return true;
     }
 
-    // [临时禁用] 预警（不拦截）— 25%升级告警 → 99%永不触发
-    if (drawdown > 0.99) {
+    // P0修复：恢复25%和15%预警（原99%相当于禁用）
+    if (drawdown > 0.25) {
       const lastWarn25 = circuitBreakerState.lastDrawdownWarn25At || 0;
       if (now - lastWarn25 > 300000) {  // 5分钟防抖
         circuitBreakerState.lastDrawdownWarn25At = now;
@@ -544,8 +754,7 @@ function checkCircuitBreaker() {
         try { bridge_tgSend('9号', '[告警][回撤>25%] ' + ddPct + '%，注意监控 (runId=' + state.runId + ')'); } catch(e){}
         try { bridge_tgSend('1号', '[告警][回撤>25%] ' + ddPct + '%，注意监控 (runId=' + state.runId + ')'); } catch(e){}
       }
-    } else if (drawdown > 0.99) {  // [临时禁用] 15%初级告警 → 99%永不触发
-      // 预警（不拦截）— 15%初级告警
+    } else if (drawdown > 0.15) {  // 15%初级告警
       const lastWarn15 = circuitBreakerState.lastDrawdownWarn15At || 0;
       if (now - lastWarn15 > 600000) {  // 10分钟防抖
         circuitBreakerState.lastDrawdownWarn15At = now;
@@ -619,13 +828,20 @@ function checkCircuitBreaker() {
       return true;
     }
   } else {
-    // 差值正常，重置计数并解除硬拦截
-    if (positionDiffState.ledgerGapOverCount > 0) {
+    // P0修复：B类硬拦截reset逻辑 - 只有当差值明显回落(<1000U)时才重置计数器
+    // 防止在2000U阈值附近波动导致无法触发硬拦截
+    if (ledgerGap < 1000) {
+      if (positionDiffState.ledgerGapOverCount > 0) {
+        logInfo('[B类恢复] 账本差值明显回落至' + ledgerGap.toFixed(0) + 'U < 1000U，重置计数器');
+        positionDiffState.ledgerGapOverCount = 0;
+      }
       if (positionDiffState.ledgerGapHardblocked) {
-        logInfo('[B类恢复] 账本差值回落至' + ledgerGap.toFixed(0) + 'U，恢复交易');
+        logInfo('[B类恢复] 账本差值回落至' + ledgerGap.toFixed(0) + 'U，解除硬拦截');
         positionDiffState.ledgerGapHardblocked = false;
       }
-      positionDiffState.ledgerGapOverCount = 0;
+    } else {
+      // 差值在1000-2000U之间，不重置计数器但也不增加
+      logDebug('[B类] 账本差值=' + ledgerGap.toFixed(0) + 'U，保持计数器=' + positionDiffState.ledgerGapOverCount);
     }
   }
 
@@ -745,6 +961,12 @@ function checkPositionDiff() {
 
 function checkEmergencyDirectionSwitch() {
   if (CONFIG.emergencyDirection !== 'auto') return;
+  
+  // P0修复：并发保护 - 下单期间禁止方向切换
+  if (state.isPlacingOrder) {
+    logDebug('[应急切换] 下单进行中，跳过方向切换检查');
+    return;
+  }
   
   // 买满仓 → 强制切换到 long 模式（只做多）
   if (state.positionNotional >= CONFIG.maxPosition * 0.9) {
@@ -2005,6 +2227,12 @@ function st_heartbeat(tickJson) {
     }
   }
 
+  // 市场状态检测（ADX趋势强度）
+  updateMarketRegime(tick);
+  if (state.tickCount % 12 === 0) {  // 每60秒输出一次市场状态
+    logInfo('📊 市场状态: ' + getMarketRegimeDesc());
+  }
+
   // 更新风险指标（不影响主交易流程）
   updateRiskMetrics(tick);
   if (state.tickCount % 12 === 0) { // 约60秒（默认5秒心跳）
@@ -2443,17 +2671,22 @@ function shouldPlaceOrder(grid, distance) {
 }
 
 function placeOrder(grid) {
-  // 双保险：避免重复挂单（grid 状态丢失时常见）
-  const existing = findActiveOrderByGridId(grid.id);
-  if (existing) {
-    syncGridFromOrder(grid, existing);
-    return;
-  }
+  // P0修复：设置并发锁，防止方向切换
+  state.isPlacingOrder = true;
+  
+  try {
+    // 双保险：避免重复挂单（grid 状态丢失时常见）
+    const existing = findActiveOrderByGridId(grid.id);
+    if (existing) {
+      syncGridFromOrder(grid, existing);
+      state.isPlacingOrder = false;  // 清除锁
+      return;
+    }
 
-  grid.state = 'PLACING';
-  grid.attempts++;
-  grid.lastTriggerTime = Date.now();
-  grid.lastTriggerPrice = state.lastPrice;
+    grid.state = 'PLACING';
+    grid.attempts++;
+    grid.lastTriggerTime = Date.now();
+    grid.lastTriggerPrice = state.lastPrice;
 
   let orderPrice = grid.price;
   if (grid.side === 'Buy') {
@@ -2600,6 +2833,9 @@ function placeOrder(grid) {
       logWarn('❌ 挂单失败[未知]: ' + e);
     }
     grid.state = 'IDLE';
+  } finally {
+    // P0修复：清除并发锁
+    state.isPlacingOrder = false;
   }
 }
 
