@@ -1321,30 +1321,53 @@ function syncGridFromOrder(grid, order) {
 }
 
 // 修复/对齐 grid <-> openOrders 的一致性，避免重复挂单
+// P2优化：O(n+m) Set索引替代O(n×m)双重遍历
 function reconcileGridOrderLinks() {
   if (!state.gridLevels || state.gridLevels.length === 0) return;
 
-  // 1) 如果 openOrders 里存在活跃订单，但 grid 却是 IDLE，则纠正为 ACTIVE
+  // ===== 阶段1: 预建索引 O(n+m) =====
+  // QuickJS用Object模拟Set（hasOwnProperty O(1)）
+  const activeOrderGridIds = {};  // gridId -> true
+  const gridById = {};            // gridId -> grid
+  
+  // O(n): 收集活跃订单的gridId
+  for (let i = 0; i < state.openOrders.length; i++) {
+    const o = state.openOrders[i];
+    if (o && o.gridId && o.status !== 'Filled' && o.status !== 'Canceled') {
+      activeOrderGridIds[o.gridId] = true;
+    }
+  }
+  
+  // O(m): 构建grid索引
+  for (let i = 0; i < state.gridLevels.length; i++) {
+    const g = state.gridLevels[i];
+    if (g && g.id) {
+      gridById[g.id] = g;
+    }
+  }
+
+  // ===== 阶段2: 纠正IDLE grid为ACTIVE O(n) =====
+  // openOrders有但grid非ACTIVE -> 纠正为ACTIVE
   for (let i = 0; i < state.openOrders.length; i++) {
     const o = state.openOrders[i];
     if (!o || !o.gridId) continue;
     if (o.status === 'Filled' || o.status === 'Canceled') continue;
 
-    const g = findGridById(o.gridId);
+    const g = gridById[o.gridId];  // O(1)
     if (!g) continue;
     if (g.state !== 'ACTIVE' || g.orderId !== o.orderId) {
       syncGridFromOrder(g, o);
     }
   }
 
-  // 2) 如果 grid 标记 ACTIVE 但找不到订单，则回收为 IDLE
+  // ===== 阶段3: 回收孤立grid为IDLE O(m) =====
+  // grid是ACTIVE但openOrders找不到 -> 回收为IDLE
   for (let i = 0; i < state.gridLevels.length; i++) {
     const g = state.gridLevels[i];
-    if (!g) continue;
-    if (g.state !== 'ACTIVE') continue;
+    if (!g || g.state !== 'ACTIVE') continue;
 
-    const o = getOpenOrder(g.orderId);
-    if (!o || o.status === 'Filled' || o.status === 'Canceled') {
+    // O(1) Object查找替代O(n)遍历
+    if (!activeOrderGridIds[g.id]) {
       g.state = 'IDLE';
       g.orderId = undefined;
       g.orderLinkId = undefined;
@@ -1353,7 +1376,6 @@ function reconcileGridOrderLinks() {
     }
   }
 }
-
 function updatePositionFromFill(side, fillQty, fillPrice) {
   const notional = fillQty * fillPrice;
 

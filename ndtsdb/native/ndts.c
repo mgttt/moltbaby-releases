@@ -9,6 +9,12 @@
 #include <string.h>
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <time.h>
+#include "ndtsdb.h"
 
 // ─── 类型转换 ─────────────────────────────────────────────
 
@@ -895,18 +901,185 @@ void ohlcv_aggregate(
 }
 
 // ============================================================
+// ndtsdb 兼容性辅助函数
+// ============================================================
+
+/**
+ * 检测路径是否为目录
+ */
+static int path_is_dir(const char* path) {
+    struct stat st;
+    if (stat(path, &st) == 0) return S_ISDIR(st.st_mode);
+    size_t len = strlen(path);
+    if (len > 0 && path[len-1] == '/') return 1;
+    return (strrchr(path, '.') == NULL) ? 1 : 0;
+}
+
+/**
+ * CRC32 实现
+ */
+static uint32_t g_crc32_table[256];
+static int g_crc32_init = 0;
+
+static void crc32_init_table(void) {
+    if (g_crc32_init) return;
+    for (int i = 0; i < 256; i++) {
+        uint32_t c = (uint32_t)i;
+        for (int j = 0; j < 8; j++)
+            c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        g_crc32_table[i] = c;
+    }
+    g_crc32_init = 1;
+}
+
+static uint32_t crc32_buf(const void* data, size_t len) {
+    crc32_init_table();
+    const uint8_t* p = (const uint8_t*)data;
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; i++)
+        crc = g_crc32_table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+/**
+ * timestamp → 日期标签
+ */
+static void ts_to_day(int64_t ts_ms, char* out) {
+    time_t t = (time_t)(ts_ms / 1000);
+    struct tm* tm = gmtime(&t);
+    strftime(out, 12, "%Y-%m-%d", tm);
+}
+
+/**
+ * 写入单个分区文件（PartitionedTable 格式）
+ */
+static void write_partition_file(const char* filepath,
+                                  KlineRow* rows, uint32_t n_rows,
+                                  char** sym_dict, int n_sym,
+                                  char** itv_dict, int n_itv,
+                                  int32_t* sym_ids, int32_t* itv_ids) {
+    FILE* f = fopen(filepath, "wb");
+    if (!f) return;
+
+    /* === 构建 JSON header === */
+    char json[8192];
+    int pos = 0;
+    pos += snprintf(json+pos, sizeof(json)-pos,
+        "{\"columns\":["
+        "{\"name\":\"timestamp\",\"type\":\"int64\"},"
+        "{\"name\":\"open\",\"type\":\"float64\"},"
+        "{\"name\":\"high\",\"type\":\"float64\"},"
+        "{\"name\":\"low\",\"type\":\"float64\"},"
+        "{\"name\":\"close\",\"type\":\"float64\"},"
+        "{\"name\":\"volume\",\"type\":\"float64\"},"
+        "{\"name\":\"symbol\",\"type\":\"string\"},"
+        "{\"name\":\"interval\",\"type\":\"string\"}"
+        "],\"totalRows\":%u,\"chunkCount\":1,\"stringDicts\":{", n_rows);
+
+    pos += snprintf(json+pos, sizeof(json)-pos, "\"symbol\":[");
+    for (int i = 0; i < n_sym; i++) {
+        if (i > 0) json[pos++] = ',';
+        pos += snprintf(json+pos, sizeof(json)-pos, "\"%s\"", sym_dict[i]);
+    }
+    pos += snprintf(json+pos, sizeof(json)-pos, "],\"interval\":[");
+    for (int i = 0; i < n_itv; i++) {
+        if (i > 0) json[pos++] = ',';
+        pos += snprintf(json+pos, sizeof(json)-pos, "\"%s\"", itv_dict[i]);
+    }
+    pos += snprintf(json+pos, sizeof(json)-pos, "]}}");
+
+    /* === 写入 magic + header_len + json === */
+    fwrite("NDTS", 1, 4, f);
+    uint32_t hlen = (uint32_t)pos;
+    fwrite(&hlen, 4, 1, f);
+    fwrite(json, 1, pos, f);
+
+    /* === padding 到 8 字节（从 header_len 字段起算） === */
+    size_t written = 4 + pos;  /* header_len(4) + json */
+    size_t pad = (8 - (written % 8)) % 8;
+    static const uint8_t zeros[8] = {0};
+    if (pad > 0) fwrite(zeros, 1, pad, f);
+
+    /* === CRC32 of header === */
+    uint32_t hcrc = crc32_buf(json, pos);
+    fwrite(&hcrc, 4, 1, f);
+
+    /* === Chunk === */
+    /* chunk_start: 用于计算chunk的CRC32 */
+    uint8_t* chunk_buf;
+    size_t chunk_size = 4  /* row_count */
+        + n_rows * 8   /* timestamp: int64 */
+        + n_rows * 8   /* open: float64 */
+        + n_rows * 8   /* high: float64 */
+        + n_rows * 8   /* low: float64 */
+        + n_rows * 8   /* close: float64 */
+        + n_rows * 8   /* volume: float64 */
+        + n_rows * 4   /* symbol: int32 */
+        + n_rows * 4;  /* interval: int32 */
+
+    chunk_buf = (uint8_t*)malloc(chunk_size);
+    if (!chunk_buf) { fclose(f); return; }
+
+    uint8_t* p = chunk_buf;
+
+    /* row_count */
+    memcpy(p, &n_rows, 4); p += 4;
+
+    /* timestamp列 */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &rows[i].timestamp, 8); p += 8;
+    }
+    /* open列 */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &rows[i].open, 8); p += 8;
+    }
+    /* high列 */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &rows[i].high, 8); p += 8;
+    }
+    /* low列 */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &rows[i].low, 8); p += 8;
+    }
+    /* close列 */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &rows[i].close, 8); p += 8;
+    }
+    /* volume列 */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &rows[i].volume, 8); p += 8;
+    }
+    /* symbol列（int32字典id） */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &sym_ids[i], 4); p += 4;
+    }
+    /* interval列（int32字典id） */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &itv_ids[i], 4); p += 4;
+    }
+
+    fwrite(chunk_buf, 1, chunk_size, f);
+
+    /* chunk CRC32 */
+    uint32_t ccrc = crc32_buf(chunk_buf, chunk_size);
+    fwrite(&ccrc, 4, 1, f);
+
+    free(chunk_buf);
+    fclose(f);
+}
+
+// ============================================================
 // ndtsdb 高级 API 实现 (MVP)
 // ============================================================
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "ndtsdb.h"
 
 // 简化版数据库结构
 struct NDTSDB {
     char path[256];
-    // TODO: 后续添加文件句柄、索引等
+    int is_dir;   // 1=目录模式（PartitionedTable格式），0=文件模式（旧格式）
 };
 
 // 简化版内存存储（MVP用，后续优化）
@@ -946,32 +1119,38 @@ NDTSDB* ndtsdb_open(const char* path) {
     strncpy(db->path, path, sizeof(db->path) - 1);
     db->path[sizeof(db->path) - 1] = '\0';
     
-    // 尝试加载现有文件（如果存在）
-    FILE* f = fopen(path, "rb");
-    if (f) {
-        // 读取魔数
-        char magic[4];
-        if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "NDTS", 4) == 0) {
-            // 读取版本号和symbol数量
-            uint32_t version, count;
-            fread(&version, 4, 1, f);
-            fread(&count, 4, 1, f);
-            
-            // 读取每个symbol
-            for (uint32_t i = 0; i < count && g_symbol_count < MAX_SYMBOLS; i++) {
-                SymbolData* sd = &g_symbols[g_symbol_count];
-                fread(sd->symbol, 32, 1, f);
-                fread(sd->interval, 16, 1, f);
-                fread(&sd->count, 4, 1, f);
+    // 检测路径类型
+    db->is_dir = path_is_dir(path);
+    
+    // 只在文件模式下读取数据（目录模式暂不读取，Phase 1 只实现写入兼容）
+    if (!db->is_dir) {
+        // 尝试加载现有文件（如果存在）
+        FILE* f = fopen(path, "rb");
+        if (f) {
+            // 读取魔数
+            char magic[4];
+            if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "NDTS", 4) == 0) {
+                // 读取版本号和symbol数量
+                uint32_t version, count;
+                fread(&version, 4, 1, f);
+                fread(&count, 4, 1, f);
                 
-                // 读取K线数据
-                if (sd->count > MAX_KLINES_PER_SYMBOL) sd->count = MAX_KLINES_PER_SYMBOL;
-                fread(sd->klines, sizeof(KlineRow), sd->count, f);
-                
-                g_symbol_count++;
+                // 读取每个symbol
+                for (uint32_t i = 0; i < count && g_symbol_count < MAX_SYMBOLS; i++) {
+                    SymbolData* sd = &g_symbols[g_symbol_count];
+                    fread(sd->symbol, 32, 1, f);
+                    fread(sd->interval, 16, 1, f);
+                    fread(&sd->count, 4, 1, f);
+                    
+                    // 读取K线数据
+                    if (sd->count > MAX_KLINES_PER_SYMBOL) sd->count = MAX_KLINES_PER_SYMBOL;
+                    fread(sd->klines, sizeof(KlineRow), sd->count, f);
+                    
+                    g_symbol_count++;
+                }
             }
+            fclose(f);
         }
-        fclose(f);
     }
     
     return db;
@@ -979,28 +1158,150 @@ NDTSDB* ndtsdb_open(const char* path) {
 
 void ndtsdb_close(NDTSDB* db) {
     if (!db) return;
-    
-    // 保存数据到文件
-    FILE* f = fopen(db->path, "wb");
-    if (f) {
-        // 写入魔数和版本
-        fwrite("NDTS", 1, 4, f);
-        uint32_t version = 1;
-        fwrite(&version, 4, 1, f);
-        fwrite(&g_symbol_count, 4, 1, f);
+
+    if (db->is_dir) {
+        /* ===== 目录模式：写出 PartitionedTable 格式 ===== */
         
-        // 写入每个symbol
+        /* 先统计总行数 */
+        uint32_t total = 0;
+        for (uint32_t i = 0; i < g_symbol_count; i++) total += g_symbols[i].count;
+        
+        if (total == 0) goto cleanup;
+        
+        /* 扁平化所有行 */
+        typedef struct {
+            KlineRow row;
+            char symbol[32];
+            char interval[16];
+        } FlatRow;
+
+        FlatRow* flat = (FlatRow*)malloc(total * sizeof(FlatRow));
+        if (!flat) goto cleanup;
+
+        uint32_t fi = 0;
         for (uint32_t i = 0; i < g_symbol_count; i++) {
-            SymbolData* sd = &g_symbols[i];
-            fwrite(sd->symbol, 32, 1, f);
-            fwrite(sd->interval, 16, 1, f);
-            fwrite(&sd->count, 4, 1, f);
-            fwrite(sd->klines, sizeof(KlineRow), sd->count, f);
+            for (uint32_t j = 0; j < g_symbols[i].count; j++) {
+                flat[fi].row = g_symbols[i].klines[j];
+                strncpy(flat[fi].symbol, g_symbols[i].symbol, 31);
+                flat[fi].symbol[31] = '\0';
+                strncpy(flat[fi].interval, g_symbols[i].interval, 15);
+                flat[fi].interval[15] = '\0';
+                fi++;
+            }
         }
-        
-        fclose(f);
+
+        /* 收集唯一天 */
+        char days[365][12];
+        int n_days = 0;
+
+        for (uint32_t i = 0; i < total; i++) {
+            char day[12];
+            ts_to_day(flat[i].row.timestamp, day);
+            int found = 0;
+            for (int d = 0; d < n_days; d++) {
+                if (strcmp(days[d], day) == 0) { found = 1; break; }
+            }
+            if (!found && n_days < 365) {
+                strncpy(days[n_days], day, 11);
+                days[n_days][11] = '\0';
+                n_days++;
+            }
+        }
+
+        /* 确保目录存在 */
+        mkdir(db->path, 0755);
+
+        /* 对每一天写一个分区文件 */
+        for (int d = 0; d < n_days; d++) {
+            /* 收集该天的行 */
+            uint32_t day_n = 0;
+            for (uint32_t i = 0; i < total; i++) {
+                char day[12]; 
+                ts_to_day(flat[i].row.timestamp, day);
+                if (strcmp(day, days[d]) == 0) day_n++;
+            }
+
+            KlineRow* day_rows = (KlineRow*)malloc(day_n * sizeof(KlineRow));
+            int32_t* sym_ids = (int32_t*)malloc(day_n * sizeof(int32_t));
+            int32_t* itv_ids = (int32_t*)malloc(day_n * sizeof(int32_t));
+
+            if (!day_rows || !sym_ids || !itv_ids) {
+                free(day_rows); free(sym_ids); free(itv_ids);
+                continue;
+            }
+
+            /* 建字典 */
+            char* sym_dict[64]; int n_sym = 0;
+            char* itv_dict[16]; int n_itv = 0;
+
+            uint32_t ri = 0;
+            for (uint32_t i = 0; i < total; i++) {
+                char day[12]; 
+                ts_to_day(flat[i].row.timestamp, day);
+                if (strcmp(day, days[d]) != 0) continue;
+
+                day_rows[ri] = flat[i].row;
+
+                /* symbol 字典查询 */
+                int si = -1;
+                for (int s = 0; s < n_sym; s++) {
+                    if (strcmp(sym_dict[s], flat[i].symbol) == 0) { si = s; break; }
+                }
+                if (si < 0 && n_sym < 64) {
+                    sym_dict[n_sym] = strdup(flat[i].symbol);
+                    si = n_sym++;
+                }
+                sym_ids[ri] = si;
+
+                /* interval 字典 */
+                int ii = -1;
+                for (int v = 0; v < n_itv; v++) {
+                    if (strcmp(itv_dict[v], flat[i].interval) == 0) { ii = v; break; }
+                }
+                if (ii < 0 && n_itv < 16) {
+                    itv_dict[n_itv] = strdup(flat[i].interval);
+                    ii = n_itv++;
+                }
+                itv_ids[ri] = ii;
+                ri++;
+            }
+
+            /* 写文件 */
+            char filepath[512];
+            snprintf(filepath, sizeof(filepath), "%s/%s.ndts", db->path, days[d]);
+            write_partition_file(filepath, day_rows, day_n,
+                                  sym_dict, n_sym, itv_dict, n_itv,
+                                  sym_ids, itv_ids);
+
+            /* 清理字典 */
+            for (int s = 0; s < n_sym; s++) free(sym_dict[s]);
+            for (int v = 0; v < n_itv; v++) free(itv_dict[v]);
+            free(day_rows); free(sym_ids); free(itv_ids);
+        }
+
+        free(flat);
+    } else {
+        /* ===== 文件模式：保持旧格式（向后兼容） ===== */
+        FILE* f = fopen(db->path, "wb");
+        if (f) {
+            fwrite("NDTS", 1, 4, f);
+            uint32_t version = 1;
+            fwrite(&version, 4, 1, f);
+            fwrite(&g_symbol_count, 4, 1, f);
+            for (uint32_t i = 0; i < g_symbol_count; i++) {
+                SymbolData* sd = &g_symbols[i];
+                fwrite(sd->symbol, 32, 1, f);
+                fwrite(sd->interval, 16, 1, f);
+                fwrite(&sd->count, 4, 1, f);
+                fwrite(sd->klines, sizeof(KlineRow), sd->count, f);
+            }
+            fclose(f);
+        }
     }
-    
+
+cleanup:
+    /* 重置全局状态 */
+    g_symbol_count = 0;
     free(db);
 }
 
