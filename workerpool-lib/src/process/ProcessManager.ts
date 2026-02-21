@@ -167,14 +167,16 @@ export class ProcessManager extends EventEmitter {
       }
     }
 
-    // 清理
-    instance.state.status = 'stopped';
-    instance.state.pid = null;
-    instance.state.stoppedAt = new Date().toISOString();
-    this.stateManager.saveProcess(instance.state);
-
-    this.logManager.close(name);
-    this.processes.delete(name);
+    // handleExit() 可能已经通过 exit 事件先行清理（intentionallyStopped 路径）
+    // 只在未被 handleExit 清理时再做一次兜底
+    if (this.processes.has(name)) {
+      instance.state.status = 'stopped';
+      instance.state.pid = null;
+      instance.state.stoppedAt = new Date().toISOString();
+      this.stateManager.saveProcess(instance.state);
+      this.logManager.close(name);
+      this.processes.delete(name);
+    }
 
     this.emit('stop', name, instance.state.lastExitCode || 0, instance.state.lastExitSignal);
   }

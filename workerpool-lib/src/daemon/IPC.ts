@@ -142,13 +142,21 @@ export class IPCClient {
     });
   }
 
-  async send(req: IPCRequest): Promise<IPCResponse> {
+  async send(req: IPCRequest, timeoutMs = 10000): Promise<IPCResponse> {
     await this.connect();
 
     const payload = JSON.stringify(req) + '\n';
 
     const respP = new Promise<IPCResponse>((resolve, reject) => {
-      this.pending.set(req.id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(req.id);
+        reject(new Error(`IPC timeout: ${req.action} (${timeoutMs}ms)`));
+      }, timeoutMs);
+
+      this.pending.set(req.id, {
+        resolve: (r) => { clearTimeout(timer); resolve(r); },
+        reject:  (e) => { clearTimeout(timer); reject(e); },
+      });
     });
 
     this.socket!.write(payload);
