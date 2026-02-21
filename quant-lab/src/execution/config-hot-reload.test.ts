@@ -55,6 +55,37 @@ describe("配置热重载 - 验收测试", () => {
     }
   });
 
+  // P2修复：辅助函数 - 创建独立测试配置路径
+  function getTestConfigPath(testName: string): string {
+    return join(TEST_DIR, `test-config-${testName}.json`);
+  }
+
+  // P2修复：辅助函数 - 创建初始配置文件
+  function createInitialConfig(path: string, overrides = {}) {
+    const config = {
+      symbol: "BTCUSDT",
+      gridCount: 10,
+      gridSpacing: 0.01,
+      orderSize: 100,
+      maxPosition: 1000,
+      ...overrides
+    };
+    // 确保目录存在
+    if (!existsSync(TEST_DIR)) {
+      mkdirSync(TEST_DIR, { recursive: true });
+    }
+    if (!existsSync(TEST_BACKUP_DIR)) {
+      mkdirSync(TEST_BACKUP_DIR, { recursive: true });
+    }
+    writeFileSync(path, JSON.stringify(config, null, 2));
+    return config;
+  }
+
+  // P2修复：测试间延迟，确保文件监听完全停止
+  beforeEach(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  });
+
   describe("验收1: 文件监听和热注入", () => {
     test("场景1: 监听配置文件变更", async () => {
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
@@ -73,6 +104,9 @@ describe("配置热重载 - 验收测试", () => {
     });
 
     test("场景2: 检测配置变更", async () => {
+      // P2修复：先创建初始配置，再启动监听
+      createInitialConfig(TEST_CONFIG_PATH);
+      
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
         backupDir: TEST_BACKUP_DIR,
       });
@@ -86,6 +120,7 @@ describe("配置热重载 - 验收测试", () => {
       });
 
       manager.startWatching();
+      await new Promise((resolve) => setTimeout(resolve, 100)); // 等watch初始化
 
       // 修改配置文件
       const newConfig = {
@@ -108,6 +143,9 @@ describe("配置热重载 - 验收测试", () => {
     });
 
     test("场景3: 热注入新参数", async () => {
+      // P2修复：先创建初始配置，再启动监听
+      createInitialConfig(TEST_CONFIG_PATH);
+      
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
         backupDir: TEST_BACKUP_DIR,
       });
@@ -147,6 +185,9 @@ describe("配置热重载 - 验收测试", () => {
 
   describe("验收2: 不中断当前持仓/订单", () => {
     test("场景1: 配置变更不影响运行状态", async () => {
+      // P2修复：先创建初始配置，再启动监听
+      createInitialConfig(TEST_CONFIG_PATH);
+      
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
         backupDir: TEST_BACKUP_DIR,
       });
@@ -186,6 +227,9 @@ describe("配置热重载 - 验收测试", () => {
 
   describe("验收3: 变更日志和回滚支持", () => {
     test("场景1: 记录变更日志", async () => {
+      // P2修复：先创建初始配置，再启动监听
+      createInitialConfig(TEST_CONFIG_PATH);
+      
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
         backupDir: TEST_BACKUP_DIR,
       });
@@ -226,15 +270,20 @@ describe("配置热重载 - 验收测试", () => {
     });
 
     test("场景2: 回滚到上一个版本", async () => {
-      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+      // P2修复：使用独立配置文件路径
+      const testConfigPath = getTestConfigPath('rollback-previous');
+      createInitialConfig(testConfigPath);
+      
+      const manager = new ConfigHotReloadManager(testConfigPath, {
         backupDir: TEST_BACKUP_DIR,
       });
 
       manager.startWatching();
+      await new Promise((resolve) => setTimeout(resolve, 100)); // 等watch初始化
 
       // 第一次修改
       writeFileSync(
-        TEST_CONFIG_PATH,
+        testConfigPath,
         JSON.stringify(
           {
             symbol: "BTCUSDT",
@@ -252,7 +301,7 @@ describe("配置热重载 - 验收测试", () => {
 
       // 第二次修改
       writeFileSync(
-        TEST_CONFIG_PATH,
+        testConfigPath,
         JSON.stringify(
           {
             symbol: "BTCUSDT",
@@ -282,6 +331,9 @@ describe("配置热重载 - 验收测试", () => {
     });
 
     test("场景3: 回滚到指定版本", async () => {
+      // P2修复：先创建初始配置，再启动监听
+      createInitialConfig(TEST_CONFIG_PATH);
+      
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
         backupDir: TEST_BACKUP_DIR,
       });
@@ -323,12 +375,17 @@ describe("配置热重载 - 验收测试", () => {
 
   describe("综合验收测试", () => {
     test("完整流程: 监听 → 修改 → 检测 → 应用 → 回滚", async () => {
-      const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
+      // P2修复：使用独立配置文件路径
+      const testConfigPath = getTestConfigPath('full-flow');
+      createInitialConfig(testConfigPath);
+      
+      const manager = new ConfigHotReloadManager(testConfigPath, {
         backupDir: TEST_BACKUP_DIR,
       });
 
       // 1. 启动监听
       manager.startWatching();
+      await new Promise((resolve) => setTimeout(resolve, 100)); // 等watch初始化
       console.log("✅ 监听已启动");
 
       // 2. 修改配置文件
@@ -340,7 +397,7 @@ describe("配置热重载 - 验收测试", () => {
         maxPosition: 2000,
       };
 
-      writeFileSync(TEST_CONFIG_PATH, JSON.stringify(newConfig, null, 2));
+      writeFileSync(testConfigPath, JSON.stringify(newConfig, null, 2));
       console.log("✅ 配置文件已修改");
 
       // 3. 等待变更检测和应用
@@ -495,6 +552,9 @@ describe("配置热重载 - 验收测试", () => {
     });
 
     test("热更新时校验失败→拒绝更新", async () => {
+      // P2修复：先创建初始配置，再启动监听
+      createInitialConfig(TEST_CONFIG_PATH);
+      
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
         backupDir: TEST_BACKUP_DIR,
         validationRules: {
@@ -541,6 +601,9 @@ describe("配置热重载 - 验收测试", () => {
   // P2新增: diff日志测试 ========================================
   describe("P2新增: diff日志功能", () => {
     test("diff日志: 热更新时记录旧值→新值", async () => {
+      // P2修复：先创建初始配置，再启动监听
+      createInitialConfig(TEST_CONFIG_PATH);
+      
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
         backupDir: TEST_BACKUP_DIR,
       });
@@ -638,6 +701,9 @@ describe("配置热重载 - 验收测试", () => {
     });
 
     test("多字段同时更新", async () => {
+      // P2修复：先创建初始配置，再启动监听
+      createInitialConfig(TEST_CONFIG_PATH);
+      
       const manager = new ConfigHotReloadManager(TEST_CONFIG_PATH, {
         backupDir: TEST_BACKUP_DIR,
       });

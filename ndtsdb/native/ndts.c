@@ -1088,15 +1088,16 @@ struct NDTSDB {
     int dirty;    // 1=有写入操作，close时才写出；0=只读，close不写文件
 };
 
-// 简化版内存存储（MVP用，后续优化）
+// 动态内存存储
 #define MAX_SYMBOLS 100
-#define MAX_KLINES_PER_SYMBOL 10000
+#define INITIAL_KLINES_CAPACITY 1024  // 初始容量，动态扩展
 
 typedef struct {
     char symbol[32];
     char interval[16];
-    KlineRow klines[MAX_KLINES_PER_SYMBOL];
     uint32_t count;
+    uint32_t capacity;  // 当前分配容量
+    KlineRow* klines;   // 动态分配的指针
 } SymbolData;
 
 static SymbolData g_symbols[MAX_SYMBOLS];
@@ -1113,8 +1114,17 @@ static SymbolData* find_or_create_symbol(const char* symbol, const char* interva
     
     SymbolData* sd = &g_symbols[g_symbol_count++];
     strncpy(sd->symbol, symbol, sizeof(sd->symbol) - 1);
+    sd->symbol[sizeof(sd->symbol) - 1] = '\0';
     strncpy(sd->interval, interval, sizeof(sd->interval) - 1);
+    sd->interval[sizeof(sd->interval) - 1] = '\0';
     sd->count = 0;
+    sd->capacity = INITIAL_KLINES_CAPACITY;
+    sd->klines = (KlineRow*)malloc(sd->capacity * sizeof(KlineRow));
+    if (!sd->klines) {
+        // 分配失败，回退
+        g_symbol_count--;
+        return NULL;
+    }
     return sd;
 }
 
@@ -1261,7 +1271,15 @@ NDTSDB* ndtsdb_open(const char* path) {
                     const char* itv = (itv_ids[i] >= 0 && itv_ids[i] < n_itv) ? itv_dict[itv_ids[i]] : "UNKNOWN";
                     
                     SymbolData* sd = find_or_create_symbol(sym, itv);
-                    if (sd && sd->count < MAX_KLINES_PER_SYMBOL) {
+                    if (sd) {
+                        // 检查容量，必要时扩容
+                        if (sd->count >= sd->capacity) {
+                            uint32_t new_capacity = sd->capacity * 2;
+                            KlineRow* new_klines = (KlineRow*)realloc(sd->klines, new_capacity * sizeof(KlineRow));
+                            if (!new_klines) continue;  // 扩容失败，跳过此行
+                            sd->klines = new_klines;
+                            sd->capacity = new_capacity;
+                        }
                         sd->klines[sd->count].timestamp = timestamps[i];
                         sd->klines[sd->count].open = opens[i];
                         sd->klines[sd->count].high = highs[i];
@@ -1299,7 +1317,16 @@ NDTSDB* ndtsdb_open(const char* path) {
                     fread(sd->interval, 16, 1, f);
                     fread(&sd->count, 4, 1, f);
                     
-                    if (sd->count > MAX_KLINES_PER_SYMBOL) sd->count = MAX_KLINES_PER_SYMBOL;
+                    // 动态分配容量（至少count条，或按INITIAL_KLINES_CAPACITY）
+                    sd->capacity = sd->count > INITIAL_KLINES_CAPACITY ? sd->count : INITIAL_KLINES_CAPACITY;
+                    sd->klines = (KlineRow*)malloc(sd->capacity * sizeof(KlineRow));
+                    if (!sd->klines) {
+                        // 分配失败，跳过此symbol
+                        sd->count = 0;
+                        sd->capacity = 0;
+                        continue;
+                    }
+                    
                     fread(sd->klines, sizeof(KlineRow), sd->count, f);
                     
                     g_symbol_count++;
@@ -1458,6 +1485,13 @@ void ndtsdb_close(NDTSDB* db) {
     }
 
 cleanup:
+    /* 释放所有动态分配的klines */
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        if (g_symbols[i].klines) {
+            free(g_symbols[i].klines);
+            g_symbols[i].klines = NULL;
+        }
+    }
     /* 重置全局状态 */
     g_symbol_count = 0;
     free(db);
@@ -1467,7 +1501,15 @@ int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const Kl
     if (db) db->dirty = 1;  // 标记有写入
     SymbolData* sd = find_or_create_symbol(symbol, interval);
     if (!sd) return -1;
-    if (sd->count >= MAX_KLINES_PER_SYMBOL) return -1;
+    
+    // 动态扩容：count >= capacity 时 realloc
+    if (sd->count >= sd->capacity) {
+        uint32_t new_capacity = sd->capacity * 2;
+        KlineRow* new_klines = (KlineRow*)realloc(sd->klines, new_capacity * sizeof(KlineRow));
+        if (!new_klines) return -1;  // 扩容失败
+        sd->klines = new_klines;
+        sd->capacity = new_capacity;
+    }
     
     sd->klines[sd->count++] = *row;
     return 0;
@@ -1478,8 +1520,22 @@ int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, co
     SymbolData* sd = find_or_create_symbol(symbol, interval);
     if (!sd) return -1;
     
+    // 检查是否需要扩容（批量扩容，避免多次realloc）
+    uint32_t required = sd->count + n;
+    if (required > sd->capacity) {
+        // 计算新的capacity（至少翻倍，或满足需求）
+        uint32_t new_capacity = sd->capacity;
+        while (new_capacity < required) {
+            new_capacity *= 2;
+        }
+        KlineRow* new_klines = (KlineRow*)realloc(sd->klines, new_capacity * sizeof(KlineRow));
+        if (!new_klines) return -1;  // 扩容失败
+        sd->klines = new_klines;
+        sd->capacity = new_capacity;
+    }
+    
     uint32_t inserted = 0;
-    for (uint32_t i = 0; i < n && sd->count < MAX_KLINES_PER_SYMBOL; i++) {
+    for (uint32_t i = 0; i < n; i++) {
         sd->klines[sd->count++] = rows[i];
         inserted++;
     }

@@ -573,12 +573,13 @@ export class ConfigHotReloadManager {
    * 回滚到上一个版本
    */
   rollbackToPrevious(): boolean {
-    if (this.snapshots.length < 2) {
+    if (this.snapshots.length < 1) {
       this.log("[ConfigHotReload] 没有可回滚的版本");
       return false;
     }
 
-    const previousSnapshot = this.snapshots[this.snapshots.length - 2];
+    // snapshots存的是变更前的状态，最后一个快照即是上一个版本
+    const previousSnapshot = this.snapshots[this.snapshots.length - 1];
     return this.rollbackToVersion(previousSnapshot.version);
   }
 
