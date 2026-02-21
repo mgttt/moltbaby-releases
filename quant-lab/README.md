@@ -11,10 +11,12 @@
 
 | 文档 | 说明 | 必读人群 | 链接 |
 |------|------|----------|------|
+| **快速开始** | 5分钟上手指南 | 新手必读 | [→ 查看](./docs/QUICKSTART.md) |
 | **产品说明书** | 功能介绍、部署指南 | 所有人 | [→ 查看](./docs/PRODUCT_MANUAL.md) |
 | **策略操盘手册** | 策略开发、实盘操作 | 操盘手/开发者 | [→ 查看](./docs/TRADER_MANUAL.md) |
 | **开发路线图** | 版本规划、迭代计划 | 开发者 | [→ 查看](./docs/ROADMAP.md) |
 | **系统架构** | 架构总览、模块关系 | 架构师 | [→ 查看](./docs/SYSTEM_OVERVIEW.md) |
+| **技术架构** | 详细技术设计 | 开发者 | [→ 查看](./ARCHITECTURE.md) |
 
 ---
 
@@ -272,12 +274,43 @@ Strategy Interface + Backtest/Live Engines + Providers
 
 ---
 
-## 📖 文档
+## 📖 完整文档索引
 
-- **README.md** - 本文件（快速开始）
-- **ROADMAP.md** - 开发路线图
-- **src/providers/README.md** - Provider 实现指南
-- **archived/v2.0-director-worker/README.md** - 旧架构说明
+### 入门文档
+| 文档 | 说明 | 路径 |
+|------|------|------|
+| 快速开始 | 5分钟上手指南 | [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) |
+| 产品说明书 | 功能介绍、部署指南、Gales策略 | [`docs/PRODUCT_MANUAL.md`](./docs/PRODUCT_MANUAL.md) |
+| 策略操盘手册 | 策略开发、实盘操作、配置卡 | [`docs/TRADER_MANUAL.md`](./docs/TRADER_MANUAL.md) |
+
+### 架构文档
+| 文档 | 说明 | 路径 |
+|------|------|------|
+| 系统架构总览 | 全局架构、数据流 | [`docs/SYSTEM_OVERVIEW.md`](./docs/SYSTEM_OVERVIEW.md) |
+| 技术架构 | v3.0详细设计 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) |
+| 目录结构 | 项目结构说明 | [`DIRECTORY_STRUCTURE.md`](./DIRECTORY_STRUCTURE.md) |
+| 设计文档 | 轻量级引擎设计 | [`DESIGN.md`](./DESIGN.md) |
+
+### 模块文档
+| 模块 | 说明 | 路径 |
+|------|------|------|
+| 引擎层 | 回测/实盘引擎 | [`src/engine/README.md`](./src/engine/README.md) |
+| 执行层 | 订单通道、风控、熔断 | [`src/execution/README.md`](./src/execution/README.md) |
+| Providers | 交易所适配 | [`src/providers/README.md`](./src/providers/README.md) |
+| 测试脚本 | 测试说明 | [`tests/README.md`](./tests/README.md) |
+
+### 路线图与规划
+| 文档 | 说明 | 路径 |
+|------|------|------|
+| 开发路线图 | v3.0路线图 | [`docs/ROADMAP.md`](./docs/ROADMAP.md) |
+| 进化路线图 | P0-P4详细规划 | [`docs/EVOLUTION_ROADMAP.md`](./docs/EVOLUTION_ROADMAP.md) |
+
+### 策略与运维
+| 文档 | 说明 | 路径 |
+|------|------|------|
+| 策略开发指南 | QuickJS策略编写 | [`STRATEGY_GUIDE.md`](./STRATEGY_GUIDE.md) |
+| Gales策略复盘 | Paper Trade分析 | [`docs/GALES_STRATEGY_RELEASE_NOTE.md`](./docs/GALES_STRATEGY_RELEASE_NOTE.md) |
+| 熔断增强方案 | P0/P1/P2实现 | [`docs/CIRCUIT_BREAKER_ENHANCEMENT_PLAN.md`](./docs/CIRCUIT_BREAKER_ENHANCEMENT_PLAN.md) |
 
 ---
 
