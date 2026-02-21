@@ -1089,8 +1089,8 @@ struct NDTSDB {
 };
 
 // 动态内存存储
-#define MAX_SYMBOLS 100
-#define INITIAL_KLINES_CAPACITY 1024  // 初始容量，动态扩展
+#define INITIAL_SYMBOLS_CAPACITY 16   // symbol数组初始容量
+#define INITIAL_KLINES_CAPACITY 1024  // klines数组初始容量
 
 typedef struct {
     char symbol[32];
@@ -1100,17 +1100,37 @@ typedef struct {
     KlineRow* klines;   // 动态分配的指针
 } SymbolData;
 
-static SymbolData g_symbols[MAX_SYMBOLS];
-static uint32_t g_symbol_count = 0;
+static SymbolData* g_symbols = NULL;     // 动态分配的symbol数组
+static uint32_t g_symbol_count = 0;      // 当前symbol数量
+static uint32_t g_symbols_capacity = 0;  // 当前symbol数组容量
 
 static SymbolData* find_or_create_symbol(const char* symbol, const char* interval) {
+    // 首次使用，lazy init
+    if (!g_symbols) {
+        g_symbols_capacity = INITIAL_SYMBOLS_CAPACITY;
+        g_symbols = (SymbolData*)malloc(g_symbols_capacity * sizeof(SymbolData));
+        if (!g_symbols) return NULL;
+        memset(g_symbols, 0, g_symbols_capacity * sizeof(SymbolData));
+    }
+
+    // 查找已存在的symbol
     for (uint32_t i = 0; i < g_symbol_count; i++) {
         if (strcmp(g_symbols[i].symbol, symbol) == 0 && 
             strcmp(g_symbols[i].interval, interval) == 0) {
             return &g_symbols[i];
         }
     }
-    if (g_symbol_count >= MAX_SYMBOLS) return NULL;
+    
+    // 需要新增symbol，检查是否需要扩容
+    if (g_symbol_count >= g_symbols_capacity) {
+        uint32_t new_capacity = g_symbols_capacity * 2;
+        SymbolData* new_symbols = (SymbolData*)realloc(g_symbols, new_capacity * sizeof(SymbolData));
+        if (!new_symbols) return NULL;
+        // 清零新分配的内存
+        memset(new_symbols + g_symbols_capacity, 0, (new_capacity - g_symbols_capacity) * sizeof(SymbolData));
+        g_symbols = new_symbols;
+        g_symbols_capacity = new_capacity;
+    }
     
     SymbolData* sd = &g_symbols[g_symbol_count++];
     strncpy(sd->symbol, symbol, sizeof(sd->symbol) - 1);
@@ -1266,7 +1286,7 @@ NDTSDB* ndtsdb_open(const char* path) {
                 fread(&chunk_crc, 4, 1, f);
                 
                 // 还原rows并写入 g_symbols
-                for (uint32_t i = 0; i < row_count && g_symbol_count < MAX_SYMBOLS; i++) {
+                for (uint32_t i = 0; i < row_count; i++) {
                     const char* sym = (sym_ids[i] >= 0 && sym_ids[i] < n_sym) ? sym_dict[sym_ids[i]] : "UNKNOWN";
                     const char* itv = (itv_ids[i] >= 0 && itv_ids[i] < n_itv) ? itv_dict[itv_ids[i]] : "UNKNOWN";
                     
@@ -1311,7 +1331,28 @@ NDTSDB* ndtsdb_open(const char* path) {
                 fread(&version, 4, 1, f);
                 fread(&count, 4, 1, f);
                 
-                for (uint32_t i = 0; i < count && g_symbol_count < MAX_SYMBOLS; i++) {
+                // 确保g_symbols已分配
+                if (!g_symbols) {
+                    g_symbols_capacity = INITIAL_SYMBOLS_CAPACITY;
+                    g_symbols = (SymbolData*)malloc(g_symbols_capacity * sizeof(SymbolData));
+                    if (!g_symbols) {
+                        fclose(f);
+                        return db;
+                    }
+                    memset(g_symbols, 0, g_symbols_capacity * sizeof(SymbolData));
+                }
+
+                for (uint32_t i = 0; i < count; i++) {
+                    // 检查是否需要扩容
+                    if (g_symbol_count >= g_symbols_capacity) {
+                        uint32_t new_capacity = g_symbols_capacity * 2;
+                        SymbolData* new_symbols = (SymbolData*)realloc(g_symbols, new_capacity * sizeof(SymbolData));
+                        if (!new_symbols) break;  // 扩容失败，停止读取
+                        memset(new_symbols + g_symbols_capacity, 0, (new_capacity - g_symbols_capacity) * sizeof(SymbolData));
+                        g_symbols = new_symbols;
+                        g_symbols_capacity = new_capacity;
+                    }
+
                     SymbolData* sd = &g_symbols[g_symbol_count];
                     fread(sd->symbol, 32, 1, f);
                     fread(sd->interval, 16, 1, f);
@@ -1492,8 +1533,14 @@ cleanup:
             g_symbols[i].klines = NULL;
         }
     }
+    /* 释放symbol数组本身 */
+    if (g_symbols) {
+        free(g_symbols);
+        g_symbols = NULL;
+    }
     /* 重置全局状态 */
     g_symbol_count = 0;
+    g_symbols_capacity = 0;
     free(db);
 }
 
