@@ -105,6 +105,9 @@ export class QuickJSStrategy {
   private fundingRateCache: Map<string, { fundingRate: number; nextFundingTime: number; timestamp: number }> = new Map();
   private lastFundingFeeCheck: number = 0;
 
+  // bridge_scheduleAt 定时任务注册表
+  private scheduleRegistry: Map<string, { nextTrigger: number; callbackName: string; scheduleType: string }> = new Map();
+
   // bar 缓存层（历史K线 REST→ndtsdb，不影响WS tick路径）
   private barCache = new BarCacheLayer({
     logger: (msg) => logger.info(`[BarCache] ${msg}`),
@@ -482,6 +485,72 @@ export class QuickJSStrategy {
   }
 
   /**
+   * P1新增：检查并执行定时任务
+   * 在每次心跳前调用，检查scheduleRegistry中是否有到期的任务
+   */
+  private checkAndExecuteScheduledTasks(): void {
+    if (!this.ctx || this.scheduleRegistry.size === 0) return;
+    
+    const now = Date.now();
+    const dueTasks: Array<{ callbackName: string; scheduleType: string; registryKey: string }> = [];
+    
+    // 检查所有注册的任务
+    for (const [registryKey, task] of this.scheduleRegistry.entries()) {
+      if (now >= task.nextTrigger) {
+        dueTasks.push({ callbackName: task.callbackName, scheduleType: task.scheduleType, registryKey });
+        
+        // 更新下次触发时间
+        let nextTrigger = task.nextTrigger;
+        switch (task.scheduleType) {
+          case 'HOURLY':
+            nextTrigger += 3600000; // +1小时
+            break;
+          case 'DAILY_UTC':
+            nextTrigger += 86400000; // +1天
+            break;
+          default:
+            if (task.scheduleType.startsWith('EVERY_N_MIN:')) {
+              const minutes = parseInt(task.scheduleType.split(':')[1], 10);
+              nextTrigger += minutes * 60000;
+            }
+        }
+        task.nextTrigger = nextTrigger;
+        
+        const nextTriggerStr = new Date(nextTrigger).toISOString();
+        logger.info(`[QuickJSStrategy] 定时任务 ${registryKey} 下次触发: ${nextTriggerStr}`);
+      }
+    }
+    
+    // 执行到期的任务
+    for (const task of dueTasks) {
+      try {
+        // 检查策略是否实现了对应的回调函数
+        const fnHandle = this.ctx!.getProp(this.ctx!.global, task.callbackName);
+        const fnType = this.ctx!.typeof(fnHandle);
+        
+        if (fnType === 'function') {
+          logger.info(`[QuickJSStrategy] 执行定时任务: ${task.callbackName} (${task.scheduleType})`);
+          const result = this.ctx!.callFunction(fnHandle, this.ctx!.undefined);
+          fnHandle.dispose();
+          
+          if (result.error) {
+            const errorMsg = this.ctx!.dump(result.error);
+            logger.error(`[QuickJSStrategy] 定时任务 ${task.callbackName} 执行失败:`, errorMsg);
+            result.error.dispose();
+          } else {
+            result.value.dispose();
+          }
+        } else {
+          fnHandle.dispose();
+          logger.warn(`[QuickJSStrategy] 定时任务回调函数不存在: ${task.callbackName}`);
+        }
+      } catch (error: any) {
+        logger.error(`[QuickJSStrategy] 执行定时任务 ${task.callbackName} 异常:`, error.message);
+      }
+    }
+  }
+
+  /**
    * K线更新
    */
   async onBar(bar: Kline, ctx: StrategyContext): Promise<void> {
@@ -510,6 +579,9 @@ export class QuickJSStrategy {
 
       // P1新增：资金费检测（在heartbeat之前）
       await this.checkAndNotifyFundingFee(bar.symbol || 'UNKNOWN');
+
+      // P1新增：检查并执行定时任务（在heartbeat之前）
+      this.checkAndExecuteScheduledTasks();
 
       // 调用 st_heartbeat
       await this.callStrategyFunction('st_heartbeat', tick);
@@ -588,6 +660,9 @@ export class QuickJSStrategy {
       // P2修复：订单闭环对账（bot-009/鲶鱼建议）
       await this.reconcileOrders(ctx);
     }
+
+    // P1新增：检查并执行定时任务（在heartbeat之前）
+    this.checkAndExecuteScheduledTasks();
 
     // 调用 st_heartbeat
     await this.callStrategyFunction('st_heartbeat', {
@@ -1904,6 +1979,53 @@ export class QuickJSStrategy {
     });
     this.ctx.setProp(this.ctx.global, 'bridge_onRunIdChange', bridge_onRunIdChange);
     bridge_onRunIdChange.dispose();
+
+    // bridge_scheduleAt - 通用定时任务注册
+    const bridge_scheduleAt = this.ctx.newFunction('bridge_scheduleAt', (scheduleTypeHandle, callbackNameHandle) => {
+      const scheduleType = this.ctx!.getString(scheduleTypeHandle);
+      const callbackName = this.ctx!.getString(callbackNameHandle);
+      
+      const now = Date.now();
+      let nextTrigger = 0;
+      
+      switch (scheduleType) {
+        case 'HOURLY':
+          // 下一个整点
+          nextTrigger = new Date(now).setMinutes(0, 0, 0) + 3600000;
+          break;
+        case 'DAILY_UTC':
+          // 下一个UTC 00:00
+          const nowUtc = new Date(now);
+          nextTrigger = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1);
+          break;
+        default:
+          // 解析 EVERY_N_MIN:30 格式
+          if (scheduleType.startsWith('EVERY_N_MIN:')) {
+            const minutes = parseInt(scheduleType.split(':')[1], 10);
+            if (isNaN(minutes) || minutes <= 0) {
+              logger.error(`[QuickJSStrategy] bridge_scheduleAt: 无效的时间间隔: ${scheduleType}`);
+              return this.ctx!.newString(JSON.stringify({ success: false, error: 'Invalid interval' }));
+            }
+            // 对齐到分钟边界
+            const currentMinute = Math.floor(now / 60000);
+            const alignedMinute = Math.ceil((currentMinute + 1) / minutes) * minutes;
+            nextTrigger = alignedMinute * 60000;
+          } else {
+            logger.error(`[QuickJSStrategy] bridge_scheduleAt: 未知的scheduleType: ${scheduleType}`);
+            return this.ctx!.newString(JSON.stringify({ success: false, error: 'Unknown scheduleType' }));
+          }
+      }
+      
+      const registryKey = `${scheduleType}:${callbackName}`;
+      this.scheduleRegistry.set(registryKey, { nextTrigger, callbackName, scheduleType });
+      
+      const nextTriggerStr = new Date(nextTrigger).toISOString();
+      logger.info(`[QuickJSStrategy] bridge_scheduleAt: 注册定时任务 ${registryKey}, 下次触发: ${nextTriggerStr}`);
+      
+      return this.ctx!.newString(JSON.stringify({ success: true, nextTrigger, registryKey }));
+    });
+    this.ctx.setProp(this.ctx.global, 'bridge_scheduleAt', bridge_scheduleAt);
+    bridge_scheduleAt.dispose();
   }
 
   /**

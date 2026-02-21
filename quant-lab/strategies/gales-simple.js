@@ -28,6 +28,15 @@ let marketRegimeState = {
   lastRegimeAlertAt: 0,       // 上次状态告警时间（防抖）
 };
 
+/**
+ * 每小时定时任务回调
+ * 在 st_init 中通过 bridge_scheduleAt('HOURLY', 'st_onHourly') 注册
+ */
+function st_onHourly() {
+  logInfo('[定时] 每小时检查点 - 当前仓位: ' + (state.positionNotional || 0).toFixed(2));
+  // 可在此添加定时统计、风险报告、策略状态自检等逻辑
+}
+
 // ================================
 // 配置
 // ================================
@@ -1779,6 +1788,16 @@ function st_onExecution(execJson) {
     logInfo('[成交明细] execId=' + exec.execId + ' ' + side + ' ' + execQty.toFixed(4) + ' @ ' + execPrice.toFixed(4) + 
             ' | 仓位Notional=' + state.positionNotional.toFixed(2));
 
+    // simMode: 记录模拟成交
+    if (CONFIG.simMode && typeof bridge_recordSimTrade === 'function') {
+      try {
+        bridge_recordSimTrade(execPrice, execQty, side, CONFIG.symbol);
+        logDebug('[st_onExecution] bridge_recordSimTrade called: price=' + execPrice + ' qty=' + execQty + ' side=' + side + ' symbol=' + CONFIG.symbol);
+      } catch (e) {
+        logWarn('[st_onExecution] bridge_recordSimTrade failed: ' + e);
+      }
+    }
+
     saveState();
   } catch (e) {
     logWarn('st_onExecution failed: ' + e);
@@ -2289,6 +2308,12 @@ function st_init() {
   
   // P2修复：检测遗留订单（鲶鱼建议）
   checkLegacyOrders();
+  
+  // bridge_scheduleAt 示例：注册每小时定时任务
+  if (typeof bridge_scheduleAt === 'function') {
+    bridge_scheduleAt('HOURLY', 'st_onHourly');
+    logInfo('[Init] 已注册每小时定时任务: st_onHourly');
+  }
 }
 
 // ================================
