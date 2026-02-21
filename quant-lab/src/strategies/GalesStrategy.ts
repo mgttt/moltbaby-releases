@@ -148,16 +148,94 @@ export class GalesStrategy {
   }
 
   /**
-   * 停止
+   * 停止（优雅停机）
+   * 
+   * 修复：确保所有订单取消完成后再退出
    */
-  onStop(ctx: StrategyContext): void {
-    console.log('[GalesStrategy] 停止策略，取消所有挂单...');
-    
-    for (const grid of this.gridLevels) {
-      if (grid.state === 'ACTIVE' && grid.orderId) {
-        this.cancelGridOrder(grid);
-      }
+  async onStop(ctx: StrategyContext): Promise<void> {
+    console.log('[GalesStrategy] 开始优雅停机，取消所有挂单...');
+
+    // 1. 收集所有需要取消的订单
+    const activeGrids = this.gridLevels.filter(
+      (grid) => grid.state === 'ACTIVE' && grid.orderId
+    );
+
+    if (activeGrids.length === 0) {
+      console.log('[GalesStrategy] 无活跃订单，停机完成');
+      return;
     }
+
+    console.log(`[GalesStrategy] 发现 ${activeGrids.length} 个活跃订单，开始取消...`);
+
+    // 2. 并发取消所有订单（带超时保护）
+    const cancelPromises = activeGrids.map((grid) =>
+      this.cancelGridOrderWithTimeout(grid, 10) // 最多等10秒
+    );
+
+    try {
+      // 3. 等待所有取消操作完成（带总超时保护）
+      const overallTimeout = 15; // 总超时15秒
+      await Promise.race([
+        Promise.all(cancelPromises),
+        this.createTimeout(overallTimeout * 1000, '总超时'),
+      ]);
+
+      console.log('[GalesStrategy] 所有订单取消操作已完成');
+    } catch (error: any) {
+      console.error('[GalesStrategy] 停机超时或出错:', error.message);
+    }
+
+    // 4. 验证所有订单已取消
+    const remainingActive = this.gridLevels.filter(
+      (grid) => grid.state === 'ACTIVE' && grid.orderId
+    );
+
+    if (remainingActive.length > 0) {
+      console.warn(
+        `[GalesStrategy] ⚠️ 停机警告: 仍有 ${remainingActive.length} 个订单未取消`
+      );
+      remainingActive.forEach((grid) => {
+        console.warn(
+          `  - gridId=${grid.id} orderId=${grid.orderId} side=${grid.side}`
+        );
+      });
+    } else {
+      console.log('[GalesStrategy] ✅ 停机验证通过: 所有订单已取消');
+    }
+
+    console.log('[GalesStrategy] 优雅停机完成');
+  }
+
+  /**
+   * 取消网格订单（带超时保护）
+   */
+  private async cancelGridOrderWithTimeout(
+    grid: GridLevel,
+    timeoutSeconds: number
+  ): Promise<void> {
+    try {
+      await Promise.race([
+        this.cancelGridOrder(grid),
+        this.createTimeout(
+          timeoutSeconds * 1000,
+          `取消订单超时 gridId=${grid.id}`
+        ),
+      ]);
+    } catch (error: any) {
+      console.error(
+        `[GalesStrategy] 取消订单失败 gridId=${grid.id}:`,
+        error.message
+      );
+    }
+  }
+
+  /**
+   * 创建超时Promise
+   */
+  private createTimeout(ms: number, message: string): Promise<never> {
+    return new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(message)), ms);
+    });
   }
 
   /**

@@ -293,6 +293,18 @@ async function main() {
     logger.info(`[QuickJS] [BEFORE_EXIT] 即将退出 code=${code}, tickCount=${tickCount}, runtime=${runtime}s`);
   });
 
+  // P1修复：未捕获异常处理（防止静默损坏策略状态）
+  process.on('unhandledRejection', (reason, promise) => {
+    logger.error(`[FATAL] unhandledRejection: ${reason instanceof Error ? reason.stack : reason}`);
+    // 不强制退出，记录后继续运行，避免打断持仓中的策略
+  });
+
+  process.on('uncaughtException', (err) => {
+    logger.error(`[FATAL] uncaughtException: ${err.stack || err.message}`);
+    // 未捕获同步异常通常不可恢复，记录后优雅退出
+    process.exit(1);
+  });
+
   // 5. 启动心跳循环
   logger.info('[QuickJS] 策略启动...');
 
