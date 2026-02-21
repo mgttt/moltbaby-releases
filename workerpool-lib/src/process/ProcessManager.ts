@@ -42,6 +42,8 @@ interface ProcessInstance {
   restartTimer?: NodeJS.Timeout;
   monitorTimer?: NodeJS.Timeout;
   startTime: number;
+  /** 由 stop() 显式停止，不触发 autorestart */
+  intentionallyStopped?: boolean;
 }
 
 /**
@@ -139,6 +141,9 @@ export class ProcessManager extends EventEmitter {
       clearInterval(instance.monitorTimer);
       instance.monitorTimer = undefined;
     }
+
+    // 标记为显式停止，handleExit 不触发 autorestart
+    instance.intentionallyStopped = true;
 
     // 更新状态
     instance.state.status = 'stopping';
@@ -307,7 +312,7 @@ export class ProcessManager extends EventEmitter {
       const spawnOptions: SpawnOptions = {
         cwd,
         env,
-        detached: false,
+        detached: true,  // 独立进程组，防止父进程 SIGTERM 传播
         stdio: ['ignore', 'pipe', 'pipe'],
       };
 
@@ -426,10 +431,8 @@ export class ProcessManager extends EventEmitter {
     const autorestart = config.autorestart !== false;
     const maxRestarts = config.maxRestarts ?? 10;
 
-    // 正常退出（code === 0 且不是被信号终止）不重启
-    const isNormalExit = code === 0 && !signal;
-
-    if (!autorestart || isNormalExit) {
+    // 显式 stop() 调用 或 autorestart=false → 不重启
+    if (!autorestart || instance.intentionallyStopped) {
       this.logManager.close(config.name);
       this.processes.delete(config.name);
       return;
