@@ -2793,6 +2793,51 @@ function st_onParamsUpdate(newParamsJson) {
 }
 
 /**
+ * P1新增：资金费结算回调
+ * Bybit每8小时结算一次（08:00, 16:00, 00:00 UTC）
+ * 
+ * @param {string} feeJson - JSON格式的资金费数据 {symbol, fundingRate, nextFundingTime, timeToFundingMs}
+ */
+function st_onFundingFee(feeJson) {
+  try {
+    const fee = (typeof feeJson === 'string') ? JSON.parse(feeJson) : feeJson;
+    const { symbol, fundingRate, nextFundingTime, timeToFundingMs } = fee;
+    
+    const fundingPct = (fundingRate * 100).toFixed(4);
+    const timeToFundingSec = Math.floor(timeToFundingMs / 1000);
+    
+    logInfo('[资金费结算] ' + symbol + ' rate=' + fundingPct + '% timeToFunding=' + timeToFundingSec + 's');
+    
+    // 资金费率 > 0.1%（空头大收益）→ 触发一次加仓机会提示
+    if (fundingRate > 0.001) {
+      logWarn('[资金费机会] 空头收益率 ' + fundingPct + '% > 0.1%，可考虑加仓做空');
+      try {
+        if (typeof bridge_tgSend === 'function') {
+          bridge_tgSend('9号', '[机会] ' + symbol + ' 资金费率 ' + fundingPct + '%，空头收益丰厚，评估加仓做空 runId=' + state.runId);
+        }
+      } catch (e) {}
+    }
+    
+    // 资金费率 < -0.1%（空头付费）→ 发出减仓警告
+    else if (fundingRate < -0.001) {
+      logWarn('[资金费警告] 空头付费率 ' + fundingPct + '% < -0.1%，建议减仓避免高成本');
+      try {
+        if (typeof bridge_tgSend === 'function') {
+          bridge_tgSend('9号', '[警告] ' + symbol + ' 资金费率 ' + fundingPct + '%，空头付费高，考虑减仓 runId=' + state.runId);
+        }
+      } catch (e) {}
+    }
+    
+    // 常规记录（-0.1% 到 0.1% 之间）
+    else {
+      logInfo('[资金费常规] 费率 ' + fundingPct + '% 在常规区间，无特殊操作');
+    }
+  } catch (e) {
+    logWarn('st_onFundingFee failed: ' + e);
+  }
+}
+
+/**
  * 停止
  */
 function st_stop() {

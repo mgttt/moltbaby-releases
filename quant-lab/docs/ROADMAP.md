@@ -203,3 +203,53 @@
 - 当前每个策略自维护state.positionNotional
 - 多品种扩展时会混乱
 - 目标：bridge_getPortfolio() → {positions:{[symbol]:{notional,avgCost,unrealizedPnl}}, totalEquity, leverage}
+
+---
+
+## 📚 三平台对标缺口（QuantConnect + Freqtrade + JoinQuant）2026-02-21
+
+### 三平台核心设计思路
+
+| 平台 | 核心设计哲学 |
+|------|------------|
+| JoinQuant | 生命周期事件 + 目标仓位下单（order_target系列）|
+| QuantConnect | 事件驱动 + 模块化架构（Alpha/Risk/Execution分层）|
+| Freqtrade | 信号标注 + 可插拔钩子（custom_stoploss/ROI表）|
+
+### 高价值缺口（三平台对标后新发现）
+
+**P1: 订单超时自动撤单 `orderTimeoutSec`（Freqtrade）**
+- 当前：网格订单可能挂很久无成交，占用仓位额度
+- Freqtrade：`unfilledtimeout.entry/exit` 自动撤销超时未成交订单
+- 实现：CONFIG.orderTimeoutSec，每次心跳检查openOrders中挂单时长，超时→自动cancel
+- 价值：减少"僵尸订单"，解放仓位额度
+
+**P1: 动态止损回调 `st_customStoploss()`（Freqtrade）**
+- 当前：只有硬仓位熔断，没有基于持仓盈亏的止损
+- Freqtrade：custom_stoploss(pair, current_rate, open_rate, current_profit, trade_age_minutes)
+- 实现：框架层计算持仓平均成本和当前盈亏，每心跳调用策略JS的st_customStoploss()
+- 价值：策略可实现"盈利转追踪止损"逻辑，避免大回撤
+
+**P1: 通用定时任务 `bridge_scheduleAt(cron, callback)`（QuantConnect）**
+- 当前：只有st_onFundingFee特定时间点
+- QuantConnect：Schedule.On(DateRules, TimeRules, action)任意时间调度
+- 实现：允许策略JS注册cron表达式（简化版：每小时/每天等），框架层按时触发
+- 价值：策略可自主安排：日终清网格/每小时重算参数/每天汇报日PnL
+
+**P2: ROI时间梯度表（Freqtrade）**
+- Freqtrade：minimal_roi = {"0": 0.05, "30": 0.03, "120": 0.01}
+- 含义：持仓时间越久，目标收益阈值越低（快进快出优先）
+- 对网格策略应用：网格触发距离可以随持仓时长动态收窄（持仓越久越激进平仓）
+- 实现：CONFIG.gridTimeDecay，每tick检查各grid持仓时长，超时后降低触发距离
+
+**P2: populate_indicators分离（Freqtrade）**
+- 当前：指标计算在st_heartbeat心跳里混合，耦合度高
+- Freqtrade：populate_indicators在K线准备好后独立调用
+- 实现：新增st_prepareIndicators(klinesJson)，框架在每次心跳前调用，结果缓存到tickCache
+- 价值：指标计算逻辑与交易逻辑解耦，更清晰
+
+**P3: Alpha/Execution分层架构（QuantConnect）**
+- QuantConnect：Alpha Model生成信号 → Portfolio Construction → Execution Model执行
+- 对我们：策略JS = Alpha Model；框架TS = Execution Model；Bridge = 信号传递层
+- 价值：多策略信号聚合（多个Alpha共享一个Execution），多品种组合管理基础
+

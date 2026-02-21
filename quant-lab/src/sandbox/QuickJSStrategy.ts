@@ -101,6 +101,10 @@ export class QuickJSStrategy {
   } = { symbol: '', side: 'FLAT', qty: 0, avgPrice: 0 };
   private runningSimPnl = 0;
 
+  // P1新增：资金费检测状态
+  private fundingRateCache: Map<string, { fundingRate: number; nextFundingTime: number; timestamp: number }> = new Map();
+  private lastFundingFeeCheck: number = 0;
+
   // bar 缓存层（历史K线 REST→ndtsdb，不影响WS tick路径）
   private barCache = new BarCacheLayer({
     logger: (msg) => logger.info(`[BarCache] ${msg}`),
@@ -504,6 +508,9 @@ export class QuickJSStrategy {
       volume: bar.volume,
     };
 
+      // P1新增：资金费检测（在heartbeat之前）
+      await this.checkAndNotifyFundingFee(bar.symbol || 'UNKNOWN');
+
       // 调用 st_heartbeat
       await this.callStrategyFunction('st_heartbeat', tick);
 
@@ -695,6 +702,72 @@ export class QuickJSStrategy {
       case 'PartiallyFilled':
         this.orderStateManager.updateFill(orderLinkId, orderUpdate.cumQty || 0);
         break;
+    }
+  }
+
+  /**
+   * P1新增：检测并通知资金费结算
+   * 在距nextFundingTime<60s时，调用策略JS的st_onFundingFee
+   */
+  private async checkAndNotifyFundingFee(symbol: string): Promise<void> {
+    if (!this.strategyCtx?.getFundingRate) {
+      return;
+    }
+
+    const now = Date.now();
+
+    // 避免过于频繁的检查（至少间隔30秒）
+    if (now - this.lastFundingFeeCheck < 30000) {
+      return;
+    }
+    this.lastFundingFeeCheck = now;
+
+    try {
+      // 获取资金费率信息
+      const { fundingRate, nextFundingTime } = await this.strategyCtx.getFundingRate(symbol);
+
+      // 更新缓存
+      this.fundingRateCache.set(symbol, { fundingRate, nextFundingTime, timestamp: now });
+
+      // 计算距资金费结算的时间
+      const timeToFundingMs = nextFundingTime - now;
+
+      // 如果距离结算时间<60s，触发回调
+      if (timeToFundingMs > 0 && timeToFundingMs < 60000) {
+        logger.info(`[QuickJSStrategy] 资金费即将结算: ${symbol}, rate=${fundingRate}, timeToFunding=${timeToFundingMs}ms`);
+
+        // 检查策略是否实现了st_onFundingFee
+        if (!this.ctx) return;
+
+        const globalHandle = this.ctx.global;
+        const stOnFundingFeeHandle = this.ctx.getProp(globalHandle, 'st_onFundingFee');
+        const isFunction = this.ctx.typeof(stOnFundingFeeHandle) === 'function';
+        stOnFundingFeeHandle.dispose();
+
+        if (isFunction) {
+          const feeData = {
+            symbol,
+            fundingRate,
+            nextFundingTime,
+            timeToFundingMs,
+          };
+
+          const feeJson = JSON.stringify(feeData);
+          const code = `st_onFundingFee(${feeJson})`;
+          const result = this.ctx.evalCode(code);
+
+          if (result.error) {
+            const errorMsg = this.ctx.dump(result.error);
+            logger.error(`[QuickJSStrategy] st_onFundingFee 执行失败:`, errorMsg);
+            result.error.dispose();
+          } else {
+            logger.info(`[QuickJSStrategy] st_onFundingFee 执行成功: ${symbol}`);
+            result.value.dispose();
+          }
+        }
+      }
+    } catch (error: any) {
+      logger.warn(`[QuickJSStrategy] 检测资金费失败:`, error.message);
     }
   }
 
