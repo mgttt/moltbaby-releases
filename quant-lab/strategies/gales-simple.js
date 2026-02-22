@@ -3031,6 +3031,13 @@ function st_onFundingFee(feeJson) {
  * @param {string} stoplossJson - JSON格式的止损数据 {position, entryPrice, currentPrice, holdingMinutes, unrealizedPnl, unrealizedPnlPct}
  * @returns {number} 止损阈值（负值表示亏损，正值表示允许回撤比例）
  */
+
+// P3修复：动态止损日志防抖（60秒内相同内容只输出1次）
+let stoplossLogCache = {
+  key: '',
+  lastLogAt: 0,
+};
+
 function st_customStoploss(stoplossJson) {
   try {
     const data = (typeof stoplossJson === 'string') ? JSON.parse(stoplossJson) : stoplossJson;
@@ -3044,26 +3051,45 @@ function st_customStoploss(stoplossJson) {
     
     const pnlPct = unrealizedPnlPct || (unrealizedPnl / (Math.abs(position) * entryPrice));
     
+    // P3修复：防抖辅助函数 - key只用止损类型固定字符串，60秒内同一类型最多输出1次
+    function shouldLog(stageKey) {
+      const now = Date.now();
+      if (stageKey !== stoplossLogCache.key || (now - stoplossLogCache.lastLogAt) > 60000) {
+        stoplossLogCache.key = stageKey;
+        stoplossLogCache.lastLogAt = now;
+        return true;
+      }
+      return false;
+    }
+    
     // 前60分钟：固定-15%止损（最大亏损）
     if (holdingMinutes < 60) {
-      logInfo('[动态止损] 前60分钟，固定-15%止损 holding=' + holdingMinutes + 'min pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      if (shouldLog('stoploss_60min_fixed')) {
+        logInfo('[动态止损] 前60分钟，固定-15%止损 holding=' + holdingMinutes + 'min pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      }
       return -0.15;
     }
     
     // 盈利>10%后：转-1.5%追踪止损（锁定更多利润）
     if (pnlPct > 0.10) {
-      logInfo('[动态止损] 盈利>10%，转-1.5%追踪止损 pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      if (shouldLog('stoploss_gt10pct_trailing')) {
+        logInfo('[动态止损] 盈利>10%，转-1.5%追踪止损 pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      }
       return -0.015;
     }
     
     // 盈利>5%后：转-3%追踪止损（保护利润）
     if (pnlPct > 0.05) {
-      logInfo('[动态止损] 盈利>5%，转-3%追踪止损 pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      if (shouldLog('stoploss_gt5pct_trailing')) {
+        logInfo('[动态止损] 盈利>5%，转-3%追踪止损 pnl=' + (pnlPct * 100).toFixed(2) + '%');
+      }
       return -0.03;
     }
     
     // 默认：-15%止损
-    logInfo('[动态止损] 默认-15%止损 holding=' + holdingMinutes + 'min pnl=' + (pnlPct * 100).toFixed(2) + '%');
+    if (shouldLog('stoploss_default')) {
+      logInfo('[动态止损] 默认-15%止损 holding=' + holdingMinutes + 'min pnl=' + (pnlPct * 100).toFixed(2) + '%');
+    }
     return -0.15;
   } catch (e) {
     logWarn('st_customStoploss failed: ' + e);
