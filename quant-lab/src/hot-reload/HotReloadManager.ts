@@ -17,7 +17,7 @@
  * 7. 告警必达
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { AlertManager } from './AlertManager';
 import { StrategyReloader } from './StrategyReloader';
@@ -544,7 +544,9 @@ export class HotReloadManager {
       if (snapshot.state && Object.keys(snapshot.state).length > 0) {
         // 恢复状态文件
         const data = { state: snapshot.state };
-        writeFileSync(stateFile, JSON.stringify(data, null, 2));
+        const tmpStateFile = stateFile + '.tmp';
+        writeFileSync(tmpStateFile, JSON.stringify(data, null, 2));
+        renameSync(tmpStateFile, stateFile);
         console.log(`[HotReload] 回滚：状态文件已恢复 (${Object.keys(snapshot.state).length} 个键)`);
       }
 

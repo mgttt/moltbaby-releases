@@ -15,7 +15,7 @@ import type {
   Position as BybitPosition 
 } from './bybit.js';
 // import { TradeAnalytics } from '../analytics/index.js';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 /**
@@ -953,7 +953,10 @@ export class PaperTradingProvider {
   private async saveState(): Promise<void> {
     try {
       await mkdir(dirname(this.stateFile), { recursive: true });
-      await writeFile(this.stateFile, JSON.stringify(this.state, null, 2), 'utf-8');
+      // 原子写入：先写 .tmp，再 rename（POSIX 保证原子性）
+      const tmpPath = this.stateFile + '.tmp';
+      await writeFile(tmpPath, JSON.stringify(this.state, null, 2), 'utf-8');
+      await rename(tmpPath, this.stateFile);
     } catch (error) {
       console.error('[PaperTrading] Failed to save state:', error);
     }

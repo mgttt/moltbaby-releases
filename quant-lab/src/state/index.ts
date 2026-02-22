@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 /**
@@ -70,9 +70,11 @@ export class StateManager {
     try {
       // 确保目录存在
       await mkdir(dirname(statePath), { recursive: true });
-      
-      // 格式化写入（2 空格缩进）
-      await writeFile(statePath, JSON.stringify(state, null, 2), 'utf-8');
+
+      // 原子写入：先写 .tmp，再 rename（POSIX 保证原子性，崩溃不会截断 JSON）
+      const tmpPath = statePath + '.tmp';
+      await writeFile(tmpPath, JSON.stringify(state, null, 2), 'utf-8');
+      await rename(tmpPath, statePath);
     } catch (error: any) {
       console.error(`[StateManager] Failed to save state for ${strategyId}: ${error.message}`);
       throw new Error(`State save failed: ${error.message}`);
@@ -87,7 +89,9 @@ export class StateManager {
     const statePath = this.getStatePath(strategyId);
     
     try {
-      await writeFile(statePath, '{}', 'utf-8');
+      const tmpPath = statePath + '.tmp';
+      await writeFile(tmpPath, '{}', 'utf-8');
+      await rename(tmpPath, statePath);
     } catch (error: any) {
       // 忽略错误
     }

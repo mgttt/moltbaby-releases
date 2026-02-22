@@ -7,7 +7,7 @@ const logger = createLogger('QUICK_JSSTRATEGY');
 // 支持热重载、状态持久化、安全隔离
 // ============================================================
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, watchFile, unwatchFile, statSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, watchFile, unwatchFile, statSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { BarCacheLayer } from '../cache/BarCacheLayer.ts';
@@ -2547,7 +2547,10 @@ export class QuickJSStrategy {
   private flushState(): void {
     try {
       const out = Object.fromEntries(this.strategyState.entries());
-      writeFileSync(this.stateFile, JSON.stringify(out, null, 2));
+      // 原子写入：先写 .tmp，再 rename（POSIX 保证原子性）
+      const tmpPath = this.stateFile + '.tmp';
+      writeFileSync(tmpPath, JSON.stringify(out, null, 2));
+      renameSync(tmpPath, this.stateFile);
     } catch (error: any) {
       logger.warn(`[QuickJSStrategy] 写入状态失败:`, error.message);
     }
