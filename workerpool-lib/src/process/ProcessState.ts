@@ -4,7 +4,7 @@
 // 定义进程配置、状态、持久化到 ~/.wp/state/processes.json
 // ============================================================
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 
@@ -182,12 +182,16 @@ export class StateManager {
   }
 
   /**
-   * 保存全局状态
+   * 保存全局状态（原子写）
    */
   saveState(state: GlobalState): void {
     state.updatedAt = new Date().toISOString();
+    const tmpFile = this.stateFile + '.tmp';
     try {
-      writeFileSync(this.stateFile, JSON.stringify(state, null, 2));
+      // 先写入临时文件
+      writeFileSync(tmpFile, JSON.stringify(state, null, 2));
+      // 原子rename覆盖原文件
+      renameSync(tmpFile, this.stateFile);
     } catch (error) {
       console.error('[StateManager] 保存状态失败:', error);
     }
