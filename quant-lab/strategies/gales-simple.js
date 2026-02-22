@@ -2726,24 +2726,31 @@ function st_heartbeat(tickJson) {
   }
 
   // P1修复：兜底自愈 - accountGap超阈值强制账本对齐
-  // 原因：WS成交回调可能丢失，导致accountingPos永远不更新
-  const accountGap = state.riskMetrics?.accountGap || 0;
-  if (accountGap > 50) {
-    state.ledgerMismatchCount = (state.ledgerMismatchCount || 0) + 1;
-    if (state.ledgerMismatchCount >= 3) {
-      // 连续3次心跳超阈值，强制对齐
-      const oldPos = state.positionNotional || 0;
-      const exchangePos = state.exchangePosition || 0;
-      state.positionNotional = exchangePos;
-      logWarn('[自愈] accountGap=' + accountGap.toFixed(2) + '超阈值，连续' + state.ledgerMismatchCount + '次心跳，强制对齐 positionNotional=' + oldPos.toFixed(2) + ' -> ' + exchangePos.toFixed(2));
-      state.ledgerMismatchCount = 0; // 重置计数器
-      saveState();
+  // 注意：simMode下exchangePos = 真实账户持仓（被其他策略污染），不能用于自愈
+  if (CONFIG.simMode) {
+    // simMode直接重置计数器，不触发自愈
+    if (state.ledgerMismatchCount > 0) {
+      state.ledgerMismatchCount = 0;
     }
   } else {
-    // 差值正常，重置计数器
-    if (state.ledgerMismatchCount > 0) {
-      logDebug('[自愈] accountGap回落至' + accountGap.toFixed(2) + '，重置计数器');
-      state.ledgerMismatchCount = 0;
+    const accountGap = state.riskMetrics?.accountGap || 0;
+    if (accountGap > 50) {
+      state.ledgerMismatchCount = (state.ledgerMismatchCount || 0) + 1;
+      if (state.ledgerMismatchCount >= 3) {
+        // 连续3次心跳超阈值，强制对齐
+        const oldPos = state.positionNotional || 0;
+        const exchangePos = state.exchangePosition || 0;
+        state.positionNotional = exchangePos;
+        logWarn('[自愈] accountGap=' + accountGap.toFixed(2) + '超阈值，连续' + state.ledgerMismatchCount + '次心跳，强制对齐 positionNotional=' + oldPos.toFixed(2) + ' -> ' + exchangePos.toFixed(2));
+        state.ledgerMismatchCount = 0; // 重置计数器
+        saveState();
+      }
+    } else {
+      // 差值正常，重置计数器
+      if (state.ledgerMismatchCount > 0) {
+        logDebug('[自愈] accountGap回落至' + accountGap.toFixed(2) + '，重置计数器');
+        state.ledgerMismatchCount = 0;
+      }
     }
   }
 
