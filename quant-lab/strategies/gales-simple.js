@@ -219,6 +219,9 @@ let state = {
   initialOffset: 0,        // 初始差值/历史遗留仓基准
   ledgerRebuildDone: false,
   ledgerRebuildLastTick: 0,
+  
+  // P1修复：兜底自愈 - 账本不匹配计数器
+  ledgerMismatchCount: 0,  // 连续ledger=mismatch心跳数
 
   // P0修复：应急方向切换并发锁（防止placeOrder执行中切换方向）
   isPlacingOrder: false,   // 正在下单标志，下单期间禁止方向切换
@@ -2720,6 +2723,28 @@ function st_heartbeat(tickJson) {
   updateRiskMetrics(tick);
   if (state.tickCount % 12 === 0) { // 约60秒（默认5秒心跳）
     logRiskMetrics();
+  }
+
+  // P1修复：兜底自愈 - accountGap超阈值强制账本对齐
+  // 原因：WS成交回调可能丢失，导致accountingPos永远不更新
+  const accountGap = state.riskMetrics?.accountGap || 0;
+  if (accountGap > 50) {
+    state.ledgerMismatchCount = (state.ledgerMismatchCount || 0) + 1;
+    if (state.ledgerMismatchCount >= 3) {
+      // 连续3次心跳超阈值，强制对齐
+      const oldPos = state.positionNotional || 0;
+      const exchangePos = state.exchangePosition || 0;
+      state.positionNotional = exchangePos;
+      logWarn('[自愈] accountGap=' + accountGap.toFixed(2) + '超阈值，连续' + state.ledgerMismatchCount + '次心跳，强制对齐 positionNotional=' + oldPos.toFixed(2) + ' -> ' + exchangePos.toFixed(2));
+      state.ledgerMismatchCount = 0; // 重置计数器
+      saveState();
+    }
+  } else {
+    // 差值正常，重置计数器
+    if (state.ledgerMismatchCount > 0) {
+      logDebug('[自愈] accountGap回落至' + accountGap.toFixed(2) + '，重置计数器');
+      state.ledgerMismatchCount = 0;
+    }
   }
 
   // 首次初始化网格
