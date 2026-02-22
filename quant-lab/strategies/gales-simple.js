@@ -2866,7 +2866,7 @@ function st_heartbeat(tickJson) {
     }
   } else {
     const accountGap = state.riskMetrics?.accountGap || 0;
-    if (accountGap > 50) {
+    if (accountGap > 30) {
       state.ledgerMismatchCount = (state.ledgerMismatchCount || 0) + 1;
       if (state.ledgerMismatchCount >= 3) {
         // 连续3次心跳超阈值，强制对齐
