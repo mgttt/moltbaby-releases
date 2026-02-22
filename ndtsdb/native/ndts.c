@@ -1086,6 +1086,7 @@ struct NDTSDB {
     char path[256];
     int is_dir;   // 1=目录模式（PartitionedTable格式），0=文件模式（旧格式）
     int dirty;    // 1=有写入操作，close时才写出；0=只读，close不写文件
+    uint64_t snapshot_size;  // snapshot 模式下的最大读取字节数（0表示不限制）
 };
 
 // 动态内存存储
@@ -1149,11 +1150,16 @@ static SymbolData* find_or_create_symbol(const char* symbol, const char* interva
 }
 
 NDTSDB* ndtsdb_open(const char* path) {
+    return ndtsdb_open_snapshot(path, 0);  // 默认不限制 snapshot 大小
+}
+
+NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
     NDTSDB* db = (NDTSDB*)malloc(sizeof(NDTSDB));
     if (!db) return NULL;
     
     strncpy(db->path, path, sizeof(db->path) - 1);
     db->path[sizeof(db->path) - 1] = '\0';
+    db->snapshot_size = snapshot_size;  // 设置 snapshot 限制
     
     // 检测路径类型
     db->is_dir = path_is_dir(path);
@@ -1250,8 +1256,16 @@ NDTSDB* ndtsdb_open(const char* path) {
             // 5. 跳到 chunks 起始位置（固定偏移4100 = 4096 + 4字节CRC）
             fseek(f, 4100, SEEK_SET);
             
-            // 6. 循环读取所有 chunks
+            // 6. 循环读取所有 chunks（带 snapshot 限制）
             while (!feof(f)) {
+                // 检查 snapshot 限制
+                if (db->snapshot_size > 0) {
+                    long current_pos = ftell(f);
+                    if (current_pos < 0 || (uint64_t)current_pos >= db->snapshot_size) {
+                        break;  // 超过 snapshot 限制，停止读取
+                    }
+                }
+                
                 uint32_t row_count = 0;
                 if (fread(&row_count, 4, 1, f) != 1 || row_count == 0) break;
                 
@@ -1380,6 +1394,22 @@ NDTSDB* ndtsdb_open(const char* path) {
     return db;
 }
 
+/* FlatRow: 用于 ndtsdb_close 目录模式排序 */
+typedef struct {
+    KlineRow row;
+    char symbol[32];
+    char interval[16];
+    char day[12];
+} FlatRow;
+
+static int compare_by_timestamp(const void* a, const void* b) {
+    const FlatRow* ra = (const FlatRow*)a;
+    const FlatRow* rb = (const FlatRow*)b;
+    if (ra->row.timestamp < rb->row.timestamp) return -1;
+    if (ra->row.timestamp > rb->row.timestamp) return 1;
+    return 0;
+}
+
 void ndtsdb_close(NDTSDB* db) {
     if (!db) return;
 
@@ -1395,13 +1425,6 @@ void ndtsdb_close(NDTSDB* db) {
         if (total == 0) goto cleanup;
         
         /* 扁平化所有行 */
-        typedef struct {
-            KlineRow row;
-            char symbol[32];
-            char interval[16];
-            char day[12];  // 预计算day，避免重复转换
-        } FlatRow;
-
         FlatRow* flat = (FlatRow*)malloc(total * sizeof(FlatRow));
         if (!flat) goto cleanup;
 
@@ -1419,13 +1442,6 @@ void ndtsdb_close(NDTSDB* db) {
         }
 
         /* 按timestamp排序，使相同day的数据连续 */
-        int compare_by_timestamp(const void* a, const void* b) {
-            const FlatRow* ra = (const FlatRow*)a;
-            const FlatRow* rb = (const FlatRow*)b;
-            if (ra->row.timestamp < rb->row.timestamp) return -1;
-            if (ra->row.timestamp > rb->row.timestamp) return 1;
-            return 0;
-        }
         qsort(flat, total, sizeof(FlatRow), compare_by_timestamp);
 
         /* 确保目录存在 */
