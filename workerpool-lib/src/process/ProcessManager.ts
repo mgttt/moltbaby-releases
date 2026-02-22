@@ -44,6 +44,8 @@ interface ProcessInstance {
   startTime: number;
   /** 由 stop() 显式停止，不触发 autorestart */
   intentionallyStopped?: boolean;
+  /** 启动完成标志（1秒快速失败检测通过后设为 true） */
+  startupCompleted?: boolean;
 }
 
 /**
