@@ -356,7 +356,8 @@ export class ProcessManager extends EventEmitter {
       // 快速失败检测：如果进程在 1 秒内退出，可能是启动失败
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
-          // 1 秒后还没退出，认为启动成功
+          // 1 秒后还没退出，认为启动成功，标记 startupCompleted
+          instance.startupCompleted = true;
           cleanup();
           resolve();
         }, 1000);
@@ -437,6 +438,14 @@ export class ProcessManager extends EventEmitter {
 
     // 显式 stop() 调用 或 autorestart=false → 不重启
     if (!autorestart || instance.intentionallyStopped) {
+      this.logManager.close(config.name);
+      this.processes.delete(config.name);
+      return;
+    }
+
+    // 快速失败保护：启动期（1秒内）崩溃由 spawnProcess 的 catch 块处理
+    // 避免与 Promise reject 路径竞争
+    if (!instance.startupCompleted) {
       this.logManager.close(config.name);
       this.processes.delete(config.name);
       return;
