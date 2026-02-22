@@ -2563,54 +2563,22 @@ function st_init() {
     logInfo('[Init] 已注册每小时定时任务: st_onHourly');
   }
   
-  // P2修复v2：avgEntryPrice冷启动初始化（移到st_init末尾，不依赖ledgerRebuildDone）
-  // 问题：原代码在rebuildAccountingFromExecutions内，但ledgerRebuildDone=true导致永远不执行
-  if (state.positionNotional !== 0 && (state.avgEntryPrice || 0) === 0 && typeof bridge_getExecutions === 'function') {
+  // P2修复v3：avgEntryPrice冷启动初始化（方案B：使用bridge_getPosition的entryPrice）
+  // 问题：bridge_getExecutions()在st_init时返回空数组（cachedExecutions未填充）
+  if (state.positionNotional !== 0 && (state.avgEntryPrice || 0) === 0) {
     try {
-      const executionsJson = bridge_getExecutions();
-      if (executionsJson && executionsJson !== 'null') {
-        const executions = JSON.parse(executionsJson);
-        if (Array.isArray(executions) && executions.length > 0) {
-          let totalCost = 0;
-          let totalQty = 0;
-          
-          // 按方向过滤executions，只统计开仓方向的成交
-          for (let i = 0; i < executions.length; i++) {
-            const exec = executions[i] || {};
-            const orderLinkId = exec.orderLinkId || '';
-            
-            // 只处理本策略的成交
-            const expectedPrefix = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-';
-            if (!orderLinkId || !orderLinkId.startsWith(expectedPrefix)) continue;
-            
-            const side = exec.side;
-            const execQty = Number(exec.execQty || 0);
-            const execPrice = Number(exec.execPrice || 0);
-            
-            if (execQty <= 0 || execPrice <= 0) continue;
-            
-            // 按方向过滤：Short→只统计Sell（开仓），Long→只统计Buy（开仓）
-            const isOpen = (CONFIG.direction === 'short' && side === 'Sell') ||
-                           (CONFIG.direction === 'long' && side === 'Buy') ||
-                           (CONFIG.direction === 'neutral');
-            
-            if (isOpen) {
-              totalQty += execQty;
-              totalCost += execQty * execPrice;
-            }
-          }
-          
-          if (totalQty > 0) {
-            state.avgEntryPrice = totalCost / totalQty;
-            logInfo('[冷启动v2] avgEntryPrice初始化=' + state.avgEntryPrice.toFixed(4) + 
-                    ' (cost=' + totalCost.toFixed(2) + ' / qty=' + totalQty.toFixed(4) + ')');
-            // 允许重新rebuild（可选，用于调试）
-            state.ledgerRebuildDone = false;
-          }
+      const posJson = bridge_getPosition(LOCKED_SYMBOL);
+      if (posJson && posJson !== 'null') {
+        const pos = JSON.parse(posJson);
+        const entryPrice = Number(pos.entryPrice || 0);
+        if (entryPrice > 0) {
+          state.avgEntryPrice = entryPrice;
+          logInfo('[冷启动v3] avgEntryPrice初始化=' + state.avgEntryPrice.toFixed(4) + 
+                  ' (来自bridge_getPosition entryPrice)');
         }
       }
     } catch (e) {
-      logWarn('[冷启动v2] avgEntryPrice初始化失败: ' + e);
+      logWarn('[冷启动v3] avgEntryPrice初始化失败: ' + e);
     }
   }
 }
