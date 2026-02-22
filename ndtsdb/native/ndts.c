@@ -1571,6 +1571,35 @@ int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const Kl
     return 0;
 }
 
+/**
+ * 清空指定 symbol/interval 的所有数据
+ * @return 0 成功，-1 失败
+ */
+int ndtsdb_clear(NDTSDB* db, const char* symbol, const char* interval) {
+    if (!symbol || !interval) return -1;
+    
+    // 查找匹配的 symbol/interval
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        if (strcmp(g_symbols[i].symbol, symbol) == 0 && 
+            strcmp(g_symbols[i].interval, interval) == 0) {
+            // 清空数据
+            g_symbols[i].count = 0;
+            // 重置容量到初始值，释放内存
+            if (g_symbols[i].klines) {
+                free(g_symbols[i].klines);
+                g_symbols[i].klines = (KlineRow*)malloc(INITIAL_KLINES_CAPACITY * sizeof(KlineRow));
+                if (!g_symbols[i].klines) return -1;
+                g_symbols[i].capacity = INITIAL_KLINES_CAPACITY;
+            }
+            if (db) db->dirty = 1;
+            return 0;
+        }
+    }
+    
+    // 未找到，视为成功（已经是空）
+    return 0;
+}
+
 int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, const KlineRow* rows, uint32_t n) {
     if (db) db->dirty = 1;  // 标记有写入
     SymbolData* sd = find_or_create_symbol(symbol, interval);
@@ -1924,4 +1953,17 @@ int64_t ndtsdb_get_latest_timestamp(NDTSDB* db, const char* symbol, const char* 
     SymbolData* sd = find_or_create_symbol(symbol, interval);
     if (!sd || sd->count == 0) return -1;
     return sd->klines[sd->count - 1].timestamp;
+}
+
+int ndtsdb_list_symbols(NDTSDB* db, char symbols[][32], char intervals[][16], int max_count) {
+    (void)db;
+    int count = 0;
+    for (uint32_t i = 0; i < g_symbol_count && count < max_count; i++) {
+        strncpy(symbols[count], g_symbols[i].symbol, 31);
+        symbols[count][31] = '\0';
+        strncpy(intervals[count], g_symbols[i].interval, 15);
+        intervals[count][15] = '\0';
+        count++;
+    }
+    return count;
 }
