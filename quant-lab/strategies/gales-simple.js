@@ -1975,7 +1975,52 @@ function updateRiskMetrics(tick) {
 
   // 策略内指标
   state.riskMetrics.accountingPosition = state.positionNotional || 0;
-  state.riskMetrics.accountingPnl = (state.totalProfit !== undefined) ? (state.totalProfit || 0) : 0; // TODO: 接入统一账本PnL
+  
+  // P2修复：计算 accountingPnl（未实现盈亏）
+  // 基于 positionNotional 和加权平均成本计算
+  let accountingPnl = 0;
+  const posNotional = state.positionNotional || 0;
+  const currentPrice = tick?.price || state.lastPrice || 0;
+  
+  if (posNotional !== 0 && currentPrice > 0 && state.gridLevels) {
+    // 计算加权平均持仓成本（基于已成交网格）
+    let totalCost = 0;
+    let totalQty = 0;
+    
+    for (let i = 0; i < state.gridLevels.length; i++) {
+      const grid = state.gridLevels[i];
+      if (grid && grid.lastFillQty > 0 && grid.lastFillPrice > 0) {
+        // 只统计与当前持仓方向一致的成交
+        const isShort = posNotional < 0;
+        const gridIsShort = grid.side === 'Sell';
+        
+        if (isShort === gridIsShort) {
+          const qty = grid.lastFillQty;
+          const price = grid.lastFillPrice;
+          totalQty += qty;
+          totalCost += qty * price;
+        }
+      }
+    }
+    
+    if (totalQty > 0) {
+      const avgCost = totalCost / totalQty;
+      // 空仓 PnL = positionNotional * (avgCost/currentPrice - 1)
+      // positionNotional 是负值（如 -197.39），表示空仓名义价值
+      const posQty = Math.abs(posNotional) / avgCost; // 持仓数量
+      
+      if (posNotional < 0) {
+        // Short: PnL = (entryPrice - currentPrice) * qty
+        // = (avgCost - currentPrice) * posQty
+        accountingPnl = (avgCost - currentPrice) * posQty;
+      } else {
+        // Long: PnL = (currentPrice - entryPrice) * qty
+        accountingPnl = (currentPrice - avgCost) * posQty;
+      }
+    }
+  }
+  
+  state.riskMetrics.accountingPnl = accountingPnl;
   state.riskMetrics.galesLevel = getCurrentGalesLevel();
   state.riskMetrics.exchangePosition = state.exchangePosition || 0;
   const accPos = Math.abs(state.riskMetrics.accountingPosition || 0);
