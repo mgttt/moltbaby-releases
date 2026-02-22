@@ -669,8 +669,9 @@ export class QuickJSStrategy {
       // P2新增：准备指标数据（只在K线更新时调用）
       await this.prepareIndicators(bar.symbol || 'UNKNOWN');
 
-      // 调用 st_heartbeat
-      await this.callStrategyFunction('st_heartbeat', tick);
+      // P2修复：onBar中删除st_heartbeat调用（避免onBar/onTick双路径重复）
+      // st_heartbeat仅在onTick中调用，onBar仅用于K线计算
+      // 原代码: await this.callStrategyFunction('st_heartbeat', tick);
 
       // 处理待处理订单
       await this.processPendingOrders();

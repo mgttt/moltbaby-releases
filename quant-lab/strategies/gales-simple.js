@@ -26,6 +26,7 @@ let marketRegimeState = {
   currentRegime: 'RANGING',   // 当前市场状态：RANGING/TRENDING/STRONG_TREND
   adxHistory: [],             // ADX历史记录
   lastRegimeAlertAt: 0,       // 上次状态告警时间（防抖）
+  warmupTicks: 0,             // P2修复：ADX冷启动保护计数器
 };
 
 /**
@@ -225,6 +226,9 @@ let state = {
 
   // P0修复：应急方向切换并发锁（防止placeOrder执行中切换方向）
   isPlacingOrder: false,   // 正在下单标志，下单期间禁止方向切换
+
+  // P2修复：avgEntryPrice持久化（解决accountingPnl=0根因）
+  avgEntryPrice: 0,        // 加权平均入场价格，每次fill时更新，重启后持久化
 
   // 2026-02-19: 风险观测指标（策略内 + 账户级）
   riskMetrics: {
@@ -765,6 +769,14 @@ function updateMarketRegime(tick) {
     return;
   }
 
+  // P2修复：ADX冷启动保护 - 递减warmupTicks
+  if (marketRegimeState.warmupTicks > 0) {
+    marketRegimeState.warmupTicks--;
+    if (marketRegimeState.warmupTicks === 0) {
+      logInfo('[ADX_WARMING] 冷启动完成，ADX恢复正常判断');
+    }
+  }
+
   // 1. 更新价格历史
   marketRegimeState.priceHistory.push({
     high: tick.high || tick.price * 1.001,  // 如果没有high，用price*1.001估算
@@ -831,6 +843,11 @@ function shouldSuspendGridTrading() {
     return false;
   }
 
+  // P2修复：ADX冷启动保护 - warmup期间强制返回false（不暂停）
+  if (marketRegimeState.warmupTicks > 0) {
+    return false;
+  }
+
   return marketRegimeState.currentRegime === 'STRONG_TREND';
 }
 
@@ -842,6 +859,11 @@ function shouldSuspendGridTrading() {
 function getMarketRegimeDesc() {
   if (!CONFIG.enableMarketRegime) {
     return '未启用';
+  }
+
+  // P2修复：ADX冷启动保护 - warmup期间显示 warming 状态
+  if (marketRegimeState.warmupTicks > 0) {
+    return '[ADX_WARMING] ' + marketRegimeState.warmupTicks + 'ticks (ADX=' + marketRegimeState.currentADX.toFixed(2) + ')';
   }
 
   return marketRegimeState.currentRegime + ' (ADX=' + marketRegimeState.currentADX.toFixed(2) + ')';
@@ -1930,6 +1952,28 @@ function st_onExecution(execJson) {
     logInfo('[成交明细] execId=' + exec.execId + ' ' + side + ' ' + execQty.toFixed(4) + ' @ ' + execPrice.toFixed(4) + 
             ' | 仓位Notional=' + state.positionNotional.toFixed(2));
 
+    // P2修复：avgEntryPrice持久化 - 更新加权平均入场价格
+    const oldPosNotional = (CONFIG.direction === 'long') ? 
+      (side === 'Buy' ? state.positionNotional - notional : state.positionNotional + notional) :
+      (CONFIG.direction === 'short') ?
+        (side === 'Sell' ? state.positionNotional + notional : state.positionNotional - notional) :
+        (side === 'Buy' ? state.positionNotional - notional : state.positionNotional + notional);
+    
+    const oldQty = Math.abs(oldPosNotional) / execPrice;
+    const newQty = Math.abs(state.positionNotional) / execPrice;
+    
+    // 只有开仓（仓位增加）时更新avgEntryPrice
+    if (newQty > oldQty) {
+      const oldAvg = state.avgEntryPrice || 0;
+      const addedQty = execQty;
+      if (oldAvg > 0 && oldQty > 0) {
+        state.avgEntryPrice = (oldAvg * oldQty + execPrice * addedQty) / newQty;
+      } else {
+        state.avgEntryPrice = execPrice;
+      }
+      logDebug('[avgEntryPrice] 更新: ' + oldAvg.toFixed(4) + ' -> ' + state.avgEntryPrice.toFixed(4) + ' (qty=' + oldQty.toFixed(4) + '->' + newQty.toFixed(4) + ')');
+    }
+
     // simMode: 记录模拟成交
     if (CONFIG.simMode && typeof bridge_recordSimTrade === 'function') {
       try {
@@ -1976,35 +2020,45 @@ function updateRiskMetrics(tick) {
   // 策略内指标
   state.riskMetrics.accountingPosition = state.positionNotional || 0;
   
-  // P2修复：计算 accountingPnl（未实现盈亏）
+  // P2修复：计算 accountingPnl（使用持久化的avgEntryPrice）
   // 基于 positionNotional 和加权平均成本计算
   let accountingPnl = 0;
   const posNotional = state.positionNotional || 0;
   const currentPrice = tick?.price || state.lastPrice || 0;
   
-  if (posNotional !== 0 && currentPrice > 0 && state.gridLevels) {
-    // 计算加权平均持仓成本（基于已成交网格）
-    let totalCost = 0;
-    let totalQty = 0;
+  if (posNotional !== 0 && currentPrice > 0) {
+    // 优先使用持久化的avgEntryPrice
+    let avgCost = state.avgEntryPrice || 0;
     
-    for (let i = 0; i < state.gridLevels.length; i++) {
-      const grid = state.gridLevels[i];
-      if (grid && grid.lastFillQty > 0 && grid.lastFillPrice > 0) {
-        // 只统计与当前持仓方向一致的成交
-        const isShort = posNotional < 0;
-        const gridIsShort = grid.side === 'Sell';
-        
-        if (isShort === gridIsShort) {
-          const qty = grid.lastFillQty;
-          const price = grid.lastFillPrice;
-          totalQty += qty;
-          totalCost += qty * price;
+    // 如果avgEntryPrice不可用，回退到gridLevels计算（兼容性）
+    if (avgCost <= 0 && state.gridLevels) {
+      let totalCost = 0;
+      let totalQty = 0;
+      
+      for (let i = 0; i < state.gridLevels.length; i++) {
+        const grid = state.gridLevels[i];
+        if (grid && grid.lastFillQty > 0 && grid.lastFillPrice > 0) {
+          // 只统计与当前持仓方向一致的成交
+          const isShort = posNotional < 0;
+          const gridIsShort = grid.side === 'Sell';
+          
+          if (isShort === gridIsShort) {
+            const qty = grid.lastFillQty;
+            const price = grid.lastFillPrice;
+            totalQty += qty;
+            totalCost += qty * price;
+          }
         }
+      }
+      
+      if (totalQty > 0) {
+        avgCost = totalCost / totalQty;
+        // 同步更新state.avgEntryPrice供下次使用
+        state.avgEntryPrice = avgCost;
       }
     }
     
-    if (totalQty > 0) {
-      const avgCost = totalCost / totalQty;
+    if (avgCost > 0) {
       // 空仓 PnL = positionNotional * (avgCost/currentPrice - 1)
       // positionNotional 是负值（如 -197.39），表示空仓名义价值
       const posQty = Math.abs(posNotional) / avgCost; // 持仓数量
@@ -2351,6 +2405,9 @@ function rebuildAccountingFromExecutions() {
 
     if (matched > 0) {
       state.positionNotional = rebuiltNotional;
+      
+      // 冷启动avgEntryPrice初始化已移到st_init（v2修复），此处不再重复
+      
       logInfo('[账本重建完成] runId=' + state.runId + ' matched=' + matched + '/' + executions.length +
               ' positionNotional=' + state.positionNotional.toFixed(2) +
               ' prefix=' + strategyPrefix);
@@ -2442,6 +2499,10 @@ function st_init() {
   state.orderSeq = 0;
   logInfo('[Init] P0: 110072根治 - 新runId=' + state.runId + '，orderLinkId将唯一');
   
+  // P2修复：ADX冷启动保护 - 初始化warmupTicks
+  marketRegimeState.warmupTicks = CONFIG.adxPeriod;
+  logInfo('[Init] P2: ADX冷启动保护 warmupTicks=' + marketRegimeState.warmupTicks + '（约' + (CONFIG.adxPeriod * 5) + '秒）');
+  
   // P0修复：ownerStrategy与锁定后的CONFIG强绑定，确保不可变
   // 使用 LOCKED_SYMBOL + LOCKED_DIRECTION + SESSION_ID 确保唯一性
   state.ownerStrategy = 'state:' + LOCKED_SYMBOL + ':' + LOCKED_DIRECTION + ':' + SESSION_ID;
@@ -2500,6 +2561,57 @@ function st_init() {
   if (typeof bridge_scheduleAt === 'function') {
     bridge_scheduleAt('HOURLY', 'st_onHourly');
     logInfo('[Init] 已注册每小时定时任务: st_onHourly');
+  }
+  
+  // P2修复v2：avgEntryPrice冷启动初始化（移到st_init末尾，不依赖ledgerRebuildDone）
+  // 问题：原代码在rebuildAccountingFromExecutions内，但ledgerRebuildDone=true导致永远不执行
+  if (state.positionNotional !== 0 && (state.avgEntryPrice || 0) === 0 && typeof bridge_getExecutions === 'function') {
+    try {
+      const executionsJson = bridge_getExecutions();
+      if (executionsJson && executionsJson !== 'null') {
+        const executions = JSON.parse(executionsJson);
+        if (Array.isArray(executions) && executions.length > 0) {
+          let totalCost = 0;
+          let totalQty = 0;
+          
+          // 按方向过滤executions，只统计开仓方向的成交
+          for (let i = 0; i < executions.length; i++) {
+            const exec = executions[i] || {};
+            const orderLinkId = exec.orderLinkId || '';
+            
+            // 只处理本策略的成交
+            const expectedPrefix = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-';
+            if (!orderLinkId || !orderLinkId.startsWith(expectedPrefix)) continue;
+            
+            const side = exec.side;
+            const execQty = Number(exec.execQty || 0);
+            const execPrice = Number(exec.execPrice || 0);
+            
+            if (execQty <= 0 || execPrice <= 0) continue;
+            
+            // 按方向过滤：Short→只统计Sell（开仓），Long→只统计Buy（开仓）
+            const isOpen = (CONFIG.direction === 'short' && side === 'Sell') ||
+                           (CONFIG.direction === 'long' && side === 'Buy') ||
+                           (CONFIG.direction === 'neutral');
+            
+            if (isOpen) {
+              totalQty += execQty;
+              totalCost += execQty * execPrice;
+            }
+          }
+          
+          if (totalQty > 0) {
+            state.avgEntryPrice = totalCost / totalQty;
+            logInfo('[冷启动v2] avgEntryPrice初始化=' + state.avgEntryPrice.toFixed(4) + 
+                    ' (cost=' + totalCost.toFixed(2) + ' / qty=' + totalQty.toFixed(4) + ')');
+            // 允许重新rebuild（可选，用于调试）
+            state.ledgerRebuildDone = false;
+          }
+        }
+      }
+    } catch (e) {
+      logWarn('[冷启动v2] avgEntryPrice初始化失败: ' + e);
+    }
   }
 }
 
