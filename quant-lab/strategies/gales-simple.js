@@ -1962,8 +1962,15 @@ function st_onExecution(execJson) {
     const oldQty = Math.abs(oldPosNotional) / execPrice;
     const newQty = Math.abs(state.positionNotional) / execPrice;
     
-    // 只有开仓（仓位增加）时更新avgEntryPrice
-    if (newQty > oldQty) {
+    // P2修复：方向翻转检测（穿零bug修复）
+    const oldSign = Math.sign(oldPosNotional);
+    const newSign = Math.sign(state.positionNotional);
+    if (oldSign !== 0 && newSign !== 0 && oldSign !== newSign) {
+      // 方向翻转：重置为当前fill价格
+      state.avgEntryPrice = execPrice;
+      logDebug('[avgEntryPrice] 方向翻转重置: ' + oldSign + '->' + newSign + ' @ ' + execPrice.toFixed(4));
+    } else if (newQty > oldQty) {
+      // 正常开仓（仓位增加）：加权更新
       const oldAvg = state.avgEntryPrice || 0;
       const addedQty = execQty;
       if (oldAvg > 0 && oldQty > 0) {
