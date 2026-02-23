@@ -829,7 +829,7 @@ export class QuickJSStrategy {
         result.value.dispose();
 
         // P0: 更新订单状态
-        this.updateOrderStateFromNotification(orderUpdate);
+        this.updateOrderStateFromNotification(orderUpdate, this.strategyCtx!);
       }
     } catch (error: any) {
       logger.error(`[QuickJSStrategy] notifyOrderUpdate 调用异常:`, error.message);
@@ -839,12 +839,12 @@ export class QuickJSStrategy {
   /**
    * P0: 根据通知更新订单状态
    */
-  private updateOrderStateFromNotification(orderUpdate: {
+  private async updateOrderStateFromNotification(orderUpdate: {
     orderId: string;
     orderLinkId?: string;
     status?: string;
     cumQty?: number;
-  }): void {
+  }, ctx: StrategyContext): Promise<void> {
     const orderLinkId = orderUpdate.orderLinkId || orderUpdate.orderId;
     if (!orderLinkId) return;
 
@@ -857,6 +857,9 @@ export class QuickJSStrategy {
         this.orderStateManager.updateState(orderLinkId, 'FILLED', {
           filledQty: orderUpdate.cumQty || order.qty,
         });
+        // P1方案C：订单FILLED时立即刷新position，降低accountGap
+        await this.refreshCache(ctx);
+        logger.info(`[QuickJSStrategy][方案C] 订单FILLED触发refreshCache: orderLinkId=${orderLinkId}`);
         break;
       case 'Cancelled':
       case 'Canceled':
