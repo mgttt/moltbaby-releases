@@ -62,6 +62,8 @@ function parseArgs() {
   let spacingRange = '0.01,0.015,0.02,0.025,0.03';
   let orderSizeRange = '25,50,75,100';
   let output: string | undefined;
+  let direction = 'neutral';  // [P2] 新增direction参数
+  let proxy: string | undefined;  // [P2] 新增proxy参数
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -84,6 +86,12 @@ function parseArgs() {
       case '-o':
         output = args[++i];
         break;
+      case '--direction':  // [P2] 处理direction参数
+        direction = args[++i];
+        break;
+      case '--proxy':  // [P2] 处理proxy参数
+        proxy = args[++i];
+        break;
     }
   }
 
@@ -97,6 +105,8 @@ function parseArgs() {
     spacings,
     orderSizes,
     output,
+    direction,
+    proxy,
   };
 }
 
@@ -113,11 +123,14 @@ function showHelp() {
   --interval  K线周期 (默认: 1h)
   --spacing   网格间距范围，逗号分隔 (默认: 0.01,0.015,0.02,0.025,0.03)
   --orderSize 订单大小范围，逗号分隔 (默认: 25,50,75,100)
-  --output    输出文件路径 (默认: stdout)
+  --direction 策略方向 (默认: neutral, 可选: long/short/neutral)
+  --proxy     代理服务器 (默认: http://127.0.0.1:8890)
+  --output    输出文件路径，支持.json格式 (默认: stdout)
 
 示例:
   bun run param-sweep.ts --symbol MYXUSDT --days 30
   bun run param-sweep.ts --symbol BTCUSDT --days 60 --spacing 0.005,0.01,0.015
+  bun run param-sweep.ts --symbol MYXUSDT --days 3 --direction short --proxy http://127.0.0.1:8890 --output /tmp/results.json
 `);
 }
 
@@ -230,7 +243,9 @@ async function runSerialBacktests(
   days: number,
   interval: string,
   db: KlineDatabase,
-  dbPath: string
+  dbPath: string,
+  direction: string = 'neutral',  // [P2] 新增direction参数
+  proxy?: string  // [P2] 新增proxy参数
 ): Promise<SweepResult[]> {
   const results: SweepResult[] = [];
 
@@ -277,8 +292,8 @@ async function runSerialBacktests(
         to: toDate,
         interval: '1m',
         initialBalance: 10000,
-        direction: 'neutral',
-        proxy: 'http://127.0.0.1:8890',
+        direction: direction,  // [P2] 使用传入的direction参数
+        proxy: proxy || 'http://127.0.0.1:8890',  // [P2] 使用传入的proxy参数
         dbPath,
       });
 
@@ -436,7 +451,7 @@ async function main() {
     console.log('');
 
     // 执行回测
-    const results = await runSerialBacktests(combinations, args.symbol, args.days, args.interval, db, dbPath);
+    const results = await runSerialBacktests(combinations, args.symbol, args.days, args.interval, db, dbPath, args.direction, args.proxy);
 
     if (results.length === 0) {
       console.log('');
@@ -455,11 +470,19 @@ async function main() {
         mkdirSync(outputDir, { recursive: true });
       }
 
-      // 同时输出文本和 CSV
-      writeFileSync(outputPath, tableOutput);
-      writeFileSync(outputPath.replace(/\.txt$/, '.csv').replace(/\.md$/, '.csv'), csvOutput);
-      console.log('');
-      console.log(`[ParamSweep] 结果已保存: ${outputPath}`);
+      // [P2] 根据文件扩展名判断输出格式
+      if (outputPath.endsWith('.json')) {
+        // JSON格式 - 直接序列化 SweepResult[]
+        writeFileSync(outputPath, JSON.stringify(results, null, 2));
+        console.log('');
+        console.log(`[ParamSweep] JSON结果已保存: ${outputPath}`);
+      } else {
+        // 文本和 CSV 格式
+        writeFileSync(outputPath, tableOutput);
+        writeFileSync(outputPath.replace(/\.txt$/, '.csv').replace(/\.md$/, '.csv'), csvOutput);
+        console.log('');
+        console.log(`[ParamSweep] 结果已保存: ${outputPath}`);
+      }
     } else {
       console.log('');
       console.log(tableOutput);
