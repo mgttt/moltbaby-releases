@@ -1191,51 +1191,37 @@ export class QuickJSStrategy {
   /**
    * P1重构：统一的position更新接口
    * 所有position更新（poll/ws/filled）都收敛到此函数
+   * 注意：此函数依赖this.cachedPositions，需在refreshCache填充后调用
    */
   private async updatePositionFromExchange(
     ctx: StrategyContext,
     source: 'poll' | 'ws' | 'filled'
   ): Promise<void> {
     try {
-      // 1. 调用 bridge_getPosition() 获取最新持仓
       const symbol = this.config.symbol || 'MYXUSDT';
-      const position = await ctx.getPosition(symbol);
+      
+      // P1紧急修复：使用cachedPositions而不是ctx.getPosition（API不兼容）
+      const position = this.cachedPositions.get(symbol);
       
       if (!position) {
-        logger.warn(`[QuickJSStrategy][${source}] 获取持仓失败: ${symbol}`);
+        logger.warn(`[QuickJSStrategy][${source}] 缓存中无持仓数据: ${symbol}`);
         return;
       }
 
       // 2. 更新 state.exchangePosition
-      const oldPos = this.state.exchangePosition || 0;
+      const oldPos = this.state?.exchangePosition || 0;
       const newPos = position.positionNotional || 0;
-      this.state.exchangePosition = newPos;
+      if (this.state) {
+        this.state.exchangePosition = newPos;
+      }
 
-      // 3. 检测是否有新fill（position变化且execId不同）
-      // 注意：详细fill检测由reconcileOrders处理，这里只记录position变化
+      // 3. 检测position变化并记录
       if (Math.abs(newPos - oldPos) > 0.01) {
         logger.info(
           `[QuickJSStrategy][${source}] Position更新: ${oldPos.toFixed(2)} -> ${newPos.toFixed(2)} ` +
           `(entryPrice=${position.entryPrice?.toFixed(4) || 'N/A'}, ` +
           `unrealizedPnl=${position.unrealizedPnl?.toFixed(2) || 'N/A'})`
         );
-
-        // 触发bridge_onExecution回调（简化版，仅通知position变化）
-        // 详细execution数据由reconcileOrders拉取
-        if (typeof (ctx as any).bridge_onExecution === 'function') {
-          try {
-            (ctx as any).bridge_onExecution({
-              execId: `pos-update-${Date.now()}`,
-              symbol: symbol,
-              execQty: Math.abs(newPos - oldPos),
-              execPrice: position.entryPrice || 0,
-              side: newPos > oldPos ? 'Buy' : 'Sell',
-              execTime: Date.now().toString(),
-            });
-          } catch (e) {
-            // 忽略回调错误
-          }
-        }
       }
 
       // 4. 记录source在日志
@@ -1251,9 +1237,6 @@ export class QuickJSStrategy {
    */
   private async refreshCache(ctx: StrategyContext): Promise<void> {
     try {
-      // P1重构：使用统一的position更新接口（source='poll'）
-      await this.updatePositionFromExchange(ctx, 'poll');
-
       // 检测 ctx 类型：如果有 getAccountAsync，说明是 BybitStrategyContext
       const hasAsyncAPI = 'getAccountAsync' in ctx && typeof (ctx as any).getAccountAsync === 'function';
 
@@ -1308,6 +1291,9 @@ export class QuickJSStrategy {
 
         logger.info(`[QuickJSStrategy] 缓存刷新成功: ${account.positions.length} 个持仓`);
       }
+
+      // P1重构：缓存填充完成后，调用统一position更新接口（source='poll'）
+      await this.updatePositionFromExchange(ctx, 'poll');
 
       // P2修复：缓存刷新成功后设置门闸（bot-009建议）
       this.cacheReady = true;

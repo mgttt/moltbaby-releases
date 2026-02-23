@@ -264,6 +264,16 @@ async function main() {
   await strategy.onInit(context);
   logger.info('[QuickJS] 策略初始化完成\n');
 
+  // [P1] 启动execution WebSocket订阅（根治accountGap）
+  if (provider.subscribeExecutions && strategy.onExecution) {
+    logger.info('[QuickJS] 启动 execution 实时订阅...');
+    await provider.subscribeExecutions(async (exec) => {
+      logger.info(`[QuickJS] 收到 execution: execId=${exec.execId}, orderLinkId=${exec.orderLinkId}`);
+      await strategy.onExecution!(exec);
+    });
+    logger.info('[QuickJS] execution 订阅已启动\n');
+  }
+
   // P1修复: 热更新HTTP API端口分配策略
   // - RELOAD_API_PORT=0: 禁用HTTP server（live默认）
   // - RELOAD_API_PORT未设置: live模式禁用，paper模式启用动态端口
