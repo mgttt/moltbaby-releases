@@ -125,12 +125,31 @@ export class AlertManager {
       return;
     }
 
-    // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，需显式开启 STRATEGY_TG_ENABLED=1
-    if (process.env.STRATEGY_TG_ENABLED !== '1') {
-      console.warn('[AlertManager] Telegram告警已被策略系统禁用（STRATEGY_TG_ENABLED!=1）');
+    // 2026-02-23 分级告警：STRATEGY_ALERT_LEVEL控制 (CRITICAL/WARNING/ALL/NONE)
+    // 向后兼容：STRATEGY_TG_ENABLED=1 等价于 ALL
+    const alertLevel = process.env.STRATEGY_TG_ENABLED === '1' ? 'ALL' : (process.env.STRATEGY_ALERT_LEVEL || 'CRITICAL');
+
+    // NONE: 全部禁用
+    if (alertLevel === 'NONE') {
       return;
     }
 
+    // CRITICAL: 只放行[告急]标签
+    if (alertLevel === 'CRITICAL' && !message.includes('[告急]')) {
+      console.warn(`[AlertManager][降级] ${message.slice(0, 100)}`);
+      return;
+    }
+
+    // WARNING: 放行[告急]+[告警]+[P1告警]
+    if (alertLevel === 'WARNING' &&
+        !message.includes('[告急]') &&
+        !message.includes('[告警]') &&
+        !message.includes('[P1告警]')) {
+      console.warn(`[AlertManager][降级] ${message.slice(0, 100)}`);
+      return;
+    }
+
+    // 通过过滤→执行tg-cli发送
     try {
       const target = this.config.tgTarget || 'bot-000';
       

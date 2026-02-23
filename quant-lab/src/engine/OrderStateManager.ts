@@ -369,25 +369,33 @@ export class OrderStateManager {
    * 发送Telegram告警
    */
   private sendTelegramAlert(alert: AbnormalOrderAlert) {
-    // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，需显式开启 STRATEGY_TG_ENABLED=1
-    if (process.env.STRATEGY_TG_ENABLED !== '1') {
-      console.warn('[OrderStateManager] Telegram告警已被策略系统禁用（STRATEGY_TG_ENABLED!=1）');
+    // 2026-02-23 分级告警：STRATEGY_ALERT_LEVEL控制 (CRITICAL/WARNING/ALL/NONE)
+    // 向后兼容：STRATEGY_TG_ENABLED=1 等价于 ALL
+    const alertLevel = process.env.STRATEGY_TG_ENABLED === '1' ? 'ALL' : (process.env.STRATEGY_ALERT_LEVEL || 'CRITICAL');
+
+    // NONE: 全部禁用
+    if (alertLevel === 'NONE') {
       return;
     }
 
+    const message = `[异常单] ${alert.product} ${alert.strategyId}\n` +
+                    `订单: ${alert.orderLinkId}\n` +
+                    `原因: ${alert.reason}\n` +
+                    `原状态: ${alert.oldState}\n` +
+                    `持续时间: ${(alert.duration / 1000).toFixed(1)}s`;
+
+    // CRITICAL: 只放行[告急]标签（异常单不算告急，降级处理）
+    if (alertLevel === 'CRITICAL') {
+      console.warn(`[OrderStateManager][降级] ${message.replace(/\n/g, ' ')}`);
+      return;
+    }
+
+    // 通过过滤→执行tg-cli发送
     try {
       const { execSync } = require('child_process');
-      
-      const message = `[异常单] ${alert.product} ${alert.strategyId}\n` +
-                      `订单: ${alert.orderLinkId}\n` +
-                      `原因: ${alert.reason}\n` +
-                      `原状态: ${alert.oldState}\n` +
-                      `持续时间: ${(alert.duration / 1000).toFixed(1)}s`;
-      
       const cmd = `/usr/local/bin/tg send! bot-001 9号 "${message.replace(/"/g, '\\"')}"`;
       execSync(cmd, { stdio: 'ignore' });
     } catch (error) {
-      // tg命令失败不影响主流程
       console.warn('[OrderStateManager] Telegram告警发送失败');
     }
   }

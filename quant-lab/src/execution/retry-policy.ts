@@ -140,6 +140,35 @@ export class ErrorClassifier {
       return "ORDER_NOT_FOUND";
     }
 
+    // P2修复: 110072 OrderLinkedID重复（幂等成功，不重试）
+    if (
+      message.includes("110072") ||
+      message.includes("orderlinkedid is duplicate") ||
+      message.includes("orderlinkid is duplicate")
+    ) {
+      return "ORDER_NOT_FOUND"; // 视为订单已存在，不重试
+    }
+
+    // P2修复: SSL错误/curl exit 35（网络错误，可重试）
+    if (
+      message.includes("error35") ||
+      message.includes("ssl error") ||
+      message.includes("ssl handshake") ||
+      message.includes("curl exit 35") ||
+      message.includes("unexpected eof")
+    ) {
+      return "NETWORK_ERROR";
+    }
+
+    // P2修复: 慢请求/高延迟（网络错误，可重试）
+    if (
+      message.includes("slow request") ||
+      message.includes("request timeout") ||
+      message.includes("high latency")
+    ) {
+      return "NETWORK_ERROR";
+    }
+
     // 无效请求
     if (
       message.includes("400") ||

@@ -69,6 +69,9 @@ const CONFIG = {
   minOrderLifeSec: 30,       // 订单最短存活时间（避免瞬时波动撤单）
   driftConfirmCount: 2,      // 连续 N 次脱离才撤单（防止误撤）
 
+  // P1修复：动态priceTick（切交易对前必须正确配置）
+  priceTick: 0.0001,         // MYXUSDT的tick size (Bybit官方: 0.0001)，切交易对时必须修改
+
   // 运行时治理
   maxActiveOrders: 5,        // 同时活跃订单上限（防止极端情况下挂满）
 
@@ -282,6 +285,11 @@ let circuitBreakerState = {
   leverageHardCapTriggeredAt: 0,  // 杠杆硬顶触发时间
   // [P2] 仓位比率告警防抖时间戳
   lastPosRatioWarnAt: 0,
+  // P2修复：补全缺失的告警防抖字段
+  lastPositionWarnAt: 0,
+  lastPositionWarnRatio: 0,
+  lastDrawdownWarn25At: 0,
+  lastDrawdownWarn15At: 0,
 };
 
 // [硬拦截最小集] A类: API关键失败计数器（认证/签名/系统级）
@@ -1719,12 +1727,24 @@ function hedgeResidual(grid, order) {
     return;
   }
 
-  // 真实下单：市价单对冲
+  // 真实下单：市价单对冲（带滑点保护）
   try {
     // 防御性检查：symbol 必须有效
     if (!CONFIG.symbol || typeof CONFIG.symbol !== 'string' || CONFIG.symbol.length === 0) {
       logError('[hedgeResidual] CONFIG.symbol 无效: ' + CONFIG.symbol);
       throw new Error('Invalid symbol: ' + CONFIG.symbol);
+    }
+
+    // P1修复：滑点保护 - 检查bid-ask spread
+    const bestBidAsk = bridge_getBestBidAsk(CONFIG.symbol);
+    const bidAskObj = JSON.parse(bestBidAsk);
+    if (bidAskObj.spread && bidAskObj.bid > 0) {
+      const spreadPct = bidAskObj.spread / bidAskObj.bid;
+      if (spreadPct > CONFIG.maxHedgeSlippagePct) {
+        logWarn('[hedgeResidual] 滑点过大，放弃对冲: spread=' + (spreadPct * 100).toFixed(2) +
+                '% > max=' + (CONFIG.maxHedgeSlippagePct * 100).toFixed(2) + '%');
+        return;
+      }
     }
 
     const hedgeParams = {
@@ -2103,7 +2123,15 @@ function updateRiskMetrics(tick) {
   state.riskMetrics.exchangePosition = state.exchangePosition || 0;
   const accPos = Math.abs(state.riskMetrics.accountingPosition || 0);
   const exPos = Math.abs(state.riskMetrics.exchangePosition || 0);
-  state.riskMetrics.ledgerStatus = (exPos > 1 && accPos < 1) ? 'mismatch' : 'ok';
+  // P1修复：ledgerStatus应反映accountGap，不只是单边为零
+  const accountGap = Math.abs(accPos - exPos);
+  if (exPos > 1 && accPos < 1) {
+    state.riskMetrics.ledgerStatus = 'mismatch';
+  } else if (accountGap > 100) {
+    state.riskMetrics.ledgerStatus = 'ERROR';  // gap>100强制报错
+  } else {
+    state.riskMetrics.ledgerStatus = 'ok';
+  }
 
   // 账户级指标（优先从tick读取；其次尝试bridge；否则NA）
   let accountPos = null;
@@ -3000,6 +3028,18 @@ function st_heartbeat(tickJson) {
         cooldownOk &&
         (noActiveOrders || fullPositionStuck)) {
 
+      // P2修复：方向性保护 - short只允许上移，long只允许下移
+      const newCenter = state.lastPrice;
+      const oldCenter = state.centerPrice || state.lastPrice;
+      if (CONFIG.direction === 'short' && newCenter < oldCenter) {
+        logWarn('[autoRecenter拦截] short策略禁止追跌: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
+        return;
+      }
+      if (CONFIG.direction === 'long' && newCenter > oldCenter) {
+        logWarn('[autoRecenter拦截] long策略禁止追涨: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
+        return;
+      }
+
       const reason = fullPositionStuck ? '满仓死锁自动重心' : '自动重心';
       logWarn('[' + reason + '] drift=' + (drift * 100).toFixed(2) +
               '% idleTicks=' + idleTicks +
@@ -3567,8 +3607,8 @@ function placeOrder(grid) {
     orderPrice = grid.price * (1 + CONFIG.priceOffset);
   }
 
-  // postOnly 保护
-  const priceTick = 0.001;
+  // postOnly 保护（P1修复：使用CONFIG.priceTick替代硬编码）
+  const priceTick = CONFIG.priceTick || 0.001;
   if (CONFIG.postOnly) {
     if (grid.side === 'Buy' && orderPrice >= state.lastPrice) {
       orderPrice = state.lastPrice - priceTick;

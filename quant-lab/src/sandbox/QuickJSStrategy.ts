@@ -128,7 +128,26 @@ export class QuickJSStrategy {
   private cachedKlines: any[] = [];
   private lastKlineTimestamp: number = 0;
 
-  // bar 缓存层（历史K线 REST→ndtsdb，不影响WS tick路径）
+  /**
+   * P1修复：从QuickJS沙箱获取熔断状态
+   */
+  private getStrategyCircuitBreakerState(): { tripped?: boolean; blockNewOrders?: boolean; active?: boolean } | null {
+    if (!this.ctx) return null;
+    try {
+      const cbHandle = this.ctx.getProp(this.ctx.global, 'circuitBreakerState');
+      if (cbHandle) {
+        // P1修复：circuitBreakerState是JS对象，用dump()序列化而非getString()
+        const cbObj = this.ctx.dump(cbHandle);
+        cbHandle.dispose();
+        if (cbObj && typeof cbObj === 'object') {
+          return cbObj;
+        }
+      }
+    } catch (e) {
+      logger.debug(`[QuickJSStrategy] 读取circuitBreakerState失败: ${e}`);
+    }
+    return null;
+  }
   private barCache = new BarCacheLayer({
     logger: (msg) => logger.info(`[BarCache] ${msg}`),
   });
@@ -1459,6 +1478,14 @@ export class QuickJSStrategy {
           throw new Error(`Invalid qty: ${params.qty}`);
         }
 
+        // P1修复：熔断保护 - 从QuickJS沙箱获取熔断状态
+        const cbState = this.getStrategyCircuitBreakerState();
+        if (cbState && (cbState.tripped || cbState.blockNewOrders)) {
+          logger.warn(`[QuickJSStrategy] [P1熔断拦截] 订单被拒绝: circuitBreakerState.tripped=${cbState.tripped}, blockNewOrders=${cbState.blockNewOrders}`);
+          reject(new Error('CircuitBreakerTripped: 熔断中，禁止下单'));
+          continue;
+        }
+
         let order: Order;
 
         logger.info(`[QuickJSStrategy] processPendingOrders: 下单参数`, params);
@@ -2366,19 +2393,39 @@ export class QuickJSStrategy {
     this.ctx.setProp(this.ctx.global, 'bridge_getConfig', bridge_getConfig);
     bridge_getConfig.dispose();
 
-    // P2修复：bridge_tgSend - 发送Telegram通知
-    // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，避免干扰；需显式开启 STRATEGY_TG_ENABLED=1
+    // P2修复：bridge_tgSend - 分级告警机制（总裁指示）
+    // 2026-02-20 紧急策略：默认禁用策略系统直接调用 tg-cli，避免干扰
+    // 2026-02-23 分级告警：STRATEGY_ALERT_LEVEL控制 (CRITICAL/WARNING/ALL/NONE)
+    // 向后兼容：STRATEGY_TG_ENABLED=1 等价于 ALL
     const bridge_tgSend = this.ctx.newFunction('bridge_tgSend', (toHandle, messageHandle) => {
       const to = this.ctx!.getString(toHandle);
       const message = this.ctx!.getString(messageHandle);
 
-      if (process.env.STRATEGY_TG_ENABLED !== '1') {
-        logger.warn(`[QuickJSStrategy] bridge_tgSend blocked by policy (set STRATEGY_TG_ENABLED=1 to enable)`);
+      // 向后兼容：STRATEGY_TG_ENABLED=1 等价于 ALL
+      const alertLevel = process.env.STRATEGY_TG_ENABLED === '1' ? 'ALL' : (process.env.STRATEGY_ALERT_LEVEL || 'CRITICAL');
+
+      // NONE: 全部禁用
+      if (alertLevel === 'NONE') {
         return this.ctx!.newString('blocked');
       }
 
+      // CRITICAL: 只放行[告急]标签
+      if (alertLevel === 'CRITICAL' && !message.includes('[告急]')) {
+        logger.warn(`[bridge_tgSend][降级] ${message}`);
+        return this.ctx!.newString('blocked');
+      }
+
+      // WARNING: 放行[告急]+[告警]+[P1告警]
+      if (alertLevel === 'WARNING' &&
+          !message.includes('[告急]') &&
+          !message.includes('[告警]') &&
+          !message.includes('[P1告警]')) {
+        logger.warn(`[bridge_tgSend][降级] ${message}`);
+        return this.ctx!.newString('blocked');
+      }
+
+      // 通过过滤→执行tg-cli发送
       try {
-        // 调用tg命令发送消息
         const from = 'bot-001'; // 策略通知默认来自bot-001（投资组长）
         const cmd = `/usr/local/bin/tg send! ${from} ${to} "${message.replace(/"/g, '\\"')}"`;
         execSync(cmd, { encoding: 'utf-8', stdio: 'ignore' });

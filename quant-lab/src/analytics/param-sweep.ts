@@ -316,6 +316,9 @@ async function runSerialBacktests(
       // 运行回测
       const backtestResult = await engine.run();
 
+      // [P1] 清理资源，释放 QuickJS VM 内存
+      await engine.cleanup();
+
       // 转换为 SweepResult 格式
       const result: SweepResult = {
         params,

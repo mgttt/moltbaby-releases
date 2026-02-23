@@ -311,7 +311,9 @@ export class DailyReportGenerator {
    * 生成JSON格式报告
    */
   private generateJsonReport(data: DailyReportData): void {
-    const filename = `daily-report-${data.date}-${data.strategy}-${data.symbol}.json`;
+    // P2修复: symbol斜杠处理，避免路径注入
+    const safeSymbol = data.symbol.replace(/\//g, '-');
+    const filename = `daily-report-${data.date}-${data.strategy}-${safeSymbol}.json`;
     const filepath = join(this.outputDir, filename);
     
     writeFileSync(filepath, JSON.stringify(data, null, 2));
@@ -322,7 +324,9 @@ export class DailyReportGenerator {
    * 生成文本格式报告
    */
   private generateTextReport(data: DailyReportData): void {
-    const filename = `daily-report-${data.date}-${data.strategy}-${data.symbol}.txt`;
+    // P2修复: symbol斜杠处理，避免路径注入
+    const safeSymbol = data.symbol.replace(/\//g, '-');
+    const filename = `daily-report-${data.date}-${data.strategy}-${safeSymbol}.txt`;
     const filepath = join(this.outputDir, filename);
     
     const report = this.formatTextReport(data);

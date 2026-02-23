@@ -330,6 +330,12 @@ export class ProcessManager extends EventEmitter {
 
       this.stateManager.saveProcess(state);
 
+      // P2修复: 清理旧进程的监听器，避免socket pair残留导致日志断裂
+      if (instance.child) {
+        instance.child.stdout?.removeAllListeners();
+        instance.child.stderr?.removeAllListeners();
+      }
+
       // 重定向输出到日志
       child.stdout?.on('data', (data: Buffer) => {
         this.logManager.write(config.name, 'out', data.toString());

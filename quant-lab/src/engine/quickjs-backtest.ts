@@ -326,6 +326,46 @@ export class QuickJSBacktestEngine {
   }
 
   /**
+   * [P1] 清理资源，释放 QuickJS VM 内存
+   * 在 param-sweep 每组回测后调用，防止内存泄漏
+   */
+  async cleanup(): Promise<void> {
+    // 释放 QuickJS VM
+    if (this.strategy) {
+      try {
+        // QuickJSStrategy 有 dispose 方法
+        const strategy = this.strategy as any;
+        if (strategy.ctx) {
+          strategy.ctx.dispose();
+          strategy.ctx = undefined;
+        }
+        if (strategy.vm) {
+          strategy.vm = undefined;
+        }
+        this.strategy = undefined;
+      } catch (e: any) {
+        logger.warn(`[QuickJSBacktest] cleanup strategy failed: ${e.message}`);
+      }
+    }
+
+    // 关闭数据库连接
+    if (this.klineDb) {
+      try {
+        await this.klineDb.close();
+        this.klineDb = undefined;
+      } catch (e: any) {
+        logger.warn(`[QuickJSBacktest] cleanup klineDb failed: ${e.message}`);
+      }
+    }
+
+    // 清空订单和成交记录
+    this.orders = [];
+    this.filledOrders = [];
+
+    logger.debug('[QuickJSBacktest] cleanup 完成');
+  }
+
+  /**
    * 处理单根K线
    */
   private async processKline(kline: Kline, index: number): Promise<void> {
