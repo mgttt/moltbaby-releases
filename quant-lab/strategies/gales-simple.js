@@ -2866,7 +2866,8 @@ function st_heartbeat(tickJson) {
     }
   } else {
     const accountGap = state.riskMetrics?.accountGap || 0;
-    if (accountGap > 30) {
+    // P1修复：B类自愈只在30-100范围触发，>100由账本对齐处理，避免振荡
+    if (accountGap > 30 && accountGap <= 100) {
       state.ledgerMismatchCount = (state.ledgerMismatchCount || 0) + 1;
       if (state.ledgerMismatchCount >= 3) {
         // 连续3次心跳超阈值，强制对齐
