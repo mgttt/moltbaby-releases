@@ -973,7 +973,8 @@ static void write_partition_file(const char* filepath,
         "{\"name\":\"high\",\"type\":\"float64\"},"
         "{\"name\":\"low\",\"type\":\"float64\"},"
         "{\"name\":\"close\",\"type\":\"float64\"},"
-        "{\"name\":\"volume\",\"type\":\"float64\"}"
+        "{\"name\":\"volume\",\"type\":\"float64\"},"
+        "{\"name\":\"flags\",\"type\":\"uint32\"}"
         "],\"totalRows\":%u,\"chunkCount\":1,\"stringDicts\":{", n_rows);
 
     pos += snprintf(json+pos, sizeof(json)-pos, "\"symbol\":[");
@@ -1020,7 +1021,8 @@ static void write_partition_file(const char* filepath,
         + n_rows * 8   /* high: float64 */
         + n_rows * 8   /* low: float64 */
         + n_rows * 8   /* close: float64 */
-        + n_rows * 8;  /* volume: float64 */
+        + n_rows * 8   /* volume: float64 */
+        + n_rows * 4;  /* flags: uint32 */
 
     chunk_buf = (uint8_t*)malloc(chunk_size);
     if (!chunk_buf) { fclose(f); return; }
@@ -1061,6 +1063,10 @@ static void write_partition_file(const char* filepath,
     /* volume列 */
     for (uint32_t i = 0; i < n_rows; i++) {
         memcpy(p, &rows[i].volume, 8); p += 8;
+    }
+    /* flags列 */
+    for (uint32_t i = 0; i < n_rows; i++) {
+        memcpy(p, &rows[i].flags, 4); p += 4;
     }
 
     fwrite(chunk_buf, 1, chunk_size, f);
@@ -1278,10 +1284,11 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
                 double* lows = (double*)malloc(row_count * 8);
                 double* closes = (double*)malloc(row_count * 8);
                 double* volumes = (double*)malloc(row_count * 8);
+                uint32_t* flags = (uint32_t*)malloc(row_count * 4);
                 
-                if (!sym_ids || !itv_ids || !timestamps || !opens || !highs || !lows || !closes || !volumes) {
+                if (!sym_ids || !itv_ids || !timestamps || !opens || !highs || !lows || !closes || !volumes || !flags) {
                     free(sym_ids); free(itv_ids); free(timestamps); free(opens);
-                    free(highs); free(lows); free(closes); free(volumes);
+                    free(highs); free(lows); free(closes); free(volumes); free(flags);
                     break;
                 }
                 
@@ -1294,6 +1301,7 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
                 fread(lows, 8, row_count, f);
                 fread(closes, 8, row_count, f);
                 fread(volumes, 8, row_count, f);
+                fread(flags, 4, row_count, f);
                 
                 // 跳过 chunk CRC32
                 uint32_t chunk_crc;
@@ -1320,13 +1328,14 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
                         sd->klines[sd->count].low = lows[i];
                         sd->klines[sd->count].close = closes[i];
                         sd->klines[sd->count].volume = volumes[i];
+                        sd->klines[sd->count].flags = flags[i];
                         sd->count++;
                     }
                 }
                 
                 // 清理当前chunk
                 free(sym_ids); free(itv_ids); free(timestamps); free(opens);
-                free(highs); free(lows); free(closes); free(volumes);
+                free(highs); free(lows); free(closes); free(volumes); free(flags);
             }
             
             fclose(f);

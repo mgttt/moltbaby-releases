@@ -208,19 +208,19 @@ let state = {
   lastPlaceTick: 0,        // 上次尝试挂单的 tick（用于判断长期不交易）
   lastRecenterAtMs: 0,     // 上次重心时间
   lastRecenterTick: 0,     // 上次重心发生的 tick
-  
+
   // P0修复：110072根治 - 唯一orderLinkId生成
   runId: 0,                // 本次运行唯一ID
   orderSeq: 0,             // 订单序列号
-  
+
   // P0修复：区分交易所持仓和策略内部持仓
   exchangePosition: 0,     // 交易所总持仓（仅显示，不用于应急切换）
-  
+
   // P2修复：持仓差值监控
   initialOffset: 0,        // 初始差值/历史遗留仓基准
   ledgerRebuildDone: false,
   ledgerRebuildLastTick: 0,
-  
+
   // P1修复：兜底自愈 - 账本不匹配计数器
   ledgerMismatchCount: 0,  // 连续ledger=mismatch心跳数
 
@@ -229,6 +229,9 @@ let state = {
 
   // P2修复：avgEntryPrice持久化（解决accountingPnl=0根因）
   avgEntryPrice: 0,        // 加权平均入场价格，每次fill时更新，重启后持久化
+
+  // P2修复：WS fill事件计数器（performance-metrics用）
+  fillCount: 0,            // 累计成交次数，st_onExecution中递增
 
   // 2026-02-19: 风险观测指标（策略内 + 账户级）
   riskMetrics: {
@@ -241,7 +244,7 @@ let state = {
     accountLeverageRatio: null,            // 杠杆比=总持仓/净值
     updatedAt: 0,
   },
-  
+
   // P0修复：ownerStrategy与实例state key强绑定，禁止运行时覆盖
   ownerStrategy: '',                       // 在st_init中初始化并锁定
 };
@@ -277,6 +280,8 @@ let circuitBreakerState = {
   // P1新增：杠杆硬顶阻止新订单标志
   blockNewOrders: false,
   leverageHardCapTriggeredAt: 0,  // 杠杆硬顶触发时间
+  // [P2] 仓位比率告警防抖时间戳
+  lastPosRatioWarnAt: 0,
 };
 
 // [硬拦截最小集] A类: API关键失败计数器（认证/签名/系统级）
@@ -364,7 +369,7 @@ function loadState() {
         }
         if (obj.ledgerRebuildDone === undefined) state.ledgerRebuildDone = false;
         if (obj.ledgerRebuildLastTick === undefined) state.ledgerRebuildLastTick = 0;
-        
+
         // P2修复：加载完整positionDiffState（7字段持久化）
         if (obj.positionDiffState) {
           positionDiffState.initialOffset = obj.positionDiffState.initialOffset || 0;
@@ -380,7 +385,7 @@ function loadState() {
         else if (obj.initialOffset !== undefined) {
           positionDiffState.initialOffset = obj.initialOffset;
         }
-        
+
         // P0新增：熔断状态兼容旧数据
         if (obj.circuitBreakerState) {
           // 兼容旧数据: 如active未定义, 默认为true
@@ -406,14 +411,14 @@ function loadState() {
   } catch (e) {
     logInfo('Failed to load state: ' + e);
   }
-  
+
   // P2修复v4: tick可能先于st_init执行，立即清空initialOffset避免假告警
   state.initialOffset = 0;
   positionDiffState.initialOffset = 0;
-  
+
   // P0修复：清空execution去重集合，避免重启后历史数据干扰
   processedExecIds = {};
-  
+
   // P2优化：从openOrders重建gridId索引
   state.ordersByGridId = {};
   state.activeOrdersCount = 0;
@@ -442,13 +447,13 @@ function saveState() {
       ledgerGapHardblocked: positionDiffState.ledgerGapHardblocked || false,
       lastHardblockAlertAt: positionDiffState.lastHardblockAlertAt || 0,
     };
-    
+
     // 2. 数据完整性检查：确保关键字段存在且类型正确
     if (typeof state !== 'object' || state === null) {
       logError('[saveState] 完整性检查失败: state不是有效对象');
       return;
     }
-    
+
     // 3. 构建待保存数据（添加版本号用于未来兼容）
     const stateToSave = {
       ...state,
@@ -456,7 +461,7 @@ function saveState() {
       _saveVersion: 1,           // 版本号，用于未来兼容
       _saveAt: Date.now(),       // 保存时间戳
     };
-    
+
     // 4. JSON序列化（在try-catch中，失败则不覆盖）
     let serialized;
     try {
@@ -465,7 +470,7 @@ function saveState() {
       logError('[saveState] JSON序列化失败: ' + e.message);
       return;
     }
-    
+
     // 5. 反序列化验证（确保数据可恢复）
     try {
       JSON.parse(serialized);
@@ -473,10 +478,10 @@ function saveState() {
       logError('[saveState] 序列化数据验证失败: ' + e.message);
       return;
     }
-    
+
     // 6. 原子写入：通过bridge_stateSet保存
     bridge_stateSet(getStateKey(), serialized);
-    
+
   } catch (e) {
     // 任何错误都不应导致state损坏，记录后优雅失败
     logError('[saveState] 事务性保存失败: ' + e.message);
@@ -496,38 +501,38 @@ let cachedIndicators = {
 /**
  * 指标准备函数（Freqtrade风格）
  * 框架层在每次K线更新时调用，计算指标并存入 cachedIndicators
- * 
+ *
  * @param {string} klinesJson - JSON格式的K线数据数组 [{timestamp, open, high, low, close, volume}, ...]
  */
 function st_prepareIndicators(klinesJson) {
   try {
     const klines = (typeof klinesJson === 'string') ? JSON.parse(klinesJson) : klinesJson;
-    
+
     if (!Array.isArray(klines) || klines.length < 50) {
       logDebug('[st_prepareIndicators] K线数据不足50根，跳过计算');
       return;
     }
-    
+
     // 提取收盘价序列
     const closes = klines.map(k => Number(k.close) || 0);
     const highs = klines.map(k => Number(k.high) || 0);
     const lows = klines.map(k => Number(k.low) || 0);
-    
+
     // 计算SMA
     cachedIndicators.sma20 = calculateSMA(closes, 20);
     cachedIndicators.sma50 = calculateSMA(closes, 50);
-    
+
     // 计算RSI
     cachedIndicators.rsi14 = calculateRSI(closes, 14);
-    
+
     // 计算ADX（使用K线数据中的high/low/close）
     cachedIndicators.adx = calculateADXFromKlines(klines, 14);
-    
+
     cachedIndicators.timestamp = Date.now();
     cachedIndicators.klineCount = klines.length;
-    
-    logDebug('[st_prepareIndicators] 指标已更新: ADX=' + cachedIndicators.adx.toFixed(2) + 
-             ' SMA20=' + cachedIndicators.sma20.toFixed(4) + 
+
+    logDebug('[st_prepareIndicators] 指标已更新: ADX=' + cachedIndicators.adx.toFixed(2) +
+             ' SMA20=' + cachedIndicators.sma20.toFixed(4) +
              ' RSI=' + cachedIndicators.rsi14.toFixed(2));
   } catch (e) {
     logWarn('[st_prepareIndicators] 计算失败: ' + e);
@@ -551,19 +556,19 @@ function calculateSMA(data, period) {
  */
 function calculateRSI(closes, period) {
   if (closes.length < period + 1) return 50;
-  
+
   let gains = 0;
   let losses = 0;
-  
+
   for (let i = closes.length - period; i < closes.length; i++) {
     const change = closes[i] - closes[i - 1];
     if (change > 0) gains += change;
     else losses -= change;
   }
-  
+
   const avgGain = gains / period;
   const avgLoss = losses / period;
-  
+
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
@@ -574,27 +579,27 @@ function calculateRSI(closes, period) {
  */
 function calculateADXFromKlines(klines, period) {
   if (klines.length < period * 2) return 0;
-  
+
   const dmArray = [];
   for (let i = 1; i < klines.length; i++) {
     const current = klines[i];
     const previous = klines[i - 1];
-    
+
     const upMove = Number(current.high) - Number(previous.high);
     const downMove = Number(previous.low) - Number(current.low);
-    
+
     const plusDM = (upMove > downMove && upMove > 0) ? upMove : 0;
     const minusDM = (downMove > upMove && downMove > 0) ? downMove : 0;
-    
+
     const tr = Math.max(
       Number(current.high) - Number(current.low),
       Math.abs(Number(current.high) - Number(previous.close)),
       Math.abs(Number(current.low) - Number(previous.close))
     );
-    
+
     dmArray.push({ plusDM, minusDM, tr });
   }
-  
+
   // 平滑计算
   const smoothedData = [];
   for (let i = period - 1; i < dmArray.length; i++) {
@@ -606,7 +611,7 @@ function calculateADXFromKlines(klines, period) {
     }
     smoothedData.push({ plusDM: sumPlusDM, minusDM: sumMinusDM, tr: sumTR });
   }
-  
+
   // 计算DI和DX
   const diArray = [];
   for (const data of smoothedData) {
@@ -616,7 +621,7 @@ function calculateADXFromKlines(klines, period) {
     const dx = (diSum > 0) ? (Math.abs(plusDI - minusDI) / diSum) * 100 : 0;
     diArray.push(dx);
   }
-  
+
   // 计算ADX（DX的平均）
   if (diArray.length < period) return 0;
   let adx = 0;
@@ -662,7 +667,7 @@ function logDebug(msg) {
 
 /**
  * 计算ADX（Average Directional Index）
- * 
+ *
  * @returns {number} ADX值（0-100）
  */
 function calculateADX() {
@@ -746,7 +751,7 @@ function calculateADX() {
 
 /**
  * 判断市场状态
- * 
+ *
  * @param {number} adx - ADX值
  * @returns {string} 市场状态：RANGING/TRENDING/STRONG_TREND
  */
@@ -762,7 +767,7 @@ function determineMarketRegime(adx) {
 
 /**
  * 更新市场状态
- * 
+ *
  * @param {object} tick - tick数据，包含 price, high, low 等字段
  */
 function updateMarketRegime(tick) {
@@ -831,7 +836,7 @@ function updateMarketRegime(tick) {
 
 /**
  * 检查是否应该暂停网格下单
- * 
+ *
  * @returns {boolean} true=应该暂停，false=可以继续
  */
 function shouldSuspendGridTrading() {
@@ -839,7 +844,7 @@ function shouldSuspendGridTrading() {
   if (circuitBreakerState.blockNewOrders) {
     return true;
   }
-  
+
   if (!CONFIG.enableMarketRegime) {
     return false;
   }
@@ -854,7 +859,7 @@ function shouldSuspendGridTrading() {
 
 /**
  * 获取当前市场状态描述
- * 
+ *
  * @returns {string} 市场状态描述
  */
 function getMarketRegimeDesc() {
@@ -920,7 +925,7 @@ function hasOnlyActiveBuyOrders() {
 
 function cancelAllOrders() {
   logWarn('[撤销所有订单] 活跃订单数: ' + countActiveOrders());
-  
+
   for (let i = 0; i < state.gridLevels.length; i++) {
     const g = state.gridLevels[i];
     if (!g) continue;
@@ -928,7 +933,7 @@ function cancelAllOrders() {
       cancelOrder(g);
     }
   }
-  
+
   // 清理已撤销订单（保留成交记录）
   state.openOrders = state.openOrders.filter(function(o) {
     if (!o) return false;
@@ -942,17 +947,17 @@ function cancelAllOrders() {
 
 /**
  * 熔断检查 - 多层防护体系
- * 
+ *
  * 设计思路：
  * 1. 回撤熔断是最后防线，一旦触发立即停止所有交易
  * 2. 仓位熔断采用"软限制"，仅阻止新开仓，不撤现有单
  * 3. 价格偏离已降级为告警（不拦截），避免误杀正常波动
  * 4. 账本差值硬拦截用于检测策略与交易所状态不一致
- * 
+ *
  * 恢复机制：
  * - 回撤熔断：需冷却期+连续3个心跳满足恢复条件
  * - 仓位限制：仓位降回阈值以下立即恢复
- * 
+ *
  * @returns {boolean} true=熔断中（应停止交易），false=正常交易
  */
 function checkCircuitBreaker() {
@@ -961,12 +966,12 @@ function checkCircuitBreaker() {
     logDebug('[熔断检查] 熔断检查已暂停(active=false)');
     return false;
   }
-  
+
   if (!CONFIG.circuitBreaker || !CONFIG.circuitBreaker.enabled) return false;
-  
+
   const now = Date.now();
   const cb = CONFIG.circuitBreaker;
-  
+
   // ===== 冷却期恢复逻辑 =====
   // 为什么需要冷却期：防止熔断后立即恢复又立即触发（震荡）
   // 为什么用effectivePosition：取策略内部和交易所的较大值，防止单方数据异常导致误判
@@ -975,7 +980,7 @@ function checkCircuitBreaker() {
     if (elapsed < cb.cooldownAfterTrip) {
       return true;  // 仍在冷却期，禁止交易
     }
-    
+
     // P0修复：熔断震荡 - 使用effectivePosition判断恢复条件
     // 为什么用positionRatio < maxPositionRatio：确保仓位确实回落到安全水平
     const effectivePos = Math.max(
@@ -1009,10 +1014,10 @@ function checkCircuitBreaker() {
       // 不满足条件，重置计数 - 为什么：确保连续满足条件，非累积
       circuitBreakerState.recoveryTickCount = 0;
     }
-    
+
     return true;  // 冷却期结束但仓位未回落，继续熔断
   }
-  
+
   // ===== 回撤熔断检查 =====
   // [P1修复] 改为基于netEq计算回撤，而不是仓位规模
   // 原因：原逻辑用effectivePosition，导致盈利平仓（仓位下降）误触发熔断
@@ -1021,25 +1026,25 @@ function checkCircuitBreaker() {
     Math.abs(state.exchangePosition || 0)
   );
   const currentNetEq = state.riskMetrics?.accountNetEquity || state.riskMetrics?.netEq || 0;
-  
+
   // 冷启动：初始化peakNetEq
   if (circuitBreakerState.peakNetEq === 0 && currentNetEq > 0) {
     circuitBreakerState.peakNetEq = currentNetEq;
     logInfo('[熔断初始化] peakNetEq=' + circuitBreakerState.peakNetEq.toFixed(2));
   }
-  
+
   // 更新历史最高净值
   if (currentNetEq > circuitBreakerState.peakNetEq) {
     circuitBreakerState.peakNetEq = currentNetEq;
   }
-  
+
   // peakNetEq > 0 时才计算回撤
   if (circuitBreakerState.peakNetEq > 0) {
     const drawdown = (circuitBreakerState.peakNetEq - currentNetEq) / circuitBreakerState.peakNetEq;
     const ddPct = (drawdown * 100).toFixed(2);
     const ddBase = ' drawdown=' + ddPct + '% | peak=' + circuitBreakerState.peakNetEq.toFixed(2) + ' | netEq=' + currentNetEq.toFixed(2);
 
-    // [硬拦截最小集] D类:账户生存 — 40%最后防线
+    // [硬拦截最小集] D类:账户生存 - 40%最后防线
     // 为什么是40%：基于历史回测，策略在40%回撤后恢复概率极低，保护剩余本金
     if (drawdown > cb.maxDrawdown) {
       circuitBreakerState.tripped = true;
@@ -1070,7 +1075,7 @@ function checkCircuitBreaker() {
       }
     }
   }
-  
+
   // 2. 仓位熔断（方案B：恢复但改为限制开仓）
   const positionRatio = effectivePosition / CONFIG.maxPosition;
   if (positionRatio > cb.maxPositionRatio) {
@@ -1101,7 +1106,19 @@ function checkCircuitBreaker() {
       circuitBreakerState.blockNewOrders = false;
     }
   }
-  
+
+  // [P2] 仓位比率告警：galesLevel接近满仓时推送
+  const posRatio = effectivePosition / CONFIG.maxPosition;
+  if (posRatio > 0.85) {
+    const lastPosWarn = circuitBreakerState.lastPosRatioWarnAt || 0;
+    if (now - lastPosWarn > 300000) {  // 5分钟防抖
+      circuitBreakerState.lastPosRatioWarnAt = now;
+      logWarn('[告警-仓位接近满仓] posRatio=' + (posRatio * 100).toFixed(1) + '% (>85%)');
+      try { bridge_tgSend('9号', '[告警][仓位接近满仓] posRatio=' + (posRatio * 100).toFixed(1) + '%，galesLevel=' + state.riskMetrics?.galesLevel + ' (runId=' + state.runId + ')'); } catch(e){}
+      try { bridge_tgSend('1号', '[告警][仓位接近满仓] posRatio=' + (posRatio * 100).toFixed(1) + '% (runId=' + state.runId + ')'); } catch(e){}
+    }
+  }
+
   // 3. 价格偏离 — [硬拦截最小集] 降级为告警（不拦截）
   // 原：drift>50%硬拦截；现：仅告警，允许策略继续运行
   if (state.centerPrice > 0) {
@@ -1181,35 +1198,35 @@ function checkCircuitBreaker() {
 
 /**
  * 检查杠杆硬顶 - 防止过度杠杆导致爆仓风险
- * 
+ *
  * 设计思路：
  * 1. 硬顶与熔断不同：硬顶只阻止新订单，不取消现有订单
  * 2. 为什么用accountLeverageRatio：直接反映账户整体杠杆水平，比仓位更直观
  * 3. 恢复阈值用0.9系数：避免在阈值附近震荡（触发-恢复-触发循环）
- * 
+ *
  * 与熔断的区别：
  * - 熔断：回撤触发，停止所有交易，取消所有订单
  * - 硬顶：杠杆触发，只阻止新订单，保留现有持仓和订单
- * 
+ *
  * @returns {boolean} true=已触发硬顶（阻止新订单），false=未触发
  */
 function checkLeverageHardCap() {
   const lhc = CONFIG.leverageHardCap;
-  
+
   // 未启用时跳过 - 为什么保留开关：某些策略可能不需要杠杆限制
   if (!lhc || !lhc.enabled) {
     return false;
   }
-  
+
   const now = Date.now();
   const maxLev = lhc.maxLeverage || 3.0;
   const currentLev = state.riskMetrics?.accountLeverageRatio;
-  
+
   // 杠杆数据无效时跳过 - 为什么：exchange可能未返回杠杆数据，不能误拦
   if (currentLev === null || currentLev === undefined || !isFinite(currentLev)) {
     return false;
   }
-  
+
   // ===== 硬顶触发检查 =====
   // 为什么用>=而非>：等于阈值时也应触发，确保不超限
   if (currentLev >= maxLev) {
@@ -1223,7 +1240,7 @@ function checkLeverageHardCap() {
     }
     return true;
   }
-  
+
   // ===== 硬顶恢复检查 =====
   // 为什么检查leverageHardCapTriggeredAt > 0：确保是硬顶触发的block，而非其他原因
   if (circuitBreakerState.blockNewOrders && circuitBreakerState.leverageHardCapTriggeredAt > 0) {
@@ -1237,7 +1254,7 @@ function checkLeverageHardCap() {
       try { bridge_tgSend('9号', '[P1恢复][杠杆硬顶] 杠杆=' + currentLev.toFixed(2) + 'x 恢复正常，恢复新订单 (runId=' + state.runId + ')'); } catch(e){}
     }
   }
-  
+
   return false;
 }
 
@@ -1245,18 +1262,18 @@ function checkLeverageHardCap() {
 function checkPositionDiff() {
   const now = Date.now();
   const alertIntervalMs = 5 * 60 * 1000; // 5分钟防抖
-  
+
   // P2修复：方案C独立账本设计 - internal=0时跳过告警（等累积后再监控）
   if (Math.abs(state.positionNotional || 0) < 1) {
     return;  // internal未开始累积，跳过差值监控
   }
-  
+
   // P2修复v2: 计算差值 = |(exchange - initialOffset) - internal|
   // 原公式 diff = |exchange - internal - initialOffset| 在internal累积后仍触发误报
   // 新公式 diff = |(exchange - initialOffset) - internal| 正确反映"新增差异"
   const adjustedExchange = (state.exchangePosition || 0) - (positionDiffState.initialOffset || 0);
   const currentDiff = Math.abs(adjustedExchange - (state.positionNotional || 0));
-  
+
   // 趋势检测：差值是否连续增大
   if (currentDiff > positionDiffState.lastDiff) {
     positionDiffState.diffIncreaseCount++;
@@ -1264,25 +1281,25 @@ function checkPositionDiff() {
     positionDiffState.diffIncreaseCount = 0;
   }
   positionDiffState.lastDiff = currentDiff;
-  
+
   // 阈值判断
   const maxPosition = CONFIG.maxPosition || 7874;
   const diffRatio = currentDiff / maxPosition;
-  
+
   // 熔断阈值：3000 USDT 或 30%，且连续3次或5分钟内持续超限
   if (currentDiff > 3000 || diffRatio > 0.30) {
     // P2修复：连续3次或时间窗防抖
     const trendConfirmed = positionDiffState.diffIncreaseCount >= 3;
     const timeWindowExceeded = (now - positionDiffState.lastAlertAt) > alertIntervalMs;
-    
+
     if ((trendConfirmed || timeWindowExceeded) && (now - positionDiffState.lastAlertAt) > 60000) {
       positionDiffState.lastAlertAt = now;
-      const msg = '[P2告急] 持仓差值熔断! diff=' + currentDiff.toFixed(2) + 
+      const msg = '[P2告急] 持仓差值熔断! diff=' + currentDiff.toFixed(2) +
                   ' (' + (diffRatio * 100).toFixed(1) + '%) | ' +
-                  'exchange=' + (state.exchangePosition || 0).toFixed(2) + 
+                  'exchange=' + (state.exchangePosition || 0).toFixed(2) +
                   ' internal=' + (state.positionNotional || 0).toFixed(2);
       bridge_log('error', '[Gales] ' + msg);  // P0修复：直接用bridge_log
-      
+
       // P2修复：TG通知bot-009、bot-004、bot-001（9号建议：加runId避免延迟消息误判）
       // P0修复：添加direction标识（区分neutral/short实例）
       const directionLabel = CONFIG.direction || 'neutral';
@@ -1295,28 +1312,28 @@ function checkPositionDiff() {
       } catch (e) {
         logWarn('[P2] tg通知失败: ' + e);
       }
-      
+
       // P2修复：只告警不熔断（9号/鲶鱼建议）
       // 持仓差值监控设计为告警only，不置tripped，避免长期熔断中
       logWarn('[P2] 持仓差值告警：仅通知，不触发熔断');
     }
     return;
   }
-  
+
   // 告警阈值：1000 USDT 或 10%，且连续2次
   if (currentDiff > 1000 || diffRatio > 0.10) {
     // P2修复：连续2次防抖
     const trendConfirmed = positionDiffState.diffIncreaseCount >= 2;
     const timeWindowExceeded = (now - positionDiffState.lastAlertAt) > alertIntervalMs;
-    
+
     if ((trendConfirmed || timeWindowExceeded) && (now - positionDiffState.lastAlertAt) > 60000) {
       positionDiffState.lastAlertAt = now;
-      const msg = '[P2告警] 持仓差值过大! diff=' + currentDiff.toFixed(2) + 
+      const msg = '[P2告警] 持仓差值过大! diff=' + currentDiff.toFixed(2) +
                   ' (' + (diffRatio * 100).toFixed(1) + '%) | ' +
-                  'exchange=' + (state.exchangePosition || 0).toFixed(2) + 
+                  'exchange=' + (state.exchangePosition || 0).toFixed(2) +
                   ' internal=' + (state.positionNotional || 0).toFixed(2);
       logWarn(msg);
-      
+
       // P2修复：TG通知bot-009和bot-001（9号建议：加runId避免延迟消息误判）
       // P0修复：添加direction标识（区分neutral/short实例）
       const directionLabel = CONFIG.direction || 'neutral';
@@ -1338,13 +1355,13 @@ function checkPositionDiff() {
 
 function checkEmergencyDirectionSwitch() {
   if (CONFIG.emergencyDirection !== 'auto') return;
-  
+
   // P0修复：并发保护 - 下单期间禁止方向切换
   if (state.isPlacingOrder) {
     logDebug('[应急切换] 下单进行中，跳过方向切换检查');
     return;
   }
-  
+
   // 买满仓 → 强制切换到 long 模式（只做多）
   if (state.positionNotional >= CONFIG.maxPosition * 0.9) {
     if (CONFIG.direction !== 'long') {
@@ -1353,7 +1370,7 @@ function checkEmergencyDirectionSwitch() {
       saveState();
     }
   }
-  
+
   // 卖满仓 → 强制切换到 short 模式（只做空）
   if (state.positionNotional <= -CONFIG.maxPosition * 0.9) {
     if (CONFIG.direction !== 'short') {
@@ -1362,7 +1379,7 @@ function checkEmergencyDirectionSwitch() {
       saveState();
     }
   }
-  
+
   // 仓位回到安全区 → 恢复 neutral
   if (Math.abs(state.positionNotional) < CONFIG.maxPosition * 0.5) {
     if (CONFIG.direction !== 'neutral' && CONFIG.emergencyDirection === 'auto') {
@@ -1388,31 +1405,31 @@ function getOpenOrder(orderId) {
 
 function removeOpenOrder(orderId) {
   if (!orderId) return;
-  
+
   // P2优化：先找到order获取gridId，再从索引中移除
   const order = getOpenOrder(orderId);
   if (order && order.gridId && state.ordersByGridId) {
     delete state.ordersByGridId[order.gridId];
   }
-  
+
   // P2优化：同步更新活跃订单计数器（只有活跃订单才减）
   if (order && order.status !== 'Filled' && order.status !== 'Canceled') {
     if (typeof state.activeOrdersCount === 'number' && state.activeOrdersCount > 0) {
       state.activeOrdersCount--;
     }
   }
-  
+
   state.openOrders = state.openOrders.filter(function(o) { return o.orderId !== orderId; });
 }
 
 /**
  * 获取活跃订单数（P2优化：O(1)计数器）
- * 
+ *
  * 优化思路：
  * - 原实现：O(n)每次遍历计算
  * - 新实现：O(1)直接返回缓存计数器
  * - 维护：增删订单时同步更新state.activeOrdersCount
- * 
+ *
  * @returns {number} 活跃订单数
  */
 function countActiveOrders() {
@@ -1420,7 +1437,7 @@ function countActiveOrders() {
   if (typeof state.activeOrdersCount === 'number') {
     return state.activeOrdersCount;
   }
-  
+
   // 兼容：计数器未初始化时降级为遍历计算
   if (!state.openOrders) return 0;
   let n = 0;
@@ -1437,7 +1454,7 @@ function calcPendingNotional(side) {
   // P2优化：优先读取tick缓存（避免重复计算）
   if (!state.tickCache) state.tickCache = {};
   if (!state.tickCache.pendingNotional) state.tickCache.pendingNotional = {};
-  
+
   // 如果缓存存在，直接返回
   if (state.tickCache.pendingNotional[side] !== undefined) {
     return state.tickCache.pendingNotional[side];
@@ -1448,7 +1465,7 @@ function calcPendingNotional(side) {
     state.tickCache.pendingNotional[side] = 0;
     return 0;
   }
-  
+
   let sum = 0;
 
   for (let i = 0; i < state.openOrders.length; i++) {
@@ -1472,18 +1489,18 @@ function calcPendingNotional(side) {
 
 /**
  * 通过gridId查找活跃订单（P2优化：O(1)索引查找）
- * 
+ *
  * 优化思路：
  * - 原实现：O(n)线性遍历
  * - 新实现：O(1) Map索引查找
  * - 维护：openOrders增删时同步更新state.ordersByGridId
- * 
+ *
  * @param {string} gridId - 网格ID
  * @returns {Object|null} 订单对象或null
  */
 function findActiveOrderByGridId(gridId) {
   if (!gridId) return null;
-  
+
   // P2优化：使用索引Map O(1)查找
   const order = state.ordersByGridId?.[gridId];
   if (order && order.status !== 'Filled' && order.status !== 'Canceled') {
@@ -1513,7 +1530,7 @@ function reconcileGridOrderLinks() {
   // QuickJS用Object模拟Set（hasOwnProperty O(1)）
   const activeOrderGridIds = {};  // gridId -> true
   const gridById = {};            // gridId -> grid
-  
+
   // O(n): 收集活跃订单的gridId
   for (let i = 0; i < state.openOrders.length; i++) {
     const o = state.openOrders[i];
@@ -1521,7 +1538,7 @@ function reconcileGridOrderLinks() {
       activeOrderGridIds[o.gridId] = true;
     }
   }
-  
+
   // O(m): 构建grid索引
   for (let i = 0; i < state.gridLevels.length; i++) {
     const g = state.gridLevels[i];
@@ -1852,12 +1869,12 @@ function st_onOrderUpdate(orderJson) {
 
     // P0 修复：pending → 真实 orderId 映射回写
     let grid = null;
-    
+
     // 优先通过 gridId 定位
     if (order.gridId) {
       grid = findGridById(order.gridId);
     }
-    
+
     // 其次通过 orderLinkId 定位（交易所推送通常带 orderLinkId）
     if (!grid && order.orderLinkId) {
       grid = findGridByOrderLinkId(order.orderLinkId);
@@ -1866,24 +1883,24 @@ function st_onOrderUpdate(orderJson) {
         order.gridId = grid.id;
       }
     }
-    
+
     if (grid) {
       // 关键修复：无论 grid.orderId 是什么，都回写真实 orderId
       // 场景：grid.orderId = pending-xxx → order.orderId = MYXUSDT:12345678
       const oldId = grid.orderId;
       const newId = order.orderId;
-      
+
       if (oldId !== newId) {
         logInfo('[P0] pending → 真实 orderId: ' + oldId + ' → ' + newId + ' (gridId=' + grid.id + ')');
         grid.orderId = newId;
-        
+
         // 同步更新 openOrders 中的 orderId
         const openOrder = state.openOrders.find(o => o.orderId === oldId);
         if (openOrder) {
           openOrder.orderId = newId;
         }
       }
-      
+
       // 让 policy 在下一次 heartbeat 统一处理
       grid.lastExternalUpdateAt = Date.now();
     }
@@ -1948,36 +1965,37 @@ function st_onExecution(execJson) {
       else state.positionNotional -= notional;
     }
 
-    logInfo('[成交明细] execId=' + exec.execId + ' ' + side + ' ' + execQty.toFixed(4) + ' @ ' + execPrice.toFixed(4) + 
+    logInfo('[成交明细] execId=' + exec.execId + ' ' + side + ' ' + execQty.toFixed(4) + ' @ ' + execPrice.toFixed(4) +
             ' | 仓位Notional=' + state.positionNotional.toFixed(2));
 
-    // P2修复：avgEntryPrice持久化 - 更新加权平均入场价格
-    const oldPosNotional = (CONFIG.direction === 'long') ? 
-      (side === 'Buy' ? state.positionNotional - notional : state.positionNotional + notional) :
-      (CONFIG.direction === 'short') ?
-        (side === 'Sell' ? state.positionNotional + notional : state.positionNotional - notional) :
-        (side === 'Buy' ? state.positionNotional - notional : state.positionNotional + notional);
-    
-    const oldQty = Math.abs(oldPosNotional) / execPrice;
-    const newQty = Math.abs(state.positionNotional) / execPrice;
-    
-    // P2修复：方向翻转检测（穿零bug修复）
-    const oldSign = Math.sign(oldPosNotional);
-    const newSign = Math.sign(state.positionNotional);
-    if (oldSign !== 0 && newSign !== 0 && oldSign !== newSign) {
-      // 方向翻转：重置为当前fill价格
-      state.avgEntryPrice = execPrice;
-      logDebug('[avgEntryPrice] 方向翻转重置: ' + oldSign + '->' + newSign + ' @ ' + execPrice.toFixed(4));
-    } else if (newQty > oldQty) {
-      // 正常开仓（仓位增加）：加权更新
-      const oldAvg = state.avgEntryPrice || 0;
-      const addedQty = execQty;
-      if (oldAvg > 0 && oldQty > 0) {
-        state.avgEntryPrice = (oldAvg * oldQty + execPrice * addedQty) / newQty;
-      } else {
-        state.avgEntryPrice = execPrice;
+    // P2修复：递增fillCount（performance-metrics用）
+    state.fillCount = (state.fillCount || 0) + 1;
+
+    // [P2] WS fill路径：用execution事件实时更新avgEntryPrice
+    try {
+      const posData = bridge_getPosition(CONFIG.symbol);
+      if (posData) {
+        const pos = JSON.parse(posData);
+        const exchangeEntryPrice = parseFloat(pos.entryPrice || 0);
+        const exchangePosQty = parseFloat(pos.quantity || 0);
+
+        // 判断方向是否变化
+        const currentSign = Math.sign(state.positionNotional);
+        const exchangeSign = Math.sign(exchangePosQty);
+
+        // 仅当方向未变且exchange有有效entryPrice时更新
+        if (currentSign !== 0 && exchangeSign !== 0 && currentSign === exchangeSign && exchangeEntryPrice > 0) {
+          const oldAvg = state.avgEntryPrice || 0;
+          state.avgEntryPrice = exchangeEntryPrice;
+          logInfo('[fill更新] avgEntry: ' + oldAvg.toFixed(4) + '→' + state.avgEntryPrice.toFixed(4) +
+                  ' execId=' + exec.execId + ' (from exchange)');
+        } else {
+          logDebug('[fill更新] 跳过: 方向变化或无效entryPrice. currentSign=' + currentSign +
+                   ' exchangeSign=' + exchangeSign + ' entryPrice=' + exchangeEntryPrice);
+        }
       }
-      logDebug('[avgEntryPrice] 更新: ' + oldAvg.toFixed(4) + ' -> ' + state.avgEntryPrice.toFixed(4) + ' (qty=' + oldQty.toFixed(4) + '->' + newQty.toFixed(4) + ')');
+    } catch (e) {
+      logWarn('[fill更新] 获取position失败: ' + e);
     }
 
     // simMode: 记录模拟成交
@@ -2025,29 +2043,29 @@ function updateRiskMetrics(tick) {
 
   // 策略内指标
   state.riskMetrics.accountingPosition = state.positionNotional || 0;
-  
+
   // P2修复：计算 accountingPnl（使用持久化的avgEntryPrice）
   // 基于 positionNotional 和加权平均成本计算
   let accountingPnl = 0;
   const posNotional = state.positionNotional || 0;
   const currentPrice = tick?.price || state.lastPrice || 0;
-  
+
   if (posNotional !== 0 && currentPrice > 0) {
     // 优先使用持久化的avgEntryPrice
     let avgCost = state.avgEntryPrice || 0;
-    
+
     // 如果avgEntryPrice不可用，回退到gridLevels计算（兼容性）
     if (avgCost <= 0 && state.gridLevels) {
       let totalCost = 0;
       let totalQty = 0;
-      
+
       for (let i = 0; i < state.gridLevels.length; i++) {
         const grid = state.gridLevels[i];
         if (grid && grid.lastFillQty > 0 && grid.lastFillPrice > 0) {
           // 只统计与当前持仓方向一致的成交
           const isShort = posNotional < 0;
           const gridIsShort = grid.side === 'Sell';
-          
+
           if (isShort === gridIsShort) {
             const qty = grid.lastFillQty;
             const price = grid.lastFillPrice;
@@ -2056,19 +2074,19 @@ function updateRiskMetrics(tick) {
           }
         }
       }
-      
+
       if (totalQty > 0) {
         avgCost = totalCost / totalQty;
         // 同步更新state.avgEntryPrice供下次使用
         state.avgEntryPrice = avgCost;
       }
     }
-    
+
     if (avgCost > 0) {
       // 空仓 PnL = positionNotional * (avgCost/currentPrice - 1)
       // positionNotional 是负值（如 -197.39），表示空仓名义价值
       const posQty = Math.abs(posNotional) / avgCost; // 持仓数量
-      
+
       if (posNotional < 0) {
         // Short: PnL = (entryPrice - currentPrice) * qty
         // = (avgCost - currentPrice) * posQty
@@ -2079,7 +2097,7 @@ function updateRiskMetrics(tick) {
       }
     }
   }
-  
+
   state.riskMetrics.accountingPnl = accountingPnl;
   state.riskMetrics.galesLevel = getCurrentGalesLevel();
   state.riskMetrics.exchangePosition = state.exchangePosition || 0;
@@ -2154,19 +2172,19 @@ function logRiskMetrics() {
   if (!state.riskMetrics) {
     state.riskMetrics = {};
   }
-  
+
   const m = state.riskMetrics;
-  
+
   // P0修复：强制确保关键字段有值（禁止NA）
   const accountingPos = m.accountingPosition !== undefined ? m.accountingPosition : (state.positionNotional || 0);
   const exchangePos = m.exchangePosition !== undefined ? m.exchangePosition : (state.exchangePosition || 0);
-  
+
   // P1修复：计算账户锚点gap（neutral作为账户主策略）
   const accountGap = Math.abs(accountingPos - exchangePos);
-  
+
   // P1修复：策略级gap（用于告警，不阻塞）
   const strategyGap = accountGap;
-  
+
   // P0修复：ownerStrategy必须使用state中锁定的值（禁止任何运行时重算）
   // 初始化守卫：如果ownerStrategy未设置，记录错误并返回
   if (!state.ownerStrategy) {
@@ -2174,7 +2192,7 @@ function logRiskMetrics() {
     return; // 禁止输出不完整的风险指标
   }
   const ownerStrategy = state.ownerStrategy;
-  
+
   // P0修复：将计算值存回riskMetrics（避免NA）
   m.accountingPosition = accountingPos;
   m.exchangePosition = exchangePos;
@@ -2182,7 +2200,7 @@ function logRiskMetrics() {
   m.strategyGap = strategyGap;
   // P0修复：ownerStrategy必须与实例state key一致，禁止覆盖
   m.ownerStrategy = ownerStrategy;
-  
+
   // P0修复：强制格式化（禁止NA）
   const fmtNum = (v, d) => {
     if (v === null || v === undefined || typeof v !== 'number' || !isFinite(v)) {
@@ -2190,7 +2208,7 @@ function logRiskMetrics() {
     }
     return v.toFixed(d || 2);
   };
-  
+
   logInfo('[风险指标] 策略(accountingPos=' + fmtNum(m.accountingPosition, 2) +
           ', accountingPnl=' + fmtNum(m.accountingPnl, 2) +
           ', galesLevel=' + fmtNum(m.galesLevel, 0) +
@@ -2310,37 +2328,37 @@ function alignAccountingFromExchange() {
     const exchangePos = position.positionNotional || 0;
     const isShort = position.side === 'Sell' || position.side === 'SHORT';
     const signedExchangePos = isShort ? -Math.abs(exchangePos) : exchangePos;
-    
+
     // P1简化修复：直接设置账本为交易所持仓（强制同步）
     const oldLedger = state.positionNotional || 0;
-    
+
     // P2修复：avgEntryPrice周期性同步（仅在方向相同时更新）
     const oldDirection = oldLedger > 0 ? 'long' : (oldLedger < 0 ? 'short' : 'none');
     const newDirection = signedExchangePos > 0 ? 'long' : (signedExchangePos < 0 ? 'short' : 'none');
-    
+
     // 获取entryPrice用于后续更新
     const entryPrice = Number(position.entryPrice || 0);
-    
+
     state.positionNotional = signedExchangePos;
-    
+
     // 仅在方向相同时更新avgEntryPrice（穿零重置逻辑保持）
     if (oldDirection === newDirection && newDirection !== 'none' && entryPrice > 0) {
       state.avgEntryPrice = entryPrice;
-      logInfo('[账本对齐] avgEntryPrice同步: ' + entryPrice.toFixed(4) + 
+      logInfo('[账本对齐] avgEntryPrice同步: ' + entryPrice.toFixed(4) +
               ' (方向=' + newDirection + ', 旧=' + (state.avgEntryPrice || 0).toFixed(4) + ')');
     }
-    
+
     // P1修复：不再这里设置initialOffset（由调用方在调用前设置）
     // positionDiffState.initialOffset = 0;
     // state.initialOffset = 0;
-    
-    logInfo('[账本对齐] 强制同步: exchangePos=' + signedExchangePos.toFixed(2) + 
-            ' oldLedger=' + oldLedger.toFixed(2) + 
+
+    logInfo('[账本对齐] 强制同步: exchangePos=' + signedExchangePos.toFixed(2) +
+            ' oldLedger=' + oldLedger.toFixed(2) +
             ' newLedger=' + state.positionNotional.toFixed(2));
-    
-    return { 
-      aligned: true, 
-      exchangePos: signedExchangePos, 
+
+    return {
+      aligned: true,
+      exchangePos: signedExchangePos,
       oldLedger: oldLedger,
       newLedger: state.positionNotional,
       gap: 0
@@ -2399,7 +2417,7 @@ function rebuildAccountingFromExecutions() {
       // getStateKey() = 'state:MYXUSDT:short' -> 需要匹配 'gales-MYXUSDT-short-'
       const expectedPrefix = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-';
       const isOwnOrder = orderLinkId && orderLinkId.startsWith(expectedPrefix);
-      
+
       if (!isOwnOrder) continue;
 
       const side = exec.side;
@@ -2426,9 +2444,9 @@ function rebuildAccountingFromExecutions() {
 
     if (matched > 0) {
       state.positionNotional = rebuiltNotional;
-      
+
       // 冷启动avgEntryPrice初始化已移到st_init（v2修复），此处不再重复
-      
+
       logInfo('[账本重建完成] runId=' + state.runId + ' matched=' + matched + '/' + executions.length +
               ' positionNotional=' + state.positionNotional.toFixed(2) +
               ' prefix=' + strategyPrefix);
@@ -2449,7 +2467,7 @@ function rebuildAccountingFromExecutions() {
 function st_init() {
   logDebug('[DEBUG] st_init called');
 
-  // [硬拦截最小集] 变更6: C类启动校验 — 关键参数完整性检查
+  // [硬拦截最小集] 变更6: C类启动校验 - 关键参数完整性检查
   // CONFIG缺失或无效 → 拒绝启动（throw阻止策略运行）
   if (!CONFIG.symbol || typeof CONFIG.symbol !== 'string' || CONFIG.symbol.length === 0) {
     throw new Error('[C类启动校验] CONFIG.symbol 缺失或无效，拒绝启动');
@@ -2466,7 +2484,7 @@ function st_init() {
   LOCKED_SYMBOL = CONFIG.symbol;
   LOCKED_DIRECTION = CONFIG.direction;
   SESSION_ID = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-  
+
   logInfo('策略初始化...');
   logInfo('Symbol: ' + LOCKED_SYMBOL + ' [已锁定]');
   logInfo('GridCount: ' + CONFIG.gridCount);
@@ -2481,7 +2499,7 @@ function st_init() {
     logInfo('[Init] P0 DEBUG: 准备调用 bridge_getPosition, symbol=' + CONFIG.symbol);
     const positionJson = bridge_getPosition(CONFIG.symbol);
     logInfo('[Init] P0 DEBUG: bridge_getPosition 返回: ' + JSON.stringify(positionJson));
-    
+
     if (positionJson === 'null' || positionJson === null || positionJson === undefined || positionJson === '') {
       logInfo('[Init] P0 DEBUG: 检测到空持仓 (null/undefined/empty)');
       logInfo('[Init] 交易所无持仓');
@@ -2489,12 +2507,12 @@ function st_init() {
     } else {
       logInfo('[Init] P0 DEBUG: 开始解析持仓 JSON');
       const position = JSON.parse(positionJson);
-      
+
       logInfo('[Init] 检测到交易所持仓:');
       logInfo('[Init]   symbol: ' + position.symbol);
       logInfo('[Init]   side: ' + position.side);
       logInfo('[Init]   positionNotional: ' + position.positionNotional);
-      
+
       // 记录交易所持仓（仅用于显示和initialOffset计算）
       // 方案C：每个策略维护独立账本，不覆盖策略内部positionNotional
       let exchangePosition = position.positionNotional || 0;
@@ -2503,37 +2521,55 @@ function st_init() {
         exchangePosition = -Math.abs(exchangePosition);
       }
       state.exchangePosition = exchangePosition;
-      
+
       logInfo('[Init]   交易所持仓(仅供参考): ' + state.exchangePosition.toFixed(2));
       logInfo('[Init]   策略内部持仓(独立账本): ' + state.positionNotional.toFixed(2));
       logInfo('[Init] ✅ 方案C：策略独立账本，通过订单历史累积positionNotional');
     }
-    
+
     saveState();
   } catch (e) {
     logWarn('[Init] P0 DEBUG: 获取持仓异常: ' + e);
     logWarn('[Init] 获取交易所持仓失败: ' + e);
   }
-  
+
+  // [P2] 冷启动自检报告 - 重启后立即推送策略状态
+  try {
+    const spacingPct = Math.round((CONFIG.gridSpacing || 0.02) * 100);
+    const pos = state.positionNotional || 0;
+    const avgEntry = state.avgEntryPrice || 0;
+    const maxPos = CONFIG.maxPosition || 0;
+    const selfCheckMsg = '[冷启动自检] sym=' + LOCKED_SYMBOL + 
+                         ' dir=' + LOCKED_DIRECTION + 
+                         ' pos=' + pos.toFixed(0) + 
+                         ' avgEntry=' + avgEntry.toFixed(3) + 
+                         ' maxPos=' + maxPos + 
+                         ' spacing=' + spacingPct + '%';
+    logInfo(selfCheckMsg);
+    bridge_tgSend('1号', selfCheckMsg);
+  } catch (e) {
+    logWarn('[Init] 自检报告发送失败: ' + e);
+  }
+
   // P0修复：110072根治 - 生成新的runId
   state.runId = Date.now();
   state.orderSeq = 0;
   logInfo('[Init] P0: 110072根治 - 新runId=' + state.runId + '，orderLinkId将唯一');
-  
+
   // P2修复：ADX冷启动保护 - 初始化warmupTicks
   marketRegimeState.warmupTicks = CONFIG.adxPeriod;
   logInfo('[Init] P2: ADX冷启动保护 warmupTicks=' + marketRegimeState.warmupTicks + '（约' + (CONFIG.adxPeriod * 5) + '秒）');
-  
+
   // P0修复：ownerStrategy与锁定后的CONFIG强绑定，确保不可变
   // 使用 LOCKED_SYMBOL + LOCKED_DIRECTION + SESSION_ID 确保唯一性
   state.ownerStrategy = 'state:' + LOCKED_SYMBOL + ':' + LOCKED_DIRECTION + ':' + SESSION_ID;
   logInfo('[Init] P0: ownerStrategy锁定=' + state.ownerStrategy + '（不可变）');
-  
+
   // P1修复：立即通知bridge新runId（确保tracker同步）
   if (typeof bridge_onRunIdChange === 'function') {
     bridge_onRunIdChange(state.runId);
   }
-  
+
   // P1修复：initialOffset由下方代码在账本对齐前计算（基于历史持仓差值）
   // positionDiffState.initialOffset = 0;
   // state.initialOffset = 0;
@@ -2554,15 +2590,15 @@ function st_init() {
   } catch (e) {
     logWarn('[Init] 获取交易所持仓失败: ' + e);
   }
-  
+
   // P1修复：在对齐前计算initialOffset = 交易所持仓 - 策略账本
   // 这样对齐后，差值监控将基于"新增差异"而非历史遗留差异
   const calculatedOffset = preAlignExchangePos - preAlignLedgerPos;
   positionDiffState.initialOffset = calculatedOffset;
   state.initialOffset = calculatedOffset;
-  logInfo('[Init] P1: 计算initialOffset=' + calculatedOffset.toFixed(2) + 
+  logInfo('[Init] P1: 计算initialOffset=' + calculatedOffset.toFixed(2) +
           ' (exchange=' + preAlignExchangePos.toFixed(2) + ' - ledger=' + preAlignLedgerPos.toFixed(2) + ')');
-  
+
   // 然后执行账本对齐
   const alignResult = alignAccountingFromExchange();
   if (alignResult.aligned) {
@@ -2570,20 +2606,20 @@ function st_init() {
   } else {
     logWarn('[Init][账本对齐失败] ' + (alignResult.reason || 'unknown'));
   }
-  
+
   // P2修复：冷启动时立即初始化风险指标（避免前几个tick显示NA）
   updateRiskMetrics({});
   logRiskMetrics();
-  
+
   // P2修复：检测遗留订单（鲶鱼建议）
   checkLegacyOrders();
-  
+
   // bridge_scheduleAt 示例：注册每小时定时任务
   if (typeof bridge_scheduleAt === 'function') {
     bridge_scheduleAt('HOURLY', 'st_onHourly');
     logInfo('[Init] 已注册每小时定时任务: st_onHourly');
   }
-  
+
   // P2修复v3：avgEntryPrice冷启动初始化（方案B：使用bridge_getPosition的entryPrice）
   // 问题：bridge_getExecutions()在st_init时返回空数组（cachedExecutions未填充）
   if (state.positionNotional !== 0 && (state.avgEntryPrice || 0) === 0) {
@@ -2594,7 +2630,7 @@ function st_init() {
         const entryPrice = Number(pos.entryPrice || 0);
         if (entryPrice > 0) {
           state.avgEntryPrice = entryPrice;
-          logInfo('[冷启动v3] avgEntryPrice初始化=' + state.avgEntryPrice.toFixed(4) + 
+          logInfo('[冷启动v3] avgEntryPrice初始化=' + state.avgEntryPrice.toFixed(4) +
                   ' (来自bridge_getPosition entryPrice)');
         }
       }
@@ -2623,17 +2659,17 @@ function checkLegacyOrders() {
       logDebug('[Legacy] bridge_getOpenOrders未定义，跳过');
       return;
     }
-    
+
     const ordersJson = fn(CONFIG.symbol);
     if (!ordersJson || ordersJson === 'null' || ordersJson === '[]') {
       return;
     }
-    
+
     const orders = JSON.parse(ordersJson);
     if (!Array.isArray(orders) || orders.length === 0) {
       return;
     }
-    
+
     // 筛选遗留订单（orderLinkId以gales-开头但runId不匹配）
     const legacyOrders = orders.filter(function(o) {
       if (o.orderLinkId && o.orderLinkId.startsWith('gales-')) {
@@ -2644,12 +2680,12 @@ function checkLegacyOrders() {
       }
       return false;
     });
-    
+
     if (legacyOrders.length === 0) {
       logInfo('[Legacy] 未检测到遗留订单');
       return;
     }
-    
+
     // --- dedup: 加载持久化记录（跨runId） ---
     var now = Date.now();
     var dedupRecord = {};
@@ -2659,18 +2695,18 @@ function checkLegacyOrders() {
         dedupRecord = JSON.parse(saved);
       }
     } catch (e) {}
-    
+
     // 清理过期记录
     for (var dk in dedupRecord) {
       if (now - dedupRecord[dk] > LEGACY_DEDUP_WINDOW_MS) {
         delete dedupRecord[dk];
       }
     }
-    
+
     // --- 语义分流 ---
     var p2Alerts = [];     // reduceOnly=false旧run订单 → P2
     var monitorOnly = [];  // reduceOnly/止盈/长期挂单 → 低频监控
-    
+
     legacyOrders.forEach(function(o) {
       var isReduceOnly = o.reduceOnly === true || o.reduceOnly === 'true';
       // 止盈单判断：side与策略方向相反 或 reduceOnly
@@ -2681,14 +2717,14 @@ function checkLegacyOrders() {
       if (!isTakeProfit && CONFIG.direction === 'long' && o.side === 'Sell') {
         isTakeProfit = true;
       }
-      
+
       if (isReduceOnly || isTakeProfit) {
         monitorOnly.push(o);
       } else {
         p2Alerts.push(o);
       }
     });
-    
+
     // --- 处理P2告警（受dedup降频） ---
     var newP2 = [];
     p2Alerts.forEach(function(o) {
@@ -2701,7 +2737,7 @@ function checkLegacyOrders() {
         logDebug('[Legacy][P2] dedup命中/skip send: ' + o.orderLinkId + ' (cached=' + Math.round((now - dedupRecord[dedupKey]) / 1000) + 's ago)');
       }
     });
-    
+
     // P2 TG告警（仅新的，受dedup）
     if (newP2.length > 0 && typeof bridge_tgSend === 'function') {
       var markPrice = state.lastPrice || 0;
@@ -2711,7 +2747,7 @@ function checkLegacyOrders() {
         var rid = parts[1] || 'unknown';
         if (oldRunIds.indexOf(rid) === -1) oldRunIds.push(rid);
       });
-      
+
       var summary = '[P2告警] 遗留订单' + newP2.length + '个（旧runId=' + oldRunIds.join(',') + '）runId=' + state.runId;
       newP2.forEach(function(o, idx) {
         var orderPrice = Number(o.price || 0);
@@ -2720,7 +2756,7 @@ function checkLegacyOrders() {
         summary += '\n' + (idx + 1) + '. ' + o.orderLinkId + ' ' + (o.side || '?') + ' ' + orderPrice.toFixed(4) + '×' + qty.toFixed(4) + ' dist=' + distPct + '%';
       });
       summary += '\n建议: 检查是否需保留，不需要请撤单';
-      
+
       try {
         bridge_tgSend('9号', summary);
         logInfo('[Legacy][P2] bridge_tgSend→9号: ' + newP2.length + '个新告警');
@@ -2730,7 +2766,7 @@ function checkLegacyOrders() {
     } else if (p2Alerts.length > 0 && newP2.length === 0) {
       logDebug('[Legacy][P2] 全部' + p2Alerts.length + '个P2订单dedup命中，skip send');
     }
-    
+
     // --- 长期挂单监控（低频，默认不打扰） ---
     if (monitorOnly.length > 0) {
       // 记录日志（始终）
@@ -2739,11 +2775,11 @@ function checkLegacyOrders() {
         var isRO = o.reduceOnly === true || o.reduceOnly === 'true';
         logDebug('[Legacy][Monitor] ' + o.orderLinkId + ' reduceOnly=' + isRO + ' side=' + (o.side || '?') + ' price=' + orderPrice.toFixed(4) + ' (旧run止盈/减仓单)');
       });
-      
+
       // 仅当数量超阈值 或 有超长存活订单时才升级告警
       var needEscalate = monitorOnly.length >= LEGACY_MONITOR_COUNT_THRESHOLD;
       // 注：age判断需要订单创建时间，如交易所不返回createdTime则跳过age检查
-      
+
       if (needEscalate) {
         var monitorDedupKey = CONFIG.symbol + ':monitor-batch:' + monitorOnly.length;
         if (!dedupRecord[monitorDedupKey]) {
@@ -2766,15 +2802,15 @@ function checkLegacyOrders() {
         logDebug('[Legacy][Monitor] ' + monitorOnly.length + '个止盈/减仓单（<阈值' + LEGACY_MONITOR_COUNT_THRESHOLD + '），仅记录不告警');
       }
     }
-    
+
     // --- 保存dedup记录 ---
     try {
       bridge_stateSet(getDedupKey(), JSON.stringify(dedupRecord));
     } catch (e) {}
-    
+
     state.legacyOrdersAtStartup = legacyOrders.length;
     logInfo('[Legacy] 总计: ' + legacyOrders.length + '个遗留(P2=' + p2Alerts.length + ' monitor=' + monitorOnly.length + ') 新P2告警=' + newP2.length);
-    
+
   } catch (e) {
     var debugInfo = '[Legacy] 检测失败: ' + e;
     try { debugInfo += ' | ' + String(e).slice(0, 100); } catch (de) {}
@@ -2831,8 +2867,9 @@ function st_heartbeat(tickJson) {
     }
   }
 
-  // P0修复：每30tick强制账本对齐（防止SSL/网络异常导致账本漂移）
-  if (state.tickCount % 30 === 0) {
+  // P0修复：每60tick强制账本对齐（防止SSL/网络异常导致账本漂移）
+  // [P2] 频率从30tick→60tick，因WS fill已实时更新
+  if (state.tickCount % 60 === 0) {
     try {
       // P0修复：使用锁定后的symbol，确保不可变
       const positionJson = bridge_getPosition(LOCKED_SYMBOL);
@@ -2844,7 +2881,7 @@ function st_heartbeat(tickJson) {
         }
         const ledgerPos = state.positionNotional || 0;
         const gap = Math.abs(exchangePos - ledgerPos);
-        
+
         // 风险：强制对齐会覆盖真实成交方向，仅在gap>100U时执行
         if (gap > 100) {
           const oldPos = state.positionNotional;
@@ -2951,21 +2988,21 @@ function st_heartbeat(tickJson) {
     const idleTicks = (state.tickCount || 0) - (state.lastPlaceTick || 0);
     const cooldownOk = (Date.now() - (state.lastRecenterAtMs || 0)) >= (CONFIG.recenterCooldownSec * 1000);
     const noActiveOrders = countActiveOrders() === 0;
-    
+
     // P0 修复：满仓时允许重心
     const fullPositionStuck = (
       (state.positionNotional >= CONFIG.maxPosition && hasOnlyActiveSellOrders()) ||
       (state.positionNotional <= -CONFIG.maxPosition && hasOnlyActiveBuyOrders())
     );
 
-    if (drift >= CONFIG.recenterDistance && 
-        idleTicks >= CONFIG.recenterMinIdleTicks && 
-        cooldownOk && 
+    if (drift >= CONFIG.recenterDistance &&
+        idleTicks >= CONFIG.recenterMinIdleTicks &&
+        cooldownOk &&
         (noActiveOrders || fullPositionStuck)) {
-      
+
       const reason = fullPositionStuck ? '满仓死锁自动重心' : '自动重心';
-      logWarn('[' + reason + '] drift=' + (drift * 100).toFixed(2) + 
-              '% idleTicks=' + idleTicks + 
+      logWarn('[' + reason + '] drift=' + (drift * 100).toFixed(2) +
+              '% idleTicks=' + idleTicks +
               ' posNotional=' + state.positionNotional.toFixed(2) +
               ' center=' + center.toFixed(4) + ' -> ' + state.lastPrice.toFixed(4));
 
@@ -2996,7 +3033,7 @@ function st_heartbeat(tickJson) {
   // 1. 找到最近的 IDLE 网格
   let nearestGrid = null;
   let minDistance = Infinity;
-  
+
   for (let i = 0; i < state.gridLevels.length; i++) {
     const grid = state.gridLevels[i];
     if (grid.state === 'IDLE') {
@@ -3009,7 +3046,7 @@ function st_heartbeat(tickJson) {
       applyActiveOrderPolicy(grid, Math.abs(state.lastPrice - grid.price) / grid.price);
     }
   }
-  
+
   // 2. 只检查最近的一个是否在磁铁范围内
   if (nearestGrid) {
     if (shouldPlaceOrder(nearestGrid, minDistance)) {
@@ -3165,7 +3202,7 @@ function st_onParamsUpdate(newParamsJson) {
 /**
  * P1新增：资金费结算回调
  * Bybit每8小时结算一次（08:00, 16:00, 00:00 UTC）
- * 
+ *
  * @param {string} feeJson - JSON格式的资金费数据 {symbol, fundingRate, nextFundingTime, timeToFundingMs, estimatedFee}
  */
 function st_onFundingFee(feeJson) {
@@ -3174,7 +3211,7 @@ function st_onFundingFee(feeJson) {
 
 /**
  * P1新增：动态止损回调（Freqtrade风格）
- * 
+ *
  * @param {string} stoplossJson - JSON格式的止损数据 {position, entryPrice, currentPrice, holdingMinutes, unrealizedPnl, unrealizedPnlPct}
  * @returns {number} 止损阈值（负值表示亏损，正值表示允许回撤比例）
  */
@@ -3189,15 +3226,15 @@ function st_customStoploss(stoplossJson) {
   try {
     const data = (typeof stoplossJson === 'string') ? JSON.parse(stoplossJson) : stoplossJson;
     const { position, entryPrice, currentPrice, holdingMinutes, unrealizedPnl, unrealizedPnlPct } = data;
-    
+
     // 参数校验
     if (!position || !entryPrice || !currentPrice || holdingMinutes === undefined) {
       logWarn('[st_customStoploss] 参数缺失，使用默认-15%止损');
       return -0.15;
     }
-    
+
     const pnlPct = unrealizedPnlPct || (unrealizedPnl / (Math.abs(position) * entryPrice));
-    
+
     // P3修复：防抖辅助函数 - key只用止损类型固定字符串，60秒内同一类型最多输出1次
     function shouldLog(stageKey) {
       const now = Date.now();
@@ -3208,7 +3245,7 @@ function st_customStoploss(stoplossJson) {
       }
       return false;
     }
-    
+
     // 前60分钟：固定-15%止损（最大亏损）
     if (holdingMinutes < 60) {
       if (shouldLog('stoploss_60min_fixed')) {
@@ -3216,7 +3253,7 @@ function st_customStoploss(stoplossJson) {
       }
       return -0.15;
     }
-    
+
     // 盈利>10%后：转-1.5%追踪止损（锁定更多利润）
     if (pnlPct > 0.10) {
       if (shouldLog('stoploss_gt10pct_trailing')) {
@@ -3224,7 +3261,7 @@ function st_customStoploss(stoplossJson) {
       }
       return -0.015;
     }
-    
+
     // 盈利>5%后：转-3%追踪止损（保护利润）
     if (pnlPct > 0.05) {
       if (shouldLog('stoploss_gt5pct_trailing')) {
@@ -3232,7 +3269,7 @@ function st_customStoploss(stoplossJson) {
       }
       return -0.03;
     }
-    
+
     // 默认：-15%止损
     if (shouldLog('stoploss_default')) {
       logInfo('[动态止损] 默认-15%止损 holding=' + holdingMinutes + 'min pnl=' + (pnlPct * 100).toFixed(2) + '%');
@@ -3317,18 +3354,18 @@ function getEffectiveMagnetDistance() {
 
 /**
  * 判断是否应该在该网格下单 - 多层准入检查
- * 
+ *
  * 设计思路：
  * 1. 为什么分层检查：先检查"是否允许交易"（熔断/ADX/仓位限制），再检查"是否满足条件"（磁铁/冷却/防重）
  * 2. 为什么用effectivePosition：策略账本和交易所数据可能不一致，取较大值防止 underestimation
  * 3. 为什么考虑pending订单：防止并发下单导致超限（已挂但未成交的订单也算入风险敞口）
- * 
+ *
  * 检查顺序逻辑：
  * 1. 市场状态（ADX极强趋势）→ 2. 熔断限制 → 3. 磁铁距离 → 4. 活跃订单上限 → 5. 冷却时间
  * 6. 防重复 → 7. 方向限制 → 8. 仓位限制
- * 
+ *
  * 前置条件越严格越先检查，减少无效计算
- * 
+ *
  * @param {Object} grid - 网格对象
  * @param {number} distance - 当前价格与网格目标价的距离（百分比）
  * @returns {boolean} true=可以下单，false=条件不满足
@@ -3385,14 +3422,14 @@ function shouldPlaceOrder(grid, distance) {
   if (CONFIG.gridTimeDecay?.enabled && grid.createdAt) {
     const now = Date.now();
     const holdingMinutes = Math.floor((now - grid.createdAt) / 60000);
-    
+
     // 查找适用的stage
     for (const stage of CONFIG.gridTimeDecay.stages) {
       if (holdingMinutes >= stage.afterMinutes) {
         timeDecayMultiplier = stage.spacingMultiplier;
       }
     }
-    
+
     if (timeDecayMultiplier < 1.0) {
       logDebug('[ROI时间梯度] gridId=' + grid.id + ' 持仓=' + holdingMinutes + 'min 间距倍数=' + timeDecayMultiplier);
     }
@@ -3509,7 +3546,7 @@ function shouldPlaceOrder(grid, distance) {
 function placeOrder(grid) {
   // P0修复：设置并发锁，防止方向切换
   state.isPlacingOrder = true;
-  
+
     // 双保险：避免重复挂单（grid 状态丢失时常见）
     const existing = findActiveOrderByGridId(grid.id);
     if (existing) {
@@ -3549,7 +3586,7 @@ function placeOrder(grid) {
   // P1修复：110072根治 - orderLinkId加入direction防止跨策略误报
   const directionLabel = CONFIG.direction || 'neutral';
   // P0修复：orderLinkId使用锁定后的字段，确保唯一性
-  // fix: Bybit orderLinkId ≤ 45 chars — 去掉 SESSION_ID，runId 取后8位
+  // fix: Bybit orderLinkId ≤ 45 chars - 去掉 SESSION_ID，runId 取后8位
   // P2修复：使用grid.id+attempts生成确定性orderLinkId，重试时不变
   // 格式: gales-{symbol}-{direction}-{runId_last8}-g{gridId}a{attempt}-{side}
   // 最长: gales-MYXUSDT-neutral-12345678-g10a3-Sell = 44 chars (≤45)
@@ -3605,11 +3642,11 @@ function placeOrder(grid) {
     };
 
     state.openOrders.push(order);
-    
+
     // P2优化：同步更新gridId索引
     if (!state.ordersByGridId) state.ordersByGridId = {};
     state.ordersByGridId[grid.id] = order;
-    
+
     // P2优化：同步更新活跃订单计数器
     if (typeof state.activeOrdersCount !== 'number') state.activeOrdersCount = 0;
     state.activeOrdersCount++;
@@ -3648,7 +3685,7 @@ function placeOrder(grid) {
       // 目前保持false允许操作，如果需要严格只做空可设为true
       reduceOnly = false;
     }
-    
+
     const params = {
       symbol: CONFIG.symbol,
       side: grid.side,
@@ -3686,11 +3723,11 @@ function placeOrder(grid) {
       updatedAt: grid.createdAt,
     };
     state.openOrders.push(newOrder);
-    
+
     // P2优化：同步更新gridId索引
     if (!state.ordersByGridId) state.ordersByGridId = {};
     state.ordersByGridId[grid.id] = newOrder;
-    
+
     // P2优化：同步更新活跃订单计数器
     if (typeof state.activeOrdersCount !== 'number') state.activeOrdersCount = 0;
     state.activeOrdersCount++;
