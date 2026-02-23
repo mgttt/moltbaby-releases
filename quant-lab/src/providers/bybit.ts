@@ -70,11 +70,20 @@ export class BybitProvider implements TradingProvider {
   private tickCallbacks: Map<string, (tick: Tick) => void> = new Map();
   private executionCallback?: (execution: any) => void;  // [P1] execution回调
   private reconnectTimer?: NodeJS.Timeout;
+  private reconnectTimerPrivate?: NodeJS.Timeout;  // [P2] private WS重连计时器
   private heartbeatTimer?: NodeJS.Timeout;
   private heartbeatTimerPrivate?: NodeJS.Timeout;  // [P1] 私有WS心跳
   private isConnecting = false;
   private isConnectingPrivate = false;  // [P1]
   private shuttingDown = false;
+
+  // P2: WebSocket重连指数退避计数器
+  private wsRetryCount = 0;
+  private wsPrivateRetryCount = 0;
+
+  // P2: execution WS断线期间fallback轮询
+  private executionFallbackTimer?: NodeJS.Timeout;
+  private executionFallbackActive = false;
 
   // P2: curl错误计数和连续错误检测
   private curlErrorCount = 0;
@@ -212,6 +221,9 @@ export class BybitProvider implements TradingProvider {
         logger.info(`[BybitProvider] WebSocket 已连接`);
         this.isConnecting = false;
 
+        // P2: 成功连接后重置重试计数器
+        this.wsRetryCount = 0;
+
         // 订阅主题
         for (const topic of topics) {
           this.ws!.send(JSON.stringify({
@@ -328,17 +340,21 @@ export class BybitProvider implements TradingProvider {
   }
 
   /**
-   * 重连机制
+   * 重连机制 - P2修复: 指数退避
    */
   private scheduleReconnect(topics: string[]): void {
     if (this.shuttingDown) return;
     if (this.reconnectTimer) return;
 
+    // P2: 指数退避，最大30秒
+    const delay = Math.min(1000 * Math.pow(2, this.wsRetryCount), 30000);
+    this.wsRetryCount++;
+
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       if (this.shuttingDown) return;
       this.connectWebSocket(topics);
-    }, 5000);
+    }, delay);
   }
 
   /**
@@ -352,6 +368,7 @@ export class BybitProvider implements TradingProvider {
 
   /**
    * [P1] 连接私有 WebSocket (需要认证)
+   * P2修复: 指数退避 + execution fallback轮询
    */
   private async connectPrivateWebSocket(): Promise<void> {
     if (this.isConnectingPrivate) return;
@@ -369,6 +386,12 @@ export class BybitProvider implements TradingProvider {
       this.wsPrivate.onopen = () => {
         logger.info(`[BybitProvider] 私有 WebSocket 已连接`);
         this.isConnectingPrivate = false;
+
+        // P2: 成功连接后重置重试计数器
+        this.wsPrivateRetryCount = 0;
+
+        // P2: WS恢复后停止fallback轮询
+        this.stopExecutionFallback();
 
         // 发送认证请求
         this.authenticatePrivateWebSocket();
@@ -390,16 +413,118 @@ export class BybitProvider implements TradingProvider {
 
       this.wsPrivate.onclose = () => {
         if (this.shuttingDown) return;
-        logger.info(`[BybitProvider] 私有 WebSocket 已断开，5秒后重连...`);
+
+        // P2: 指数退避
+        const delay = Math.min(1000 * Math.pow(2, this.wsPrivateRetryCount), 30000);
+        this.wsPrivateRetryCount++;
+
+        logger.info(`[BybitProvider] 私有 WebSocket 已断开，${delay}ms后重连...`);
         this.isConnectingPrivate = false;
         this.stopHeartbeatPrivate();
-        setTimeout(() => this.connectPrivateWebSocket(), 5000);
+
+        // P2: 启动execution fallback轮询
+        this.startExecutionFallback();
+
+        if (this.reconnectTimerPrivate) clearTimeout(this.reconnectTimerPrivate);
+        this.reconnectTimerPrivate = setTimeout(() => {
+          this.reconnectTimerPrivate = undefined;
+          this.connectPrivateWebSocket();
+        }, delay);
       };
     } catch (error) {
       logger.error(`[BybitProvider] 连接私有 WebSocket 失败:`, error);
       this.isConnectingPrivate = false;
-      setTimeout(() => this.connectPrivateWebSocket(), 5000);
+
+      // P2: 指数退避
+      const delay = Math.min(1000 * Math.pow(2, this.wsPrivateRetryCount), 30000);
+      this.wsPrivateRetryCount++;
+
+      // P2: 启动execution fallback轮询
+      this.startExecutionFallback();
+
+      if (this.reconnectTimerPrivate) clearTimeout(this.reconnectTimerPrivate);
+      this.reconnectTimerPrivate = setTimeout(() => {
+        this.reconnectTimerPrivate = undefined;
+        this.connectPrivateWebSocket();
+      }, delay);
     }
+  }
+
+  /**
+   * [P2] 启动execution fallback轮询
+   * WS断线期间通过REST API轮询获取成交
+   */
+  private startExecutionFallback(): void {
+    if (this.executionFallbackActive) return;
+    if (!this.executionCallback) return;
+
+    logger.info('[BybitProvider] 启动execution fallback轮询');
+    this.executionFallbackActive = true;
+
+    // 立即执行一次
+    this.pollExecutions();
+
+    // 每5秒轮询
+    this.executionFallbackTimer = setInterval(() => {
+      this.pollExecutions();
+    }, 5000);
+  }
+
+  /**
+   * [P2] 停止execution fallback轮询
+   */
+  private stopExecutionFallback(): void {
+    if (!this.executionFallbackActive) return;
+
+    logger.info('[BybitProvider] 停止execution fallback轮询');
+    this.executionFallbackActive = false;
+
+    if (this.executionFallbackTimer) {
+      clearInterval(this.executionFallbackTimer);
+      this.executionFallbackTimer = undefined;
+    }
+  }
+
+  /**
+   * [P2] 轮询获取成交记录
+   */
+  private async pollExecutions(): Promise<void> {
+    if (!this.executionCallback) return;
+
+    try {
+      // 获取最近5秒的成交
+      const since = Date.now() - 6000; // 稍微多一点时间避免遗漏
+      const executions = await this.getExecutions(since);
+
+      for (const exec of executions) {
+        this.executionCallback(exec);
+      }
+    } catch (error) {
+      logger.warn('[BybitProvider] execution fallback轮询失败:', error);
+    }
+  }
+
+  /**
+   * [P2] 获取成交记录
+   */
+  private async getExecutions(since: number): Promise<any[]> {
+    try {
+      const result = await this.request('GET', '/v5/execution/list', {
+        category: this.category,
+        limit: 50,
+      });
+
+      if (result?.list) {
+        // 过滤出指定时间之后的成交
+        return result.list.filter((exec: any) => {
+          const execTime = parseInt(exec.execTime || '0');
+          return execTime >= since;
+        });
+      }
+    } catch (error) {
+      logger.warn('[BybitProvider] 获取成交记录失败:', error);
+    }
+    return [];
   }
 
   /**

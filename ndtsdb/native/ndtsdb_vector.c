@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <errno.h>
 
 /* ─── 常量 ─────────────────────────────────────────────── */
@@ -171,6 +172,11 @@ int ndtsdb_insert_vector(NDTSDB* db,
     if (write_file_header(f, record_count) != 0) { fclose(f); return -1; }
 
     fflush(f);
+    /* Phase 1: 确保数据持久化到磁盘 */
+    if (fsync(fileno(f)) != 0) {
+        fclose(f);
+        return -1;
+    }
     fclose(f);
     return 0;
 }

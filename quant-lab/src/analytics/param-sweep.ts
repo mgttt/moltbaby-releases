@@ -31,6 +31,7 @@ import { QuickJSBacktestEngine } from '../engine/quickjs-backtest';
 interface ParamSet {
   spacing: number;
   orderSize: number;
+  magnetDistance: number;  // [P1] 新增磁铁距离参数
 }
 
 interface SweepResult {
@@ -61,6 +62,7 @@ function parseArgs() {
   let interval = '1h';
   let spacingRange = '0.01,0.015,0.02,0.025,0.03';
   let orderSizeRange = '25,50,75,100';
+  let magnetDistanceRange = '0.01,0.015,0.02';  // [P1] 新增magnetDistance参数
   let output: string | undefined;
   let direction = 'neutral';  // [P2] 新增direction参数
   let proxy: string | undefined;  // [P2] 新增proxy参数
@@ -82,6 +84,9 @@ function parseArgs() {
       case '--orderSize':
         orderSizeRange = args[++i];
         break;
+      case '--magnetDistance':  // [P1] 处理magnetDistance参数
+        magnetDistanceRange = args[++i];
+        break;
       case '--output':
       case '-o':
         output = args[++i];
@@ -97,6 +102,7 @@ function parseArgs() {
 
   const spacings = spacingRange.split(',').map(s => parseFloat(s.trim()));
   const orderSizes = orderSizeRange.split(',').map(s => parseInt(s.trim(), 10));
+  const magnetDistances = magnetDistanceRange.split(',').map(s => parseFloat(s.trim()));  // [P1] 解析magnetDistance
 
   return {
     symbol,
@@ -104,6 +110,7 @@ function parseArgs() {
     interval,
     spacings,
     orderSizes,
+    magnetDistances,  // [P1] 新增
     output,
     direction,
     proxy,
@@ -118,14 +125,15 @@ function showHelp() {
   bun run param-sweep.ts --symbol MYXUSDT --days 30
 
 参数:
-  --symbol    交易品种 (默认: MYXUSDT)
-  --days      回测天数 (默认: 30)
-  --interval  K线周期 (默认: 1h)
-  --spacing   网格间距范围，逗号分隔 (默认: 0.01,0.015,0.02,0.025,0.03)
-  --orderSize 订单大小范围，逗号分隔 (默认: 25,50,75,100)
-  --direction 策略方向 (默认: neutral, 可选: long/short/neutral)
-  --proxy     代理服务器 (默认: http://127.0.0.1:8890)
-  --output    输出文件路径，支持.json格式 (默认: stdout)
+  --symbol         交易品种 (默认: MYXUSDT)
+  --days           回测天数 (默认: 30)
+  --interval       K线周期 (默认: 1h)
+  --spacing        网格间距范围，逗号分隔 (默认: 0.01,0.015,0.02,0.025,0.03)
+  --orderSize      订单大小范围，逗号分隔 (默认: 25,50,75,100)
+  --magnetDistance 磁铁距离范围，逗号分隔 (默认: 0.01,0.015,0.02)  [P1新增]
+  --direction      策略方向 (默认: neutral, 可选: long/short/neutral)
+  --proxy          代理服务器 (默认: http://127.0.0.1:8890)
+  --output         输出文件路径，支持.json格式 (默认: stdout)
 
 示例:
   bun run param-sweep.ts --symbol MYXUSDT --days 30
@@ -162,11 +170,13 @@ function normalizeSymbol(symbol: string): string {
 // 参数组合生成
 // ============================================================
 
-function generateParamCombinations(spacings: number[], orderSizes: number[]): ParamSet[] {
+function generateParamCombinations(spacings: number[], orderSizes: number[], magnetDistances: number[]): ParamSet[] {
   const combinations: ParamSet[] = [];
   for (const spacing of spacings) {
     for (const orderSize of orderSizes) {
-      combinations.push({ spacing, orderSize });
+      for (const magnetDistance of magnetDistances) {  // [P1] 新增magnetDistance维度
+        combinations.push({ spacing, orderSize, magnetDistance });
+      }
     }
   }
   return combinations;
@@ -307,6 +317,7 @@ async function runSerialBacktests(
       if (strategy && strategy.config && strategy.config.params) {
         strategy.config.params.gridSpacing = params.spacing;
         strategy.config.params.orderSize = params.orderSize;
+        strategy.config.params.magnetDistance = params.magnetDistance;  // [P1] 覆盖magnetDistance
         strategy.config.params.gridSpacingUp = params.spacing;
         strategy.config.params.gridSpacingDown = params.spacing;
         strategy.config.params.orderSizeUp = params.orderSize;
@@ -336,9 +347,9 @@ async function runSerialBacktests(
       };
 
       results.push(result);
-      console.log(`[${i + 1}/${combinations.length}] spacing=${params.spacing.toFixed(3)} orderSize=${params.orderSize.toString().padStart(3)} → Sharpe=${result.sharpeRatio.toFixed(2)} PnL=${result.totalPnL.toFixed(2)} maxDD=${(result.maxDrawdown * 100).toFixed(1)}% winRate=${(result.winRate * 100).toFixed(1)}%`);
+      console.log(`[${i + 1}/${combinations.length}] spacing=${params.spacing.toFixed(3)} orderSize=${params.orderSize.toString().padStart(3)} magnet=${params.magnetDistance.toFixed(3)} → Sharpe=${result.sharpeRatio.toFixed(2)} PnL=${result.totalPnL.toFixed(2)} maxDD=${(result.maxDrawdown * 100).toFixed(1)}% winRate=${(result.winRate * 100).toFixed(1)}%`);
     } catch (e) {
-      console.warn(`[${i + 1}/${combinations.length}] spacing=${params.spacing} orderSize=${params.orderSize} → 失败: ${e}`);
+      console.warn(`[${i + 1}/${combinations.length}] spacing=${params.spacing} orderSize=${params.orderSize} magnet=${params.magnetDistance} → 失败: ${e}`);
     }
   }
 
@@ -356,15 +367,16 @@ function formatResultsTable(results: SweepResult[]): string {
   const lines: string[] = [];
   lines.push('='.repeat(100));
   lines.push('                           参数扫描结果排名表 (按 Sharpe 排序)');
-  lines.push('='.repeat(100));
+  lines.push('='.repeat(110));
   lines.push('');
-  lines.push('排名 | spacing | orderSize | Sharpe |   PnL   | maxDD  | winRate | trades | annRet | profitFactor');
-  lines.push('-----|---------|-----------|--------|---------|--------|---------|--------|--------|------------');
+  lines.push('排名 | spacing | orderSize | magnetDist | Sharpe |   PnL   | maxDD  | winRate | trades | annRet | profitFactor');
+  lines.push('-----|---------|-----------|------------|--------|---------|--------|---------|--------|--------|------------');
 
   sorted.forEach((r, i) => {
     const rank = (i + 1).toString().padStart(2);
     const spacing = r.params.spacing.toFixed(3).padStart(7);
     const orderSize = r.params.orderSize.toString().padStart(9);
+    const magnetDist = r.params.magnetDistance.toFixed(3).padStart(10);
     const sharpe = r.sharpeRatio.toFixed(2).padStart(6);
     const pnl = r.totalPnL.toFixed(2).padStart(7);
     const maxDD = (r.maxDrawdown * 100).toFixed(1).padStart(5) + '%';
@@ -373,11 +385,11 @@ function formatResultsTable(results: SweepResult[]): string {
     const annRet = (r.annualizedReturn * 100).toFixed(1).padStart(6) + '%';
     const pf = r.profitFactor.toFixed(2).padStart(10);
 
-    lines.push(`${rank}   | ${spacing} | ${orderSize} | ${sharpe} | ${pnl} | ${maxDD} | ${winRate} | ${trades} | ${annRet} | ${pf}`);
+    lines.push(`${rank}   | ${spacing} | ${orderSize} | ${magnetDist} | ${sharpe} | ${pnl} | ${maxDD} | ${winRate} | ${trades} | ${annRet} | ${pf}`);
   });
 
   lines.push('');
-  lines.push('='.repeat(100));
+  lines.push('='.repeat(110));
 
   // 最佳参数
   if (sorted.length > 0) {
@@ -386,6 +398,7 @@ function formatResultsTable(results: SweepResult[]): string {
     lines.push('🏆 最佳参数组合:');
     lines.push(`   spacing: ${best.params.spacing}`);
     lines.push(`   orderSize: ${best.params.orderSize}`);
+    lines.push(`   magnetDistance: ${best.params.magnetDistance}`);
     lines.push(`   Sharpe: ${best.sharpeRatio.toFixed(2)}`);
     lines.push(`   总收益: ${best.totalPnL.toFixed(2)} USDT`);
     lines.push(`   最大回撤: ${(best.maxDrawdown * 100).toFixed(1)}%`);
@@ -397,11 +410,11 @@ function formatResultsTable(results: SweepResult[]): string {
 
 function formatResultsCSV(results: SweepResult[]): string {
   const lines: string[] = [];
-  lines.push('rank,spacing,orderSize,sharpeRatio,totalPnL,maxDrawdown,winRate,totalTrades,annualizedReturn,profitFactor');
+  lines.push('rank,spacing,orderSize,magnetDistance,sharpeRatio,totalPnL,maxDrawdown,winRate,totalTrades,annualizedReturn,profitFactor');
 
   const sorted = [...results].sort((a, b) => b.sharpeRatio - a.sharpeRatio);
   sorted.forEach((r, i) => {
-    lines.push(`${i + 1},${r.params.spacing},${r.params.orderSize},${r.sharpeRatio},${r.totalPnL},${r.maxDrawdown},${r.winRate},${r.totalTrades},${r.annualizedReturn},${r.profitFactor}`);
+    lines.push(`${i + 1},${r.params.spacing},${r.params.orderSize},${r.params.magnetDistance},${r.sharpeRatio},${r.totalPnL},${r.maxDrawdown},${r.winRate},${r.totalTrades},${r.annualizedReturn},${r.profitFactor}`);
   });
 
   return lines.join('\n');
@@ -423,11 +436,12 @@ async function main() {
   console.log(`K线间隔: ${args.interval}`);
   console.log(`网格间距: [${args.spacings.join(', ')}]`);
   console.log(`订单大小: [${args.orderSizes.join(', ')}]`);
-  console.log(`参数组合: ${args.spacings.length * args.orderSizes.length} 组`);
+  console.log(`磁铁距离: [${args.magnetDistances.join(', ')}]`);  // [P1] 新增
+  console.log(`参数组合: ${args.spacings.length * args.orderSizes.length * args.magnetDistances.length} 组`);  // [P1] 更新计算
   console.log('');
 
   // 生成参数组合
-  const combinations = generateParamCombinations(args.spacings, args.orderSizes);
+  const combinations = generateParamCombinations(args.spacings, args.orderSizes, args.magnetDistances);  // [P1] 传递magnetDistances
 
   // 初始化数据库
   const dbPath = resolve(process.cwd(), 'data', 'klines.db');

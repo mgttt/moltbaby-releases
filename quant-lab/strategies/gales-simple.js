@@ -456,16 +456,33 @@ function saveState() {
       lastHardblockAlertAt: positionDiffState.lastHardblockAlertAt || 0,
     };
 
+    // P2修复: 同步marketRegimeState到state，供对比报告使用
+    const marketRegimeSnapshot = {
+      currentADX: marketRegimeState.currentADX || 0,
+      currentRegime: marketRegimeState.currentRegime || 'RANGING',
+      warmupTicks: marketRegimeState.warmupTicks || 0,
+      adxHistoryLength: marketRegimeState.adxHistory ? marketRegimeState.adxHistory.length : 0,
+      priceHistoryLength: marketRegimeState.priceHistory ? marketRegimeState.priceHistory.length : 0,
+    };
+
     // 2. 数据完整性检查：确保关键字段存在且类型正确
     if (typeof state !== 'object' || state === null) {
       logError('[saveState] 完整性检查失败: state不是有效对象');
       return;
     }
 
+    // P2修复：保存前清理已完成的订单，防止内存泄漏
+    if (state.openOrders) {
+      state.openOrders = state.openOrders.filter(function(o) {
+        return o && o.status !== 'Filled' && o.status !== 'Canceled';
+      });
+    }
+
     // 3. 构建待保存数据（添加版本号用于未来兼容）
     const stateToSave = {
       ...state,
       positionDiffState: positionDiffStateSnapshot,
+      marketRegimeState: marketRegimeSnapshot,
       _saveVersion: 1,           // 版本号，用于未来兼容
       _saveAt: Date.now(),       // 保存时间戳
     };
@@ -1640,6 +1657,8 @@ function onOrderUpdate(order) {
     if (typeof state.activeOrdersCount === 'number' && state.activeOrdersCount > 0) {
       state.activeOrdersCount--;
     }
+    // P2修复：从openOrders数组中删除已完成订单，防止内存泄漏
+    removeOpenOrder(order.orderId);
   }
 
   if (delta > 0) {
@@ -3623,6 +3642,18 @@ function placeOrder(grid) {
     : (CONFIG.orderSizeUp !== null ? CONFIG.orderSizeUp : CONFIG.orderSize);
 
   const quantity = orderSize / orderPrice;
+
+  // P2修复：边界条件检查 - orderPrice和quantity必须有效
+  if (!orderPrice || orderPrice <= 0 || !isFinite(orderPrice)) {
+    logError('[placeOrder] 无效orderPrice: ' + orderPrice + ', grid.price=' + grid.price);
+    state.isPlacingOrder = false;
+    return;
+  }
+  if (!quantity || quantity <= 0 || !isFinite(quantity)) {
+    logError('[placeOrder] 无效quantity: ' + quantity + ', orderSize=' + orderSize + ', orderPrice=' + orderPrice);
+    state.isPlacingOrder = false;
+    return;
+  }
   // P1修复：110072根治 - orderLinkId加入direction防止跨策略误报
   const directionLabel = CONFIG.direction || 'neutral';
   // P0修复：orderLinkId使用锁定后的字段，确保唯一性
