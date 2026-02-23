@@ -11,6 +11,7 @@ import type { Kline } from '../../../quant-lib/src';
 import { KlineDatabase } from '../../../quant-lib/src';
 import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
+import { BybitProvider } from '../providers/bybit';
 
 // [P2] Bybit REST API 配置
 const BYBIT_BASE_URL = 'https://api.bybit.com';
@@ -26,6 +27,9 @@ interface BacktestConfig {
   to: string;                // 结束日期 (YYYY-MM-DD)
   interval?: string;         // K线周期，默认 '1m'
   initialBalance?: number;   // 初始资金，默认 10000
+  useTestnet?: boolean;      // 是否使用测试网
+  proxy?: string;            // 代理设置
+  direction?: 'long' | 'short' | 'neutral';  // 策略方向
 }
 
 /**
@@ -70,7 +74,7 @@ export class QuickJSBacktestEngine {
   private config: BacktestConfig;
   private strategy?: QuickJSStrategy;
   private klineDb?: KlineDatabase;
-  
+
   // 回测状态
   private balance: number = 10000;
   private equity: number = 10000;
@@ -79,7 +83,7 @@ export class QuickJSBacktestEngine {
   private avgEntryPrice: number = 0;      // 平均入场价
   private orders: SimulatedOrder[] = [];
   private filledOrders: SimulatedOrder[] = [];
-  
+
   // 结果统计
   private equityCurve: Array<{ timestamp: number; equity: number }> = [];
   private trades: Array<{
@@ -116,16 +120,16 @@ export class QuickJSBacktestEngine {
     logger.info(`  区间: ${this.config.from} ~ ${this.config.to}`);
     logger.info(`  初始资金: $${this.config.initialBalance}`);
 
-    // 1. 加载策略文件
-    const strategyCode = this.loadStrategyCode();
-    
+    // 1. 获取策略文件绝对路径
+    const strategyFile = this.getStrategyFilePath();
+
     // 2. 创建 QuickJSStrategy 实例
     this.strategy = new QuickJSStrategy({
       strategyId: `backtest-${this.config.symbol}`,
-      code: strategyCode,
+      strategyFile: strategyFile,
       params: {
         symbol: this.config.symbol,
-        direction: 'neutral',
+        direction: this.config.direction || 'neutral',
         maxPosition: 3000,
         gridCount: 5,
         gridSpacing: 0.02,
@@ -135,21 +139,78 @@ export class QuickJSBacktestEngine {
     });
 
     // 3. 初始化 KlineDatabase
-    this.klineDb = new KlineDatabase({
-      dbPath: resolve(process.cwd(), 'data', 'klines.db'),
-    });
+    const dbPath = resolve(process.cwd(), 'data', 'klines.db');
+    this.klineDb = new KlineDatabase(dbPath);  // 直接传路径字符串
     await this.klineDb.init();
+
+    // [P2] 覆盖bridge函数，将订单路由到回测引擎
+    this.overrideBridgeFunctions();
 
     logger.info('[QuickJSBacktest] 初始化完成');
   }
 
   /**
-   * 加载策略代码
+   * [P2] 覆盖QuickJS的bridge函数，实现mock订单簿
    */
-  private loadStrategyCode(): string {
+  private overrideBridgeFunctions(): void {
+    if (!this.strategy) return;
+
+    // 覆盖 bridge_placeOrder - 将订单推入回测订单簿
+    this.strategy.overrideBridgeFunction('bridge_placeOrder', (paramsJson: string) => {
+      try {
+        const params = JSON.parse(paramsJson);
+        const order: SimulatedOrder = {
+          orderId: `backtest-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          symbol: params.symbol || this.config.symbol,
+          side: params.side,
+          price: params.price || 0,
+          qty: params.qty,
+          status: 'NEW',
+          createdAt: Date.now(),
+        };
+        this.orders.push(order);
+        logger.info(`[QuickJSBacktest] [MOCK]下单成功: ${order.side} ${order.qty} @ ${order.price || 'Market'}, orderId=${order.orderId}, 总订单数=${this.orders.length}`);
+        return JSON.stringify({ success: true, orderId: order.orderId });
+      } catch (e: any) {
+        logger.error(`[QuickJSBacktest] [MOCK]下单失败:`, e.message);
+        return JSON.stringify({ success: false, error: e.message });
+      }
+    });
+
+    // 覆盖 bridge_cancelOrder - 从订单簿移除
+    this.strategy.overrideBridgeFunction('bridge_cancelOrder', (orderId: string) => {
+      const order = this.orders.find(o => o.orderId === orderId && o.status === 'NEW');
+      if (order) {
+        order.status = 'CANCELLED';
+        logger.info(`[QuickJSBacktest] 撤单: ${orderId}`);
+        return JSON.stringify({ success: true });
+      }
+      return JSON.stringify({ success: false, error: 'Order not found' });
+    });
+
+    // 覆盖 bridge_cancelAllOrders - 取消所有订单
+    this.strategy.overrideBridgeFunction('bridge_cancelAllOrders', () => {
+      let count = 0;
+      for (const order of this.orders) {
+        if (order.status === 'NEW') {
+          order.status = 'CANCELLED';
+          count++;
+        }
+      }
+      logger.info(`[QuickJSBacktest] 全撤: ${count}个订单`);
+      return JSON.stringify({ success: true, cancelledCount: count });
+    });
+
+    logger.info('[QuickJSBacktest] bridge函数已覆盖');
+  }
+
+  /**
+   * 获取策略文件绝对路径
+   */
+  private getStrategyFilePath(): string {
     // 支持相对路径：从 quant-lab 目录或项目根目录运行
     let strategyPath = this.config.strategyPath;
-    
+
     // 如果路径以 strategies/ 开头，尝试从 quant-lab 目录解析
     if (strategyPath.startsWith('strategies/')) {
       strategyPath = resolve(process.cwd(), 'quant-lab', strategyPath);
@@ -160,13 +221,13 @@ export class QuickJSBacktestEngine {
     } else {
       strategyPath = resolve(strategyPath);
     }
-    
+
     if (!existsSync(strategyPath)) {
       throw new Error(`策略文件不存在: ${strategyPath} (原始路径: ${this.config.strategyPath})`);
     }
-    
-    logger.info(`[QuickJSBacktest] 加载策略: ${strategyPath}`);
-    return readFileSync(strategyPath, 'utf-8');
+
+    logger.info(`[QuickJSBacktest] 策略文件: ${strategyPath}`);
+    return strategyPath;
   }
 
   /**
@@ -182,10 +243,13 @@ export class QuickJSBacktestEngine {
     // 1. 读取历史K线
     const fromTime = new Date(this.config.from).getTime() / 1000;
     const toTime = new Date(this.config.to).getTime() / 1000;
-    
+
+    // [P2] 标准化symbol格式（ndtsdb使用 MYX/USDT 格式）
+    const normalizedSymbol = this.normalizeSymbol(this.config.symbol);
+
     // 使用 queryKlines 读取历史数据
     let klines = await this.klineDb!.queryKlines({
-      symbol: this.config.symbol,
+      symbol: normalizedSymbol,
       interval: this.config.interval || '1m',
       startTime: fromTime,
       endTime: toTime,
@@ -195,7 +259,7 @@ export class QuickJSBacktestEngine {
     if (klines.length === 0) {
       logger.info('[QuickJSBacktest] 本地无历史K线数据，尝试从Bybit REST API获取...');
       klines = await this.fetchKlinesFromBybit(fromTime, toTime);
-      
+
       if (klines.length > 0) {
         logger.info(`[QuickJSBacktest] 从Bybit获取 ${klines.length} 根K线，写入ndtsdb...`);
         await this.saveKlinesToDb(klines);
@@ -215,7 +279,7 @@ export class QuickJSBacktestEngine {
     for (let i = 0; i < klines.length; i++) {
       const kline = klines[i];
       await this.processKline(kline, i);
-      
+
       // 每100根K线输出进度
       if (i % 100 === 0) {
         logger.info(`[QuickJSBacktest] 进度: ${i}/${klines.length} (${(i/klines.length*100).toFixed(1)}%)`);
@@ -224,7 +288,7 @@ export class QuickJSBacktestEngine {
 
     // 4. 生成结果
     const result = this.generateResult();
-    
+
     logger.info('[QuickJSBacktest] 回测完成');
     this.printResult(result);
 
@@ -239,7 +303,7 @@ export class QuickJSBacktestEngine {
 
     // 更新当前价格
     const currentPrice = kline.close;
-    
+
     // 检查并成交订单（模拟限价单成交）
     await this.checkAndFillOrders(currentPrice, kline.timestamp);
 
@@ -283,7 +347,7 @@ export class QuickJSBacktestEngine {
       if (order.status !== 'NEW') continue;
 
       let shouldFill = false;
-      
+
       if (order.side === 'Buy' && currentPrice <= order.price) {
         shouldFill = true;
       } else if (order.side === 'Sell' && currentPrice >= order.price) {
@@ -293,10 +357,10 @@ export class QuickJSBacktestEngine {
       if (shouldFill) {
         order.status = 'FILLED';
         this.filledOrders.push(order);
-        
+
         // 更新持仓
         const notional = order.qty * order.price;
-        
+
         if (order.side === 'Buy') {
           this.positionNotional += notional;
           this.position += order.qty;
@@ -328,19 +392,27 @@ export class QuickJSBacktestEngine {
         }
         this.totalPnL += pnl;
 
-        logger.debug(`[QuickJSBacktest] 成交: ${order.side} ${order.qty} @ ${order.price}, PnL: ${pnl.toFixed(2)}`);
+        logger.info(`[QuickJSBacktest] 成交: ${order.side} ${order.qty} @ ${order.price}, PnL: ${pnl.toFixed(2)}`);
 
-        // 调用策略 onExecution
+        // [P2] 调用策略 onExecution - 关键：让策略更新账本
         if (this.strategy?.onExecution) {
-          await this.strategy.onExecution({
-            execId: `backtest-${Date.now()}`,
-            orderId: order.orderId,
-            symbol: order.symbol,
-            side: order.side,
-            execQty: order.qty,
-            execPrice: order.price,
-            execTime: timestamp * 1000,
-          }, this.createMockContext());
+          try {
+            await this.strategy.onExecution({
+              execId: `backtest-fill-${Date.now()}`,
+              orderId: order.orderId,
+              orderLinkId: order.orderId,
+              symbol: order.symbol,
+              side: order.side,
+              execQty: order.qty,
+              execPrice: order.price,
+              execTime: timestamp * 1000,
+            }, this.createMockContext());
+            logger.info(`[QuickJSBacktest] onExecution回调成功: ${order.orderId}`);
+          } catch (e: any) {
+            logger.error(`[QuickJSBacktest] onExecution回调失败:`, e.message);
+          }
+        } else {
+          logger.warn(`[QuickJSBacktest] strategy.onExecution未定义`);
         }
       }
     }
@@ -363,7 +435,7 @@ export class QuickJSBacktestEngine {
    */
   private updateEquity(currentPrice: number): void {
     // 未实现盈亏
-    const unrealizedPnL = this.position * (currentPrice - this.avgEntryPrice) * 
+    const unrealizedPnL = this.position * (currentPrice - this.avgEntryPrice) *
       (this.position > 0 ? 1 : -1);
     this.equity = this.balance + this.positionNotional + unrealizedPnL;
   }
@@ -373,7 +445,7 @@ export class QuickJSBacktestEngine {
    */
   private createMockContext(): any {
     const self = this;
-    
+
     return {
       getAccount: () => ({
         balance: self.balance,
@@ -388,7 +460,7 @@ export class QuickJSBacktestEngine {
           realizedPnl: self.totalPnL,
         }],
       }),
-      
+
       getPosition: (symbol: string) => ({
         symbol,
         side: self.position > 0 ? 'LONG' : self.position < 0 ? 'SHORT' : 'FLAT',
@@ -467,11 +539,15 @@ export class QuickJSBacktestEngine {
    * 生成回测结果
    */
   private generateResult(): BacktestResult {
-    const totalReturn = (this.equity - (this.config.initialBalance || 10000)) / 
+    const totalReturn = (this.equity - (this.config.initialBalance || 10000)) /
       (this.config.initialBalance || 10000);
-    
-    const totalTrades = this.winningTrades + this.losingTrades;
-    const winRate = totalTrades > 0 ? this.winningTrades / totalTrades : 0;
+
+    const totalTrades = this.trades.length; // [P2] 使用trades数组长度
+    const winningTrades = this.trades.filter(t => t.pnl > 0).length; // [P2] 重新计算
+    const losingTrades = this.trades.filter(t => t.pnl < 0).length;
+
+    logger.info(`[QuickJSBacktest] 生成结果: totalTrades=${totalTrades}, winning=${winningTrades}, losing=${losingTrades}`);
+    logger.info(`[QuickJSBacktest] filledOrders=${this.filledOrders.length}, orders=${this.orders.length}`);
 
     // 简化夏普比率计算
     const sharpeRatio = 0;  // 需要收益率序列计算
@@ -481,13 +557,30 @@ export class QuickJSBacktestEngine {
       finalBalance: this.equity,
       totalReturn,
       totalTrades,
-      winningTrades: this.winningTrades,
-      losingTrades: this.losingTrades,
+      winningTrades,
+      losingTrades,
       maxDrawdown: this.maxDrawdown,
       sharpeRatio,
       equityCurve: this.equityCurve,
       trades: this.trades,
     };
+  }
+
+  /**
+   * [P2] 标准化symbol格式（ndtsdb使用 MYX/USDT 格式）
+   * 输入: MYXUSDT 或 MYX/USDT
+   * 输出: MYX/USDT
+   */
+  private normalizeSymbol(symbol: string): string {
+    // 如果已经包含/，说明已是标准格式
+    if (symbol.includes('/')) {
+      return symbol;
+    }
+    // 否则尝试分割（假设最后4个字符是USDT）
+    if (symbol.endsWith('USDT') && symbol.length > 4) {
+      return symbol.slice(0, -4) + '/USDT';
+    }
+    return symbol;
   }
 
   /**
@@ -509,81 +602,58 @@ export class QuickJSBacktestEngine {
   }
 
   /**
-   * [P2] 从Bybit REST API获取历史K线
+   * [P2] 从Bybit获取历史K线（使用BybitProvider，复用代理+认证）
    */
   private async fetchKlinesFromBybit(startTime: number, endTime: number): Promise<Kline[]> {
     const klines: Kline[] = [];
-    const symbol = this.config.symbol.replace('/', '');  // MYX/USDT -> MYXUSDT
-    const interval = this.config.interval === '1m' ? '1' : 
-                     this.config.interval === '5m' ? '5' : 
-                     this.config.interval === '15m' ? '15' : '1';
-    
-    let currentStart = startTime * 1000;  // Bybit需要毫秒
-    const finalEnd = endTime * 1000;
-    
+    const symbol = this.config.symbol.replace('/', ''); // MYX/USDT -> MYXUSDT
+    const interval = this.config.interval === '1m' ? '1' :
+      this.config.interval === '5m' ? '5' :
+        this.config.interval === '15m' ? '15' :
+          this.config.interval === '1h' ? '60' : '1';
+
+    // 创建BybitProvider（无需API key，只需要市场数据）
+    const provider = new BybitProvider({
+      apiKey: '',
+      apiSecret: '',
+      testnet: this.config.useTestnet || false,
+      proxy: this.config.proxy,
+      category: 'linear',
+    });
+
+    let currentEnd = endTime * 1000; // Bybit需要毫秒
+    const finalStart = startTime * 1000;
+    const limit = 200; // Bybit最大200条
+
     logger.info(`[QuickJSBacktest] 从Bybit获取 ${symbol} ${interval}m K线...`);
-    
-    while (currentStart < finalEnd) {
+
+    while (currentEnd > finalStart) {
       try {
-        const url = `${BYBIT_BASE_URL}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&start=${Math.floor(currentStart)}&end=${Math.floor(finalEnd)}&limit=1000`;
-        
-        logger.debug(`[QuickJSBacktest] 请求: ${url}`);
-        
-        const response = await fetch(url);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        
-        const data = await response.json();
-        
-        if (data.retCode !== 0) {
-          logger.warn(`[QuickJSBacktest] Bybit API错误: ${data.retMsg}`);
+        const batch = await provider.getKlines(symbol, interval, limit, currentEnd);
+
+        if (batch.length === 0) {
           break;
         }
-        
-        const items = data.result?.list || [];
-        if (items.length === 0) {
-          break;
-        }
-        
-        // Bybit返回的是倒序，需要反转
-        items.reverse();
-        
-        for (const item of items) {
-          const kline: Kline = {
-            symbol: this.config.symbol,
-            exchange: 'BYBIT',
-            baseCurrency: symbol.replace('USDT', ''),
-            quoteCurrency: 'USDT',
-            interval: this.config.interval || '1m',
-            timestamp: Math.floor(parseInt(item[0]) / 1000),  // 毫秒转秒
-            open: parseFloat(item[1]),
-            high: parseFloat(item[2]),
-            low: parseFloat(item[3]),
-            close: parseFloat(item[4]),
-            volume: parseFloat(item[5]),
-            quoteVolume: parseFloat(item[6]),
-            trades: 0,
-            takerBuyVolume: 0,
-          };
-          klines.push(kline);
-        }
-        
-        logger.info(`[QuickJSBacktest] 已获取 ${items.length} 根K线，累计 ${klines.length}`);
-        
-        // 更新startTime为最后一个K线的时间+1
-        const lastKline = items[items.length - 1];
-        currentStart = parseInt(lastKline[0]) + 1;
-        
+
+        // 过滤时间范围
+        const filtered = batch.filter(k => k.timestamp >= startTime && k.timestamp <= endTime);
+        klines.unshift(...filtered); // 倒序插入
+
+        logger.info(`[QuickJSBacktest] 已获取 ${filtered.length} 根K线，累计 ${klines.length}`);
+
+        // 更新endTime为最早K线的时间-1
+        const earliestKline = batch[0];
+        currentEnd = earliestKline.timestamp * 1000 - 1;
+
         // 避免请求过快
-        await new Promise(resolve => setTimeout(resolve, 200));
-        
+        await new Promise(resolve => setTimeout(resolve, 100));
+
       } catch (error: any) {
         logger.error(`[QuickJSBacktest] 获取K线失败:`, error.message);
         break;
       }
     }
-    
+
     logger.info(`[QuickJSBacktest] Bybit数据获取完成: ${klines.length} 根K线`);
     return klines;
   }
@@ -593,14 +663,13 @@ export class QuickJSBacktestEngine {
    */
   private async saveKlinesToDb(klines: Kline[]): Promise<void> {
     if (!this.klineDb || klines.length === 0) return;
-    
+
     logger.info(`[QuickJSBacktest] 保存 ${klines.length} 根K线到ndtsdb...`);
-    
-    // 使用KlineDatabase的insert方法
-    // 注意：需要按symbol和interval组织数据
-    const symbol = this.config.symbol;
+
+    // [P2] 使用标准化symbol格式（ndtsdb使用 MYX/USDT 格式）
+    const symbol = this.normalizeSymbol(this.config.symbol);
     const interval = this.config.interval || '1m';
-    
+
     // 批量插入
     for (const kline of klines) {
       try {
@@ -612,7 +681,7 @@ export class QuickJSBacktestEngine {
         logger.debug(`[QuickJSBacktest] 插入K线失败(可能已存在):`, e);
       }
     }
-    
+
     logger.info(`[QuickJSBacktest] K线保存完成`);
   }
 }
@@ -622,12 +691,15 @@ export class QuickJSBacktestEngine {
  */
 async function main() {
   const args = process.argv.slice(2);
-  
+
   // 解析参数
   let strategyPath = '';
   let symbol = 'MYXUSDT';
   let fromDate = '2026-01-01';
   let toDate = new Date().toISOString().split('T')[0];
+  let useTestnet = false;
+  let proxy = process.env.PROXY || ''; // 支持环境变量
+  let direction: 'long' | 'short' | 'neutral' = 'neutral';
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -642,6 +714,20 @@ async function main() {
         break;
       case '--to':
         toDate = args[++i];
+        break;
+      case '--testnet':
+        useTestnet = true;
+        break;
+      case '--proxy':
+        proxy = args[++i];
+        break;
+      case '--direction':
+        const dir = args[++i];
+        if (dir === 'long' || dir === 'short' || dir === 'neutral') {
+          direction = dir;
+        } else {
+          console.error(`无效方向: ${dir}，使用默认 neutral`);
+        }
         break;
     }
   }
@@ -660,6 +746,12 @@ async function main() {
     console.log('  --symbol     交易品种 (默认: MYX/USDT)');
     console.log('  --from       开始日期 (YYYY-MM-DD, 默认: 2026-01-01)');
     console.log('  --to         结束日期 (YYYY-MM-DD, 默认: 今天)');
+    console.log('  --direction  策略方向: long/short/neutral (默认: neutral)');
+    console.log('  --testnet    使用Bybit测试网');
+    console.log('  --proxy      代理服务器 (如: http://127.0.0.1:8890)');
+    console.log('');
+    console.log('环境变量:');
+    console.log('  PROXY        代理服务器 (优先级低于 --proxy)');
     process.exit(1);
   }
 
@@ -669,6 +761,9 @@ async function main() {
     from: fromDate,
     to: toDate,
     initialBalance: 10000,
+    useTestnet,
+    proxy,
+    direction,
   });
 
   try {

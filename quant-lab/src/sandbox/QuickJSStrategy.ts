@@ -2764,4 +2764,49 @@ export class QuickJSStrategy {
       throw error;
     }
   }
+
+  /**
+   * [P2] 覆盖bridge函数（用于回测mock）
+   * 让外部可以替换JS层的bridge函数实现
+   */
+  overrideBridgeFunction(name: string, fn: (...args: any[]) => any): void {
+    if (!this.ctx) {
+      logger.warn(`[QuickJSStrategy] overrideBridgeFunction: ctx未初始化，无法覆盖${name}`);
+      return;
+    }
+
+    try {
+      // 创建新的JS函数包装器
+      const bridgeFn = this.ctx.newFunction(name, (...args: any[]) => {
+        // 将JS参数转换为JS值
+        const jsArgs = args.map(arg => {
+          const type = this.ctx!.typeof(arg);
+          if (type === 'string') return this.ctx!.getString(arg);
+          if (type === 'number') return this.ctx!.getNumber(arg);
+          if (type === 'bool') return this.ctx!.getBool(arg);
+          return undefined;
+        });
+
+        // 调用外部传入的函数
+        const result = fn(...jsArgs);
+
+        // 将结果返回给JS
+        if (result === undefined) return this.ctx!.undefined;
+        if (typeof result === 'string') return this.ctx!.newString(result);
+        if (typeof result === 'number') return this.ctx!.newNumber(result);
+        if (typeof result === 'boolean') return this.ctx!.newBool(result);
+        if (typeof result === 'object') return this.ctx!.newString(JSON.stringify(result));
+        return this.ctx!.undefined;
+      });
+
+      // 覆盖全局的bridge函数
+      this.ctx.setProp(this.ctx.global, name, bridgeFn);
+      bridgeFn.dispose();
+
+      logger.info(`[QuickJSStrategy] overrideBridgeFunction: ${name} 已覆盖`);
+    } catch (error: any) {
+      logger.error(`[QuickJSStrategy] overrideBridgeFunction失败:`, error.message);
+      throw error;
+    }
+  }
 }

@@ -2,7 +2,7 @@
 /**
  * 策略参数扫描工具 (Param Sweep)
  * 
- * 基于 BacktestEngine，并行运行多组参数回测，输出排名表
+ * 基于 BacktestEngine，串行运行多组参数回测，输出排名表
  * 
  * 用法:
  *   bun run param-sweep.ts --symbol MYXUSDT --days 30
@@ -13,7 +13,6 @@
  *   --interval  K线周期 (默认: 1h)
  *   --spacing   网格间距范围，逗号分隔 (默认: 0.01,0.015,0.02,0.025,0.03)
  *   --orderSize 订单大小范围，逗号分隔 (默认: 25,50,75,100)
- *   --workers   并行工作数 (默认: 4)
  *   --output    输出文件路径 (默认: stdout)
  * 
  * 示例:
@@ -22,8 +21,6 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
-import { Worker } from 'worker_threads';
-import os from 'os';
 import { KlineDatabase } from '../../../quant-lib/src';
 
 // ============================================================
@@ -46,22 +43,6 @@ interface SweepResult {
   profitFactor: number;
 }
 
-interface WorkerTask {
-  id: number;
-  params: ParamSet;
-  symbol: string;
-  days: number;
-  interval: string;
-  dbPath: string;
-}
-
-interface WorkerResult {
-  id: number;
-  success: boolean;
-  result?: SweepResult;
-  error?: string;
-}
-
 // ============================================================
 // 命令行参数解析
 // ============================================================
@@ -79,7 +60,6 @@ function parseArgs() {
   let interval = '1h';
   let spacingRange = '0.01,0.015,0.02,0.025,0.03';
   let orderSizeRange = '25,50,75,100';
-  let workers = Math.min(4, os.cpus().length);
   let output: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
@@ -99,9 +79,6 @@ function parseArgs() {
       case '--orderSize':
         orderSizeRange = args[++i];
         break;
-      case '--workers':
-        workers = parseInt(args[++i], 10);
-        break;
       case '--output':
       case '-o':
         output = args[++i];
@@ -118,7 +95,6 @@ function parseArgs() {
     interval,
     spacings,
     orderSizes,
-    workers,
     output,
   };
 }
@@ -136,13 +112,36 @@ function showHelp() {
   --interval  K线周期 (默认: 1h)
   --spacing   网格间距范围，逗号分隔 (默认: 0.01,0.015,0.02,0.025,0.03)
   --orderSize 订单大小范围，逗号分隔 (默认: 25,50,75,100)
-  --workers   并行工作数 (默认: 4)
   --output    输出文件路径 (默认: stdout)
 
 示例:
   bun run param-sweep.ts --symbol MYXUSDT --days 30
   bun run param-sweep.ts --symbol BTCUSDT --days 60 --spacing 0.005,0.01,0.015
 `);
+}
+
+// ============================================================
+// 工具函数
+// ============================================================
+
+/**
+ * 标准化交易对符号：MYXUSDT → MYX/USDT
+ * 与 BybitCurlProvider.normalizeSymbol 保持一致
+ */
+function normalizeSymbol(symbol: string): string {
+  if (symbol.includes('/')) return symbol;
+  
+  if (symbol.endsWith('USDT')) {
+    const base = symbol.replace('USDT', '');
+    return `${base}/USDT`;
+  }
+  
+  if (symbol.endsWith('USD')) {
+    const base = symbol.replace('USD', '');
+    return `${base}/USD`;
+  }
+  
+  return `${symbol}/USDT`;
 }
 
 // ============================================================
@@ -168,15 +167,21 @@ async function prepareData(
   symbol: string,
   interval: string,
   days: number
-): Promise<{ startTime: number; endTime: number; count: number }> {
-  const endTime = Math.floor(Date.now() / 1000);
-  const startTime = endTime - days * 24 * 60 * 60;
+): Promise<{ startTime: number; endTime: number; count: number; dataAvailable: boolean }> {
+  const endTimeSec = Math.floor(Date.now() / 1000);
+  const startTimeSec = endTimeSec - days * 24 * 60 * 60;
+  const normalizedSymbol = normalizeSymbol(symbol);
 
-  // 检查数据库中是否有足够数据
-  const existing = await db.queryKlines(symbol, interval, startTime, endTime);
+  // 检查数据库中是否有足够数据（时间戳转换为毫秒）
+  const existing = await db.queryKlines({
+    symbol: normalizedSymbol,
+    interval,
+    startTime: startTimeSec * 1000,
+    endTime: endTimeSec * 1000,
+  });
   
   if (existing.length < days * 0.8) {
-    console.log(`[ParamSweep] 数据库中 ${symbol} ${interval} 数据不足 (${existing.length} 条)，尝试从交易所拉取...`);
+    console.log(`[ParamSweep] 数据库中 ${normalizedSymbol} ${interval} 数据不足 (${existing.length} 条)，尝试从交易所拉取...`);
     
     // 尝试从 Bybit 拉取数据
     try {
@@ -190,314 +195,33 @@ async function prepareData(
       const limit = Math.min(days * 24, 1000); // 最多1000条
       const klines = await provider.getKlines({ symbol, interval, limit });
       
-      // 存入数据库
-      await db.insertKlines(symbol, interval, klines);
+      // 存入数据库（klines已包含normalized symbol和interval属性）
+      await db.insertKlines(klines);
       console.log(`[ParamSweep] 成功拉取并存储 ${klines.length} 条K线数据`);
     } catch (e) {
       console.warn(`[ParamSweep] 拉取数据失败: ${e}`);
     }
   }
 
-  const finalData = await db.queryKlines(symbol, interval, startTime, endTime);
-  return { startTime, endTime, count: finalData.length };
-}
-
-// ============================================================
-// Worker 线程代码（字符串形式，用于动态创建 Worker）
-// ============================================================
-
-const workerCode = `
-const { parentPort, workerData } = require('worker_threads');
-const { KlineDatabase } = require('../../../quant-lib/src');
-
-async function runBacktest(task) {
-  const { params, symbol, days, interval, dbPath } = task;
-  
-  try {
-    // 加载数据库
-    const db = new KlineDatabase(dbPath);
-    
-    const endTime = Math.floor(Date.now() / 1000);
-    const startTime = endTime - days * 24 * 60 * 60;
-    
-    // 查询K线数据
-    const klines = await db.queryKlines(symbol, interval, startTime, endTime);
-    
-    if (klines.length === 0) {
-      throw new Error('No kline data available');
-    }
-    
-    // 简化版回测逻辑（网格策略模拟）
-    const initialCapital = 10000;
-    let capital = initialCapital;
-    let position = 0;
-    let maxCapital = initialCapital;
-    let maxDrawdown = 0;
-    let trades = 0;
-    let winningTrades = 0;
-    let totalPnL = 0;
-    let winningAmount = 0;
-    let losingAmount = 0;
-    
-    const equityCurve: number[] = [];
-    
-    // 生成网格线
-    const prices = klines.map(k => k.close);
-    const minPrice = Math.min(...prices);
-    const maxPrice = Math.max(...prices);
-    
-    const gridLines: number[] = [];
-    let price = minPrice;
-    while (price <= maxPrice * 1.1) {
-      gridLines.push(price);
-      price = price * (1 + params.spacing);
-    }
-    
-    let lastGridIndex: number | null = null;
-    const feeRate = 0.0006; // 0.06% 手续费
-    
-    for (let i = 1; i < klines.length; i++) {
-      const prevPrice = klines[i - 1].close;
-      const currPrice = klines[i].close;
-      
-      // 检查穿越的网格线
-      for (let j = 0; j < gridLines.length; j++) {
-        const gridPrice = gridLines[j];
-        
-        // 价格穿越网格线
-        if ((prevPrice <= gridPrice && currPrice >= gridPrice) ||
-            (prevPrice >= gridPrice && currPrice <= gridPrice)) {
-          
-          // 避免重复触发同一网格
-          if (lastGridIndex !== null && Math.abs(j - lastGridIndex) < 1) {
-            continue;
-          }
-          
-          // 确定方向
-          const isUp = currPrice > prevPrice;
-          const side = isUp ? 'SELL' : 'BUY';
-          
-          // 计算数量
-          const qty = params.orderSize / gridPrice;
-          
-          if (side === 'BUY') {
-            const cost = qty * gridPrice * (1 + feeRate);
-            if (capital >= cost) {
-              capital -= cost;
-              position += qty;
-              trades++;
-              lastGridIndex = j;
-            }
-          } else {
-            if (position >= qty) {
-              const revenue = qty * gridPrice * (1 - feeRate);
-              const entryCost = qty * gridPrice; // 简化为同价买入
-              const pnl = revenue - entryCost * (1 + feeRate);
-              
-              capital += revenue;
-              position -= qty;
-              trades++;
-              totalPnL += pnl;
-              
-              if (pnl > 0) {
-                winningTrades++;
-                winningAmount += pnl;
-              } else {
-                losingAmount += Math.abs(pnl);
-              }
-              
-              lastGridIndex = j;
-            }
-          }
-        }
-      }
-      
-      // 计算权益和回撤
-      const equity = capital + position * currPrice;
-      equityCurve.push(equity);
-      
-      if (equity > maxCapital) {
-        maxCapital = equity;
-      }
-      
-      const drawdown = (maxCapital - equity) / maxCapital;
-      if (drawdown > maxDrawdown) {
-        maxDrawdown = drawdown;
-      }
-    }
-    
-    // 计算指标
-    const finalEquity = equityCurve[equityCurve.length - 1] || initialCapital;
-    const totalReturn = (finalEquity - initialCapital) / initialCapital;
-    const annualizedReturn = totalReturn * (365 / days);
-    
-    // 计算夏普比率（简化）
-    const returns: number[] = [];
-    for (let i = 1; i < equityCurve.length; i++) {
-      returns.push((equityCurve[i] - equityCurve[i-1]) / equityCurve[i-1]);
-    }
-    const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length || 0;
-    const variance = returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / returns.length || 0;
-    const stdDev = Math.sqrt(variance) || 1;
-    const sharpeRatio = avgReturn / stdDev * Math.sqrt(365 * 24); // 小时数据年化
-    
-    // 胜率
-    const winRate = trades > 0 ? winningTrades / trades : 0;
-    
-    // 盈亏比
-    const profitFactor = losingAmount > 0 ? winningAmount / losingAmount : 0;
-    
-    await db.close();
-    
-    return {
-      params,
-      sharpeRatio: isFinite(sharpeRatio) ? sharpeRatio : 0,
-      totalPnL: totalPnL,
-      maxDrawdown: maxDrawdown,
-      winRate: winRate,
-      totalTrades: trades,
-      annualizedReturn: annualizedReturn,
-      profitFactor: isFinite(profitFactor) ? profitFactor : 0,
-    };
-  } catch (error) {
-    throw error;
-  }
-}
-
-if (parentPort) {
-  parentPort.once('message', async (task) => {
-    try {
-      const result = await runBacktest(task);
-      parentPort.postMessage({ id: task.id, success: true, result });
-    } catch (error) {
-      parentPort.postMessage({ 
-        id: task.id, 
-        success: false, 
-        error: error instanceof Error ? error.message : String(error) 
-      });
-    }
-  });
-}
-`;
-
-// ============================================================
-// 并行回测执行
-// ============================================================
-
-async function runParallelBacktests(
-  combinations: ParamSet[],
-  symbol: string,
-  days: number,
-  interval: string,
-  dbPath: string,
-  maxWorkers: number
-): Promise<SweepResult[]> {
-  const results: SweepResult[] = [];
-  const tasks: WorkerTask[] = combinations.map((params, index) => ({
-    id: index,
-    params,
-    symbol,
-    days,
+  // 查询最终数据（时间戳转换为毫秒）
+  const finalData = await db.queryKlines({
+    symbol: normalizedSymbol,
     interval,
-    dbPath,
-  }));
-
-  // 创建 Worker 池
-  const workers: Worker[] = [];
-  const workerPromises: Promise<void>[] = [];
-
-  for (let i = 0; i < maxWorkers; i++) {
-    const worker = new Worker(workerCode, { eval: true });
-    workers.push(worker);
-  }
-
-  console.log(`[ParamSweep] 启动 ${maxWorkers} 个 Worker 线程`);
-  console.log(`[ParamSweep] 总共 ${tasks.length} 组参数待测试`);
-  console.log('');
-
-  // 分配任务
-  let taskIndex = 0;
-  let completed = 0;
-  let failed = 0;
-
-  const processTask = async (worker: Worker): Promise<void> => {
-    while (taskIndex < tasks.length) {
-      const task = tasks[taskIndex++];
-      
-      const result = await new Promise<WorkerResult>((resolve) => {
-        worker.once('message', resolve);
-        worker.postMessage(task);
-      });
-
-      if (result.success && result.result) {
-        results.push(result.result);
-        completed++;
-        console.log(`[${completed}/${tasks.length}] spacing=${task.params.spacing.toFixed(3)} orderSize=${task.params.orderSize.toString().padStart(3)} → Sharpe=${result.result.sharpeRatio.toFixed(2)} PnL=${result.result.totalPnL.toFixed(2)} maxDD=${(result.result.maxDrawdown * 100).toFixed(1)}% winRate=${(result.result.winRate * 100).toFixed(1)}%`);
-      } else {
-        failed++;
-        console.warn(`[${taskIndex}/${tasks.length}] spacing=${task.params.spacing} orderSize=${task.params.orderSize} → 失败: ${result.error}`);
-      }
-    }
-  };
-
-  // 启动所有 Worker
-  for (const worker of workers) {
-    workerPromises.push(processTask(worker));
-  }
-
-  // 等待所有任务完成
-  await Promise.all(workerPromises);
-
-  // 清理 Worker
-  for (const worker of workers) {
-    await worker.terminate();
-  }
-
-  console.log('');
-  console.log(`[ParamSweep] 完成: ${completed} 成功, ${failed} 失败`);
+    startTime: startTimeSec * 1000,
+    endTime: endTimeSec * 1000,
+  });
+  const dataAvailable = finalData.length >= days * 0.5; // 至少50%数据才算可用
   
-  return results;
+  if (!dataAvailable) {
+    console.warn(`[ParamSweep] 警告: 仅获取到 ${finalData.length} 条K线，不足以进行有效回测`);
+  }
+  
+  return { startTime: startTimeSec, endTime: endTimeSec, count: finalData.length, dataAvailable };
 }
 
 // ============================================================
-// 串行回测（Worker 不可用时的 fallback）
+// 单组参数回测
 // ============================================================
-
-async function runSerialBacktests(
-  combinations: ParamSet[],
-  symbol: string,
-  days: number,
-  interval: string,
-  db: KlineDatabase
-): Promise<SweepResult[]> {
-  const results: SweepResult[] = [];
-  
-  console.log(`[ParamSweep] 使用串行模式（Worker 不可用）`);
-  console.log(`[ParamSweep] 总共 ${combinations.length} 组参数待测试`);
-  console.log('');
-
-  const endTime = Math.floor(Date.now() / 1000);
-  const startTime = endTime - days * 24 * 60 * 60;
-  const klines = await db.queryKlines(symbol, interval, startTime, endTime);
-
-  if (klines.length === 0) {
-    throw new Error('No kline data available for backtest');
-  }
-
-  for (let i = 0; i < combinations.length; i++) {
-    const params = combinations[i];
-    
-    try {
-      const result = await runSingleBacktest(params, klines, days);
-      results.push(result);
-      console.log(`[${i + 1}/${combinations.length}] spacing=${params.spacing.toFixed(3)} orderSize=${params.orderSize.toString().padStart(3)} → Sharpe=${result.sharpeRatio.toFixed(2)} PnL=${result.totalPnL.toFixed(2)} maxDD=${(result.maxDrawdown * 100).toFixed(1)}% winRate=${(result.winRate * 100).toFixed(1)}%`);
-    } catch (e) {
-      console.warn(`[${i + 1}/${combinations.length}] spacing=${params.spacing} orderSize=${params.orderSize} → 失败: ${e}`);
-    }
-  }
-
-  return results;
-}
 
 async function runSingleBacktest(
   params: ParamSet,
@@ -624,6 +348,53 @@ async function runSingleBacktest(
 }
 
 // ============================================================
+// 串行回测执行
+// ============================================================
+
+async function runSerialBacktests(
+  combinations: ParamSet[],
+  symbol: string,
+  days: number,
+  interval: string,
+  db: KlineDatabase
+): Promise<SweepResult[]> {
+  const results: SweepResult[] = [];
+  
+  console.log(`[ParamSweep] 使用串行模式`);
+  console.log(`[ParamSweep] 总共 ${combinations.length} 组参数待测试`);
+  console.log('');
+
+  const endTimeSec = Math.floor(Date.now() / 1000);
+  const startTimeSec = endTimeSec - days * 24 * 60 * 60;
+  const normalizedSymbol = normalizeSymbol(symbol);
+  const klines = await db.queryKlines({
+    symbol: normalizedSymbol,
+    interval,
+    startTime: startTimeSec * 1000,
+    endTime: endTimeSec * 1000,
+  });
+
+  if (klines.length === 0) {
+    console.warn('[ParamSweep] 警告: 没有可用的K线数据');
+    return results;
+  }
+
+  for (let i = 0; i < combinations.length; i++) {
+    const params = combinations[i];
+    
+    try {
+      const result = await runSingleBacktest(params, klines, days);
+      results.push(result);
+      console.log(`[${i + 1}/${combinations.length}] spacing=${params.spacing.toFixed(3)} orderSize=${params.orderSize.toString().padStart(3)} → Sharpe=${result.sharpeRatio.toFixed(2)} PnL=${result.totalPnL.toFixed(2)} maxDD=${(result.maxDrawdown * 100).toFixed(1)}% winRate=${(result.winRate * 100).toFixed(1)}%`);
+    } catch (e) {
+      console.warn(`[${i + 1}/${combinations.length}] spacing=${params.spacing} orderSize=${params.orderSize} → 失败: ${e}`);
+    }
+  }
+
+  return results;
+}
+
+// ============================================================
 // 结果输出
 // ============================================================
 
@@ -702,7 +473,6 @@ async function main() {
   console.log(`网格间距: [${args.spacings.join(', ')}]`);
   console.log(`订单大小: [${args.orderSizes.join(', ')}]`);
   console.log(`参数组合: ${args.spacings.length * args.orderSizes.length} 组`);
-  console.log(`并行度: ${args.workers}`);
   console.log('');
 
   // 生成参数组合
@@ -720,25 +490,25 @@ async function main() {
     // 准备数据
     console.log('[ParamSweep] 准备数据...');
     const dataInfo = await prepareData(db, args.symbol, args.interval, args.days);
+    
+    if (!dataInfo.dataAvailable) {
+      console.log('');
+      console.log('[ParamSweep] ⚠️ 数据不足，无法继续回测');
+      console.log(`[ParamSweep] 仅获取到 ${dataInfo.count} 条K线，需要至少 ${Math.floor(args.days * 24 * 0.5)} 条`);
+      console.log('[ParamSweep] 建议: 检查数据库连接或尝试其他交易品种');
+      return;
+    }
+    
     console.log(`[ParamSweep] 数据准备完成: ${dataInfo.count} 条K线`);
     console.log('');
 
     // 执行回测
-    let results: SweepResult[];
+    const results = await runSerialBacktests(combinations, args.symbol, args.days, args.interval, db);
     
-    try {
-      // 尝试并行模式
-      results = await runParallelBacktests(
-        combinations,
-        args.symbol,
-        args.days,
-        args.interval,
-        dbPath,
-        args.workers
-      );
-    } catch (e) {
-      console.warn(`[ParamSweep] Worker 模式失败，切换到串行模式: ${e}`);
-      results = await runSerialBacktests(combinations, args.symbol, args.days, args.interval, db);
+    if (results.length === 0) {
+      console.log('');
+      console.log('[ParamSweep] ⚠️ 没有成功完成任何回测');
+      return;
     }
 
     // 输出结果
