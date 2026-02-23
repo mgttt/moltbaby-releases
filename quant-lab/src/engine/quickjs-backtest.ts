@@ -30,6 +30,7 @@ interface BacktestConfig {
   useTestnet?: boolean;      // 是否使用测试网
   proxy?: string;            // 代理设置
   direction?: 'long' | 'short' | 'neutral';  // 策略方向
+  dbPath?: string;           // 数据库路径，默认使用 quant-lab/data/klines.db
 }
 
 /**
@@ -139,12 +140,9 @@ export class QuickJSBacktestEngine {
     });
 
     // 3. 初始化 KlineDatabase
-    const dbPath = resolve(process.cwd(), 'data', 'klines.db');
+    const dbPath = this.config.dbPath || resolve(process.cwd(), 'data', 'klines.db');
     this.klineDb = new KlineDatabase(dbPath);  // 直接传路径字符串
     await this.klineDb.init();
-
-    // [P2] 覆盖bridge函数，将订单路由到回测引擎
-    this.overrideBridgeFunctions();
 
     logger.info('[QuickJSBacktest] 初始化完成');
   }
@@ -199,6 +197,40 @@ export class QuickJSBacktestEngine {
       }
       logger.info(`[QuickJSBacktest] 全撤: ${count}个订单`);
       return JSON.stringify({ success: true, cancelledCount: count });
+    });
+
+    // 覆盖 bridge_getPosition - 返回回测实时仓位
+    this.strategy.overrideBridgeFunction('bridge_getPosition', (symbol: string) => {
+      const position = {
+        symbol: symbol || this.config.symbol,
+        side: this.position > 0 ? 'LONG' : this.position < 0 ? 'SHORT' : 'FLAT',
+        quantity: Math.abs(this.position),
+        entryPrice: this.avgEntryPrice,
+        currentPrice: 0,
+        unrealizedPnl: 0,
+        realizedPnl: this.totalPnL,
+      };
+      logger.debug(`[QuickJSBacktest] [MOCK]getPosition: ${JSON.stringify(position)}`);
+      return JSON.stringify(position);
+    });
+
+    // 覆盖 bridge_getAccount - 返回回测实时账户
+    this.strategy.overrideBridgeFunction('bridge_getAccount', () => {
+      const account = {
+        balance: this.balance,
+        equity: this.equity,
+        positions: [{
+          symbol: this.config.symbol,
+          side: this.position > 0 ? 'LONG' : this.position < 0 ? 'SHORT' : 'FLAT',
+          quantity: Math.abs(this.position),
+          entryPrice: this.avgEntryPrice,
+          currentPrice: 0,
+          unrealizedPnl: 0,
+          realizedPnl: this.totalPnL,
+        }],
+      };
+      logger.debug(`[QuickJSBacktest] [MOCK]getAccount: balance=${this.balance}, equity=${this.equity}`);
+      return JSON.stringify(account);
     });
 
     logger.info('[QuickJSBacktest] bridge函数已覆盖');
@@ -271,6 +303,9 @@ export class QuickJSBacktestEngine {
     }
 
     logger.info(`[QuickJSBacktest] 加载 ${klines.length} 根K线`);
+
+    // [P2] 覆盖bridge函数，必须在onInit之前，让策略获取正确的初始状态
+    this.overrideBridgeFunctions();
 
     // 2. 初始化策略（创建 mock context）
     await this.strategy.onInit(this.createMockContext());

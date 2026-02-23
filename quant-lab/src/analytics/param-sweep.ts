@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 /**
  * 策略参数扫描工具 (Param Sweep)
- * 
+ *
  * 基于 BacktestEngine，串行运行多组参数回测，输出排名表
- * 
+ *
  * 用法:
  *   bun run param-sweep.ts --symbol MYXUSDT --days 30
- * 
+ *
  * 参数:
  *   --symbol    交易品种 (默认: MYXUSDT)
  *   --days      回测天数 (默认: 30)
@@ -14,7 +14,7 @@
  *   --spacing   网格间距范围，逗号分隔 (默认: 0.01,0.015,0.02,0.025,0.03)
  *   --orderSize 订单大小范围，逗号分隔 (默认: 25,50,75,100)
  *   --output    输出文件路径 (默认: stdout)
- * 
+ *
  * 示例:
  *   bun run param-sweep.ts --symbol MYXUSDT --days 30 --spacing 0.01,0.02 --orderSize 50,100
  */
@@ -22,6 +22,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { KlineDatabase } from '../../../quant-lib/src';
+import { QuickJSBacktestEngine } from '../engine/quickjs-backtest';
 
 // ============================================================
 // 类型定义
@@ -49,7 +50,7 @@ interface SweepResult {
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  
+
   if (args.includes('--help') || args.includes('-h')) {
     showHelp();
     process.exit(0);
@@ -130,17 +131,17 @@ function showHelp() {
  */
 function normalizeSymbol(symbol: string): string {
   if (symbol.includes('/')) return symbol;
-  
+
   if (symbol.endsWith('USDT')) {
     const base = symbol.replace('USDT', '');
     return `${base}/USDT`;
   }
-  
+
   if (symbol.endsWith('USD')) {
     const base = symbol.replace('USD', '');
     return `${base}/USD`;
   }
-  
+
   return `${symbol}/USDT`;
 }
 
@@ -179,10 +180,10 @@ async function prepareData(
     startTime: startTimeSec * 1000,
     endTime: endTimeSec * 1000,
   });
-  
+
   if (existing.length < days * 0.8) {
     console.log(`[ParamSweep] 数据库中 ${normalizedSymbol} ${interval} 数据不足 (${existing.length} 条)，尝试从交易所拉取...`);
-    
+
     // 尝试从 Bybit 拉取数据
     try {
       const { BybitCurlProvider } = await import('../../../quant-lib/src/providers/bybit-curl');
@@ -194,7 +195,7 @@ async function prepareData(
 
       const limit = Math.min(days * 24, 1000); // 最多1000条
       const klines = await provider.getKlines({ symbol, interval, limit });
-      
+
       // 存入数据库（klines已包含normalized symbol和interval属性）
       await db.insertKlines(klines);
       console.log(`[ParamSweep] 成功拉取并存储 ${klines.length} 条K线数据`);
@@ -211,144 +212,16 @@ async function prepareData(
     endTime: endTimeSec * 1000,
   });
   const dataAvailable = finalData.length >= days * 0.5; // 至少50%数据才算可用
-  
+
   if (!dataAvailable) {
     console.warn(`[ParamSweep] 警告: 仅获取到 ${finalData.length} 条K线，不足以进行有效回测`);
   }
-  
+
   return { startTime: startTimeSec, endTime: endTimeSec, count: finalData.length, dataAvailable };
 }
 
 // ============================================================
-// 单组参数回测
-// ============================================================
-
-async function runSingleBacktest(
-  params: ParamSet,
-  klines: any[],
-  days: number
-): Promise<SweepResult> {
-  const initialCapital = 10000;
-  let capital = initialCapital;
-  let position = 0;
-  let maxCapital = initialCapital;
-  let maxDrawdown = 0;
-  let trades = 0;
-  let winningTrades = 0;
-  let totalPnL = 0;
-  let winningAmount = 0;
-  let losingAmount = 0;
-
-  const equityCurve: number[] = [];
-
-  // 生成网格线
-  const prices = klines.map((k: any) => k.close);
-  const minPrice = Math.min(...prices);
-  const maxPrice = Math.max(...prices);
-
-  const gridLines: number[] = [];
-  let price = minPrice;
-  while (price <= maxPrice * 1.1) {
-    gridLines.push(price);
-    price = price * (1 + params.spacing);
-  }
-
-  let lastGridIndex: number | null = null;
-  const feeRate = 0.0006;
-
-  for (let i = 1; i < klines.length; i++) {
-    const prevPrice = klines[i - 1].close;
-    const currPrice = klines[i].close;
-
-    for (let j = 0; j < gridLines.length; j++) {
-      const gridPrice = gridLines[j];
-
-      if ((prevPrice <= gridPrice && currPrice >= gridPrice) ||
-          (prevPrice >= gridPrice && currPrice <= gridPrice)) {
-
-        if (lastGridIndex !== null && Math.abs(j - lastGridIndex) < 1) {
-          continue;
-        }
-
-        const isUp = currPrice > prevPrice;
-        const side = isUp ? 'SELL' : 'BUY';
-        const qty = params.orderSize / gridPrice;
-
-        if (side === 'BUY') {
-          const cost = qty * gridPrice * (1 + feeRate);
-          if (capital >= cost) {
-            capital -= cost;
-            position += qty;
-            trades++;
-            lastGridIndex = j;
-          }
-        } else {
-          if (position >= qty) {
-            const revenue = qty * gridPrice * (1 - feeRate);
-            const entryCost = qty * gridPrice;
-            const pnl = revenue - entryCost * (1 + feeRate);
-
-            capital += revenue;
-            position -= qty;
-            trades++;
-            totalPnL += pnl;
-
-            if (pnl > 0) {
-              winningTrades++;
-              winningAmount += pnl;
-            } else {
-              losingAmount += Math.abs(pnl);
-            }
-
-            lastGridIndex = j;
-          }
-        }
-      }
-    }
-
-    const equity = capital + position * currPrice;
-    equityCurve.push(equity);
-
-    if (equity > maxCapital) {
-      maxCapital = equity;
-    }
-
-    const drawdown = (maxCapital - equity) / maxCapital;
-    if (drawdown > maxDrawdown) {
-      maxDrawdown = drawdown;
-    }
-  }
-
-  const finalEquity = equityCurve[equityCurve.length - 1] || initialCapital;
-  const totalReturn = (finalEquity - initialCapital) / initialCapital;
-  const annualizedReturn = totalReturn * (365 / days);
-
-  const returns: number[] = [];
-  for (let i = 1; i < equityCurve.length; i++) {
-    returns.push((equityCurve[i] - equityCurve[i - 1]) / equityCurve[i - 1]);
-  }
-  const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length || 0;
-  const variance = returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / returns.length || 0;
-  const stdDev = Math.sqrt(variance) || 1;
-  const sharpeRatio = avgReturn / stdDev * Math.sqrt(365 * 24);
-
-  const winRate = trades > 0 ? winningTrades / trades : 0;
-  const profitFactor = losingAmount > 0 ? winningAmount / losingAmount : 0;
-
-  return {
-    params,
-    sharpeRatio: isFinite(sharpeRatio) ? sharpeRatio : 0,
-    totalPnL,
-    maxDrawdown,
-    winRate,
-    totalTrades: trades,
-    annualizedReturn,
-    profitFactor: isFinite(profitFactor) ? profitFactor : 0,
-  };
-}
-
-// ============================================================
-// 串行回测执行
+// 串行回测执行（使用 QuickJSBacktestEngine）
 // ============================================================
 
 async function runSerialBacktests(
@@ -356,14 +229,22 @@ async function runSerialBacktests(
   symbol: string,
   days: number,
   interval: string,
-  db: KlineDatabase
+  db: KlineDatabase,
+  dbPath: string
 ): Promise<SweepResult[]> {
   const results: SweepResult[] = [];
-  
-  console.log(`[ParamSweep] 使用串行模式`);
+
+  console.log(`[ParamSweep] 使用 QuickJSBacktestEngine 串行模式`);
   console.log(`[ParamSweep] 总共 ${combinations.length} 组参数待测试`);
   console.log('');
 
+  // 计算日期范围
+  const endDate = new Date();
+  const startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
+  const fromDate = startDate.toISOString().split('T')[0];
+  const toDate = endDate.toISOString().split('T')[0];
+
+  // 检查数据可用性
   const endTimeSec = Math.floor(Date.now() / 1000);
   const startTimeSec = endTimeSec - days * 24 * 60 * 60;
   const normalizedSymbol = normalizeSymbol(symbol);
@@ -379,11 +260,63 @@ async function runSerialBacktests(
     return results;
   }
 
+  console.log(`[ParamSweep] 数据范围: ${fromDate} ~ ${toDate} (${klines.length} 条K线)`);
+  console.log('');
+
+  // 遍历参数组合，每组使用 QuickJSBacktestEngine 运行
+  // 第1个engine会从Bybit拉取+存到quant-lab/data/klines.db，后续复用本地缓存
   for (let i = 0; i < combinations.length; i++) {
     const params = combinations[i];
-    
+
     try {
-      const result = await runSingleBacktest(params, klines, days);
+      // 创建 QuickJSBacktestEngine 实例（都传proxy，第1个拉取，后续复用缓存）
+      const engine = new QuickJSBacktestEngine({
+        strategyPath: 'strategies/gales-simple.js',
+        symbol: normalizedSymbol,
+        from: fromDate,
+        to: toDate,
+        interval: '1m',
+        initialBalance: 10000,
+        direction: 'neutral',
+        proxy: 'http://127.0.0.1:8890',
+        dbPath,
+      });
+
+      // 初始化引擎（第1个会拉取数据，后续直接读缓存）
+      await engine.initialize();
+
+      // [P2] 覆盖策略参数 - 通过修改策略的 params
+      // 注意：QuickJSBacktestEngine 在 initialize 时创建策略，我们需要在 initialize 后修改策略参数
+      // 通过策略实例的 params 属性覆盖
+      const strategy = (engine as any).strategy;
+      if (strategy && strategy.config && strategy.config.params) {
+        strategy.config.params.gridSpacing = params.spacing;
+        strategy.config.params.orderSize = params.orderSize;
+        strategy.config.params.gridSpacingUp = params.spacing;
+        strategy.config.params.gridSpacingDown = params.spacing;
+        strategy.config.params.orderSizeUp = params.orderSize;
+        strategy.config.params.orderSizeDown = params.orderSize;
+      }
+
+      // 运行回测
+      const backtestResult = await engine.run();
+
+      // 转换为 SweepResult 格式
+      const result: SweepResult = {
+        params,
+        sharpeRatio: backtestResult.sharpeRatio || 0,
+        totalPnL: (backtestResult.finalBalance - backtestResult.initialBalance),
+        maxDrawdown: backtestResult.maxDrawdown || 0,
+        winRate: backtestResult.totalTrades > 0
+          ? backtestResult.winningTrades / backtestResult.totalTrades
+          : 0,
+        totalTrades: backtestResult.totalTrades,
+        annualizedReturn: backtestResult.totalReturn * (365 / days),
+        profitFactor: backtestResult.winningTrades > 0 && backtestResult.losingTrades > 0
+          ? (backtestResult.winningTrades / backtestResult.totalTrades) / (backtestResult.losingTrades / backtestResult.totalTrades)
+          : 0,
+      };
+
       results.push(result);
       console.log(`[${i + 1}/${combinations.length}] spacing=${params.spacing.toFixed(3)} orderSize=${params.orderSize.toString().padStart(3)} → Sharpe=${result.sharpeRatio.toFixed(2)} PnL=${result.totalPnL.toFixed(2)} maxDD=${(result.maxDrawdown * 100).toFixed(1)}% winRate=${(result.winRate * 100).toFixed(1)}%`);
     } catch (e) {
@@ -427,7 +360,7 @@ function formatResultsTable(results: SweepResult[]): string {
 
   lines.push('');
   lines.push('='.repeat(100));
-  
+
   // 最佳参数
   if (sorted.length > 0) {
     const best = sorted[0];
@@ -490,7 +423,7 @@ async function main() {
     // 准备数据
     console.log('[ParamSweep] 准备数据...');
     const dataInfo = await prepareData(db, args.symbol, args.interval, args.days);
-    
+
     if (!dataInfo.dataAvailable) {
       console.log('');
       console.log('[ParamSweep] ⚠️ 数据不足，无法继续回测');
@@ -498,13 +431,13 @@ async function main() {
       console.log('[ParamSweep] 建议: 检查数据库连接或尝试其他交易品种');
       return;
     }
-    
+
     console.log(`[ParamSweep] 数据准备完成: ${dataInfo.count} 条K线`);
     console.log('');
 
     // 执行回测
-    const results = await runSerialBacktests(combinations, args.symbol, args.days, args.interval, db);
-    
+    const results = await runSerialBacktests(combinations, args.symbol, args.days, args.interval, db, dbPath);
+
     if (results.length === 0) {
       console.log('');
       console.log('[ParamSweep] ⚠️ 没有成功完成任何回测');
@@ -521,7 +454,7 @@ async function main() {
       if (!existsSync(outputDir)) {
         mkdirSync(outputDir, { recursive: true });
       }
-      
+
       // 同时输出文本和 CSV
       writeFileSync(outputPath, tableOutput);
       writeFileSync(outputPath.replace(/\.txt$/, '.csv').replace(/\.md$/, '.csv'), csvOutput);
