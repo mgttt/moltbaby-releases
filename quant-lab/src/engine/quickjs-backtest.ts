@@ -135,7 +135,7 @@ export class QuickJSBacktestEngine {
         gridCount: 5,
         gridSpacing: 0.02,
         orderSize: 100,
-        simMode: true,  // 模拟模式
+        simMode: false,  // 使用mock订单簿，禁用内部模拟成交
       },
     });
 
@@ -201,17 +201,12 @@ export class QuickJSBacktestEngine {
 
     // 覆盖 bridge_getPosition - 返回回测实时仓位
     this.strategy.overrideBridgeFunction('bridge_getPosition', (symbol: string) => {
-      const position = {
-        symbol: symbol || this.config.symbol,
-        side: this.position > 0 ? 'LONG' : this.position < 0 ? 'SHORT' : 'FLAT',
-        quantity: Math.abs(this.position),
-        entryPrice: this.avgEntryPrice,
-        currentPrice: 0,
-        unrealizedPnl: 0,
-        realizedPnl: this.totalPnL,
-      };
-      logger.debug(`[QuickJSBacktest] [MOCK]getPosition: ${JSON.stringify(position)}`);
-      return JSON.stringify(position);
+      const side = this.position > 0 ? 'LONG' : this.position < 0 ? 'SHORT' : 'FLAT';
+      const notionalValue = side === 'SHORT' ? -Math.abs(this.positionNotional) : this.positionNotional;
+      // 硬编码返回JSON，确保包含positionNotional
+      const jsonStr = `{"symbol":"${symbol || this.config.symbol}","side":"${side}","quantity":${Math.abs(this.position)},"positionNotional":${notionalValue},"entryPrice":${this.avgEntryPrice},"currentPrice":0,"unrealizedPnl":0,"realizedPnl":${this.totalPnL}}`;
+      logger.info(`[QuickJSBacktest] [MOCK]getPosition: ${jsonStr}`);
+      return jsonStr;
     });
 
     // 覆盖 bridge_getAccount - 返回回测实时账户
@@ -304,11 +299,11 @@ export class QuickJSBacktestEngine {
 
     logger.info(`[QuickJSBacktest] 加载 ${klines.length} 根K线`);
 
-    // [P2] 覆盖bridge函数，必须在onInit之前，让策略获取正确的初始状态
-    this.overrideBridgeFunctions();
-
     // 2. 初始化策略（创建 mock context）
     await this.strategy.onInit(this.createMockContext());
+
+    // [P2] 覆盖bridge函数，必须在onInit之后（ctx已创建）
+    this.overrideBridgeFunctions();
 
     // 3. 逐K线运行
     for (let i = 0; i < klines.length; i++) {
@@ -393,6 +388,23 @@ export class QuickJSBacktestEngine {
         order.status = 'FILLED';
         this.filledOrders.push(order);
 
+        // [P2] 在更新持仓前计算 realized pnl
+        // 判断是开仓还是平仓，只有平仓才有 realized pnl
+        const prevPosition = this.position;
+        const prevAvgEntry = this.avgEntryPrice;
+        let realizedPnl = 0;
+
+        if (order.side === 'Sell' && prevPosition > 0) {
+          // Sell 平多仓：平仓数量 = min(订单数量, 多头持仓)
+          const closeQty = Math.min(order.qty, prevPosition);
+          realizedPnl = (order.price - prevAvgEntry) * closeQty;
+        } else if (order.side === 'Buy' && prevPosition < 0) {
+          // Buy 平空仓：平仓数量 = min(订单数量, |空头持仓|)
+          const closeQty = Math.min(order.qty, Math.abs(prevPosition));
+          realizedPnl = (prevAvgEntry - order.price) * closeQty;
+        }
+        // 开仓时 realizedPnl = 0
+
         // 更新持仓
         const notional = order.qty * order.price;
 
@@ -409,25 +421,24 @@ export class QuickJSBacktestEngine {
           this.avgEntryPrice = Math.abs(this.positionNotional / this.position);
         }
 
-        // 记录成交
-        const pnl = this.calculateTradePnL(order);
+        // 记录成交（使用计算好的 realized pnl）
         this.trades.push({
           timestamp,
           side: order.side,
           price: order.price,
           qty: order.qty,
-          pnl,
+          pnl: realizedPnl,
         });
 
         // 更新盈亏统计
-        if (pnl > 0) {
+        if (realizedPnl > 0) {
           this.winningTrades++;
-        } else if (pnl < 0) {
+        } else if (realizedPnl < 0) {
           this.losingTrades++;
         }
-        this.totalPnL += pnl;
+        this.totalPnL += realizedPnl;
 
-        logger.info(`[QuickJSBacktest] 成交: ${order.side} ${order.qty} @ ${order.price}, PnL: ${pnl.toFixed(2)}`);
+        logger.info(`[QuickJSBacktest] 成交: ${order.side} ${order.qty} @ ${order.price}, RealizedPnL: ${realizedPnl.toFixed(2)}, Win/Loss: ${this.winningTrades}/${this.losingTrades}`);
 
         // [P2] 调用策略 onExecution - 关键：让策略更新账本
         if (this.strategy?.onExecution) {
