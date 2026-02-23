@@ -1967,3 +1967,8 @@ int ndtsdb_list_symbols(NDTSDB* db, char symbols[][32], char intervals[][16], in
     }
     return count;
 }
+
+const char* ndtsdb_get_path(NDTSDB* db) {
+    if (!db) return NULL;
+    return db->path;
+}

@@ -857,9 +857,9 @@ export class QuickJSStrategy {
         this.orderStateManager.updateState(orderLinkId, 'FILLED', {
           filledQty: orderUpdate.cumQty || order.qty,
         });
-        // P1方案C：订单FILLED时立即刷新position，降低accountGap
-        await this.refreshCache(ctx);
-        logger.info(`[QuickJSStrategy][方案C] 订单FILLED触发refreshCache: orderLinkId=${orderLinkId}`);
+        // P1重构：使用统一的position更新接口（source='filled'）
+        await this.updatePositionFromExchange(this.strategyCtx!, 'filled');
+        logger.info(`[QuickJSStrategy][方案C] 订单FILLED触发position更新: orderLinkId=${orderLinkId}`);
         break;
       case 'Cancelled':
       case 'Canceled':
@@ -870,6 +870,56 @@ export class QuickJSStrategy {
       case 'PartiallyFilled':
         this.orderStateManager.updateFill(orderLinkId, orderUpdate.cumQty || 0);
         break;
+    }
+  }
+
+  /**
+   * [P1] 成交事件回调 - 通过WebSocket实时接收
+   * 根治accountGap：调用bridge_onExecution通知策略
+   */
+  async onExecution?(execution: {
+    execId: string;
+    orderId: string;
+    orderLinkId?: string;
+    symbol: string;
+    side: string;
+    execQty: number;
+    execPrice: number;
+    execTime: number;
+  }, ctx: StrategyContext): Promise<void> {
+    if (!this.initialized || !this.ctx || !this.rt) {
+      return;
+    }
+
+    logger.info(`[QuickJSStrategy] onExecution: execId=${execution.execId}, orderLinkId=${execution.orderLinkId}`);
+
+    // 调用 bridge_onExecution 通知策略
+    try {
+      const bridgeOnExecution = this.ctx.getProp(this.ctx.global, 'bridge_onExecution');
+      const fnType = this.ctx.typeof(bridgeOnExecution);
+
+      if (fnType === 'function') {
+        const execJson = JSON.stringify(execution);
+        const argHandle = this.ctx.newString(execJson);
+        const result = this.ctx.callFunction(bridgeOnExecution, this.ctx.undefined, argHandle);
+
+        bridgeOnExecution.dispose();
+        argHandle.dispose();
+
+        if (result.error) {
+          const errorMsg = this.ctx.dump(result.error);
+          logger.error(`[QuickJSStrategy] bridge_onExecution 执行失败:`, errorMsg);
+          result.error.dispose();
+        } else {
+          result.value.dispose();
+          logger.info(`[QuickJSStrategy] bridge_onExecution 执行成功: execId=${execution.execId}`);
+        }
+      } else {
+        bridgeOnExecution.dispose();
+        logger.warn(`[QuickJSStrategy] bridge_onExecution 不是函数`);
+      }
+    } catch (error: any) {
+      logger.error(`[QuickJSStrategy] onExecution 调用异常:`, error.message);
     }
   }
 
@@ -1139,11 +1189,71 @@ export class QuickJSStrategy {
   }
 
   /**
+   * P1重构：统一的position更新接口
+   * 所有position更新（poll/ws/filled）都收敛到此函数
+   */
+  private async updatePositionFromExchange(
+    ctx: StrategyContext,
+    source: 'poll' | 'ws' | 'filled'
+  ): Promise<void> {
+    try {
+      // 1. 调用 bridge_getPosition() 获取最新持仓
+      const symbol = this.config.symbol || 'MYXUSDT';
+      const position = await ctx.getPosition(symbol);
+      
+      if (!position) {
+        logger.warn(`[QuickJSStrategy][${source}] 获取持仓失败: ${symbol}`);
+        return;
+      }
+
+      // 2. 更新 state.exchangePosition
+      const oldPos = this.state.exchangePosition || 0;
+      const newPos = position.positionNotional || 0;
+      this.state.exchangePosition = newPos;
+
+      // 3. 检测是否有新fill（position变化且execId不同）
+      // 注意：详细fill检测由reconcileOrders处理，这里只记录position变化
+      if (Math.abs(newPos - oldPos) > 0.01) {
+        logger.info(
+          `[QuickJSStrategy][${source}] Position更新: ${oldPos.toFixed(2)} -> ${newPos.toFixed(2)} ` +
+          `(entryPrice=${position.entryPrice?.toFixed(4) || 'N/A'}, ` +
+          `unrealizedPnl=${position.unrealizedPnl?.toFixed(2) || 'N/A'})`
+        );
+
+        // 触发bridge_onExecution回调（简化版，仅通知position变化）
+        // 详细execution数据由reconcileOrders拉取
+        if (typeof (ctx as any).bridge_onExecution === 'function') {
+          try {
+            (ctx as any).bridge_onExecution({
+              execId: `pos-update-${Date.now()}`,
+              symbol: symbol,
+              execQty: Math.abs(newPos - oldPos),
+              execPrice: position.entryPrice || 0,
+              side: newPos > oldPos ? 'Buy' : 'Sell',
+              execTime: Date.now().toString(),
+            });
+          } catch (e) {
+            // 忽略回调错误
+          }
+        }
+      }
+
+      // 4. 记录source在日志
+      logger.info(`[QuickJSStrategy][${source}] 持仓同步完成: symbol=${symbol}, position=${newPos.toFixed(2)}`);
+    } catch (error: any) {
+      logger.error(`[QuickJSStrategy][${source}] 持仓更新失败:`, error.message);
+    }
+  }
+
+  /**
    * 刷新缓存（账户 + 持仓）
    * P0 修复：支持 BybitStrategyContext 的异步 API
    */
   private async refreshCache(ctx: StrategyContext): Promise<void> {
     try {
+      // P1重构：使用统一的position更新接口（source='poll'）
+      await this.updatePositionFromExchange(ctx, 'poll');
+
       // 检测 ctx 类型：如果有 getAccountAsync，说明是 BybitStrategyContext
       const hasAsyncAPI = 'getAccountAsync' in ctx && typeof (ctx as any).getAccountAsync === 'function';
 

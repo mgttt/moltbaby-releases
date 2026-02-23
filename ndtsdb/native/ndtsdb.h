@@ -227,6 +227,14 @@ int64_t ndtsdb_get_latest_timestamp(NDTSDB* db, const char* symbol, const char* 
  */
 int ndtsdb_list_symbols(NDTSDB* db, char symbols[][32], char intervals[][16], int max_count);
 
+/**
+ * ndtsdb_get_path — 获取数据库路径
+ *
+ * @param db   数据库句柄
+ * @return     数据库目录路径字符串，db 为 NULL 时返回 NULL
+ */
+const char* ndtsdb_get_path(NDTSDB* db);
+
 #ifdef __cplusplus
 }
 #endif

@@ -88,32 +88,32 @@ export interface StrategyContext {
   // 账户信息
   getAccount(): Account;
   getPosition(symbol: string): Position | null;
-  
+
   // 订单操作
   buy(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order>;
   sell(symbol: string, quantity: number, price?: number, orderLinkId?: string): Promise<Order>;
   cancelOrder(orderId: string): Promise<void>;
   amendOrder?(orderId: string, price?: number, qty?: number): Promise<{ success: boolean; orderId: string }>;
   cancelAllOrders?(symbol?: string): Promise<{ cancelledCount: number }>;
-  
+
   // P1新增：目标仓位下单
   orderToTarget?(side: 'BUY' | 'SELL', targetNotional: number): Promise<{ success: boolean; orderId?: string; executedQty?: number; error?: string }>;
-  
+
   // 数据查询
   getLastBar(symbol: string): Kline | null;
   getBars(symbol: string, limit: number): Kline[];
   /** 历史K线（REST回源，供缓存层使用） */
   getKlines?(symbol: string, interval: string, limit: number): Promise<Kline[]>;
-  
+
   // 资金费率查询
   getFundingRate?(symbol: string): Promise<{ fundingRate: number; nextFundingTime: number }>;
-  
+
   // 最优买卖价查询
   getBestBidAsk?(symbol: string): Promise<{ bid: number; ask: number; spread: number }>;
-  
+
   // 指标访问（如果使用 StreamingIndicators）
   getIndicator?(symbol: string, name: string): number | undefined;
-  
+
   // 日志
   log(message: string, level?: 'info' | 'warn' | 'error'): void;
 }
@@ -126,27 +126,27 @@ export interface Strategy {
    * 策略名称
    */
   name: string;
-  
+
   /**
    * 策略初始化（在开始交易前调用）
    */
   onInit(ctx: StrategyContext): Promise<void>;
-  
+
   /**
    * K线更新（每根 K线收盘时调用）
    */
   onBar(bar: Kline, ctx: StrategyContext): Promise<void>;
-  
+
   /**
    * Tick 更新（可选，实盘高频策略使用）
    */
   onTick?(tick: Tick, ctx: StrategyContext): Promise<void>;
-  
+
   /**
    * 订单状态更新（可选）
    */
   onOrder?(order: Order, ctx: StrategyContext): Promise<void>;
-  
+
   /**
    * 资金费结算回调（可选）
    * Bybit每8小时结算一次（08:00, 16:00, 00:00 UTC）
@@ -157,7 +157,22 @@ export interface Strategy {
     fundingFee: number;
     timestamp: number;
   }, ctx: StrategyContext): Promise<void>;
-  
+
+  /**
+   * [P1] 成交事件回调（可选）
+   * 通过WebSocket实时接收成交事件
+   */
+  onExecution?(execution: {
+    execId: string;
+    orderId: string;
+    orderLinkId?: string;
+    symbol: string;
+    side: string;
+    execQty: number;
+    execPrice: number;
+    execTime: number;
+  }, ctx: StrategyContext): Promise<void>;
+
   /**
    * 策略停止（清理资源）
    */
@@ -170,20 +185,20 @@ export interface Strategy {
 export interface BacktestConfig {
   // 回测资金
   initialBalance: number;
-  
+
   // 回测品种
   symbols: string[];
-  
+
   // 回测周期
   interval: string;  // '1d', '4h', '1h', etc.
-  
+
   // 回测时间范围
   startTime: number;
   endTime: number;
-  
+
   // 手续费率
   commission: number;  // 0.001 = 0.1%
-  
+
   // 滑点（模拟市价单的滑点）
   slippage?: number;   // 0.0005 = 0.05%
 }
@@ -197,12 +212,12 @@ export interface BacktestResult {
   finalBalance: number;
   totalReturn: number;        // 总回报率
   annualizedReturn: number;   // 年化回报率
-  
+
   // 风险指标
   maxDrawdown: number;        // 最大回撤
   sharpeRatio: number;        // 夏普比率
   winRate: number;            // 胜率
-  
+
   // 交易统计
   totalTrades: number;
   winningTrades: number;
@@ -210,10 +225,10 @@ export interface BacktestResult {
   averageWin: number;
   averageLoss: number;
   profitFactor: number;       // 盈亏比
-  
+
   // 权益曲线
   equityCurve: Array<{ timestamp: number; equity: number }>;
-  
+
   // 交易记录
   trades: Array<{
     entryTime: number;
@@ -234,28 +249,28 @@ export interface BacktestResult {
 export interface LiveConfig {
   // 交易品种
   symbols: string[];
-  
+
   // K线周期
   interval: string;
-  
+
   // 初始余额（模拟交易时使用）
   initialBalance?: number;
-  
+
   // 数据库路径（可选，用于持久化 K线）
   dbPath?: string;
-  
+
   // WebSocket 配置
   wsEndpoint?: string;
-  
+
   // API 配置（用于下单）
   apiKey?: string;
   apiSecret?: string;
-  
+
   // 风控配置
   maxPositionSize?: number;   // 单个品种最大仓位
   maxDrawdown?: number;       // 最大回撤限制（触发后停止交易）
   stopOnError?: boolean;      // 策略执行错误时是否停止
-  
+
   // 指标配置（可选）
   indicators?: Record<string, import('quant-lib').IndicatorConfig>;
 }

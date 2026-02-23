@@ -62,37 +62,36 @@ export class BybitProvider implements TradingProvider {
   private baseUrl: string;
   private wsUrl: string;
   private category: string;
-  
+
   // WebSocket 连接
   private ws?: WebSocket;
+  private wsPrivate?: WebSocket;  // [P1] 私有WebSocket连接（execution等）
   private klineCallbacks: Map<string, (bar: Kline) => void> = new Map();
   private tickCallbacks: Map<string, (tick: Tick) => void> = new Map();
+  private executionCallback?: (execution: any) => void;  // [P1] execution回调
   private reconnectTimer?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
+  private heartbeatTimerPrivate?: NodeJS.Timeout;  // [P1] 私有WS心跳
   private isConnecting = false;
+  private isConnectingPrivate = false;  // [P1]
   private shuttingDown = false;
-  
+
   // P2: curl错误计数和连续错误检测
   private curlErrorCount = 0;
   private curlError35Count = 0;
   private lastCurlErrorTime = 0;
   private consecutiveCurlErrors = 0;
-  
+
   // Phase 1: ndtsdb状态持久化
   private stateStore?: StateStore;
   private currentRunId?: string;
-  
+
   constructor(config: BybitProviderConfig) {
     this.config = config;
     this.category = config.category || 'linear';
-    
-    if (config.demo) {
-      // Demo Trading 模式: api-demo.bybit.com
-      // 公共数据流仍用主网 (demo 只支持私有流)
-      this.baseUrl = 'https://api-demo.bybit.com';
-      this.wsUrl = `wss://stream.bybit.com/v5/public/${this.category}`;
-      logger.info('[BybitProvider] Demo Trading 模式');
-    } else if (config.testnet) {
+
+    // [P1] 设置public和private WebSocket URL
+    if (config.testnet) {
       this.baseUrl = 'https://api-testnet.bybit.com';
       this.wsUrl = `wss://stream-testnet.bybit.com/v5/public/${this.category}`;
     } else {
@@ -104,7 +103,7 @@ export class BybitProvider implements TradingProvider {
       logger.info(`[BybitProvider] 使用代理: ${config.proxy} (curl)`);
       logger.info(`[BybitProvider] 使用代理: ${config.proxy}`);
     }
-    
+
     // Phase 1: 初始化ndtsdb状态持久化
     if (config.stateDir && config.runId) {
       this.stateStore = new StateStore({
@@ -116,7 +115,7 @@ export class BybitProvider implements TradingProvider {
       logger.info('[BybitProvider] ndtsdb状态持久化未启用(缺少stateDir或runId)');
     }
   }
-  
+
   /**
    * 订阅 K线
    */
@@ -129,7 +128,7 @@ export class BybitProvider implements TradingProvider {
     for (const symbol of symbols) {
       this.klineCallbacks.set(symbol, callback);
     }
-    
+
     // 构建订阅主题
     const bybitInterval = this.toBybitInterval(interval);
 
@@ -137,11 +136,11 @@ export class BybitProvider implements TradingProvider {
       const symbol = this.toExchangeSymbol(s);
       return `kline.${bybitInterval}.${symbol}`;
     });
-    
+
     // 连接 WebSocket
     await this.connectWebSocket(topics);
   }
-  
+
   /**
    * 订阅 Tick
    */
@@ -149,36 +148,36 @@ export class BybitProvider implements TradingProvider {
     for (const symbol of symbols) {
       this.tickCallbacks.set(symbol, callback);
     }
-    
+
     const topics = symbols.map(s => {
       const symbol = this.toExchangeSymbol(s);
       return `tickers.${symbol}`;
     });
-    
+
     await this.connectWebSocket(topics);
   }
-  
+
   /**
    * 热更新：重建连接
    * 保留订阅的回调，重新连接WebSocket
    */
   async reload(): Promise<void> {
     logger.info('[BybitProvider] 热更新：重建连接...');
-    
+
     // 保存当前订阅
     const subscribedTickers = Array.from(this.tickCallbacks.keys());
     const subscribedKlines = Array.from(this.klineCallbacks.keys());
-    
+
     // 关闭旧连接
     if (this.ws) {
       this.ws.close();
       this.ws = undefined;
     }
-    
+
     // 清除定时器
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
-    
+
     // 重新连接
     try {
       if (subscribedTickers.length > 0) {
@@ -196,23 +195,23 @@ export class BybitProvider implements TradingProvider {
       throw e;
     }
   }
-  
+
   /**
    * 连接 WebSocket
    */
   private async connectWebSocket(topics: string[]): Promise<void> {
     if (this.isConnecting) return;
     this.isConnecting = true;
-    
+
     try {
       logger.info(`[BybitProvider] 连接 WebSocket: ${this.wsUrl}`);
-      
+
       this.ws = new WebSocket(this.wsUrl);
-      
+
       this.ws.onopen = () => {
         logger.info(`[BybitProvider] WebSocket 已连接`);
         this.isConnecting = false;
-        
+
         // 订阅主题
         for (const topic of topics) {
           this.ws!.send(JSON.stringify({
@@ -220,10 +219,10 @@ export class BybitProvider implements TradingProvider {
             args: [topic],
           }));
         }
-        
+
         this.startHeartbeat();
       };
-      
+
       this.ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data as string);
@@ -232,12 +231,12 @@ export class BybitProvider implements TradingProvider {
           logger.error(`[BybitProvider] 解析消息失败:`, error);
         }
       };
-      
+
       this.ws.onerror = (error) => {
         logger.error(`[BybitProvider] WebSocket 错误:`, error);
         this.isConnecting = false;
       };
-      
+
       this.ws.onclose = () => {
         if (this.shuttingDown) return;
         logger.info(`[BybitProvider] WebSocket 已断开，5秒后重连...`);
@@ -251,7 +250,7 @@ export class BybitProvider implements TradingProvider {
       this.scheduleReconnect(topics);
     }
   }
-  
+
   /**
    * 处理 WebSocket 消息
    */
@@ -261,20 +260,20 @@ export class BybitProvider implements TradingProvider {
       this.ws?.send(JSON.stringify({ op: 'pong' }));
       return;
     }
-    
+
     // K线消息
     if (data.topic && data.topic.startsWith('kline')) {
       const klineData = data as BybitKlineData;
-      
+
       for (const k of klineData.data) {
         // 只处理完结的 K线
         if (!k.confirm) continue;
-        
+
         // 从 topic 提取 symbol
         const parts = klineData.topic.split('.');
         const exchangeSymbol = parts[parts.length - 1];
         const symbol = this.fromExchangeSymbol(exchangeSymbol);
-        
+
         const callback = this.klineCallbacks.get(symbol);
         if (callback) {
           const bar: Kline = {
@@ -291,13 +290,13 @@ export class BybitProvider implements TradingProvider {
         }
       }
     }
-    
+
     // Ticker 消息
     else if (data.topic && data.topic.startsWith('tickers')) {
       const exchangeSymbol = data.topic.split('.')[1];
       const symbol = this.fromExchangeSymbol(exchangeSymbol);
       const callback = this.tickCallbacks.get(symbol);
-      
+
       if (callback && data.data) {
         const tick: Tick = {
           timestamp: Math.floor(data.ts / 1000),
@@ -309,7 +308,7 @@ export class BybitProvider implements TradingProvider {
       }
     }
   }
-  
+
   /**
    * 心跳机制
    */
@@ -320,14 +319,14 @@ export class BybitProvider implements TradingProvider {
       }
     }, 20000); // 20秒
   }
-  
+
   private stopHeartbeat(): void {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
     }
   }
-  
+
   /**
    * 重连机制
    */
@@ -341,7 +340,154 @@ export class BybitProvider implements TradingProvider {
       this.connectWebSocket(topics);
     }, 5000);
   }
-  
+
+  /**
+   * [P1] 订阅 execution WebSocket (私有流)
+   * 用于实时接收成交事件
+   */
+  async subscribeExecutions(callback: (execution: any) => void): Promise<void> {
+    this.executionCallback = callback;
+    await this.connectPrivateWebSocket();
+  }
+
+  /**
+   * [P1] 连接私有 WebSocket (需要认证)
+   */
+  private async connectPrivateWebSocket(): Promise<void> {
+    if (this.isConnectingPrivate) return;
+    this.isConnectingPrivate = true;
+
+    const wsPrivateUrl = this.config.testnet
+      ? 'wss://stream-testnet.bybit.com/v5/private'
+      : 'wss://stream.bybit.com/v5/private';
+
+    try {
+      logger.info(`[BybitProvider] 连接私有 WebSocket: ${wsPrivateUrl}`);
+
+      this.wsPrivate = new WebSocket(wsPrivateUrl);
+
+      this.wsPrivate.onopen = () => {
+        logger.info(`[BybitProvider] 私有 WebSocket 已连接`);
+        this.isConnectingPrivate = false;
+
+        // 发送认证请求
+        this.authenticatePrivateWebSocket();
+      };
+
+      this.wsPrivate.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data as string);
+          this.handlePrivateMessage(data);
+        } catch (error) {
+          logger.error(`[BybitProvider] 解析私有消息失败:`, error);
+        }
+      };
+
+      this.wsPrivate.onerror = (error) => {
+        logger.error(`[BybitProvider] 私有 WebSocket 错误:`, error);
+        this.isConnectingPrivate = false;
+      };
+
+      this.wsPrivate.onclose = () => {
+        if (this.shuttingDown) return;
+        logger.info(`[BybitProvider] 私有 WebSocket 已断开，5秒后重连...`);
+        this.isConnectingPrivate = false;
+        this.stopHeartbeatPrivate();
+        setTimeout(() => this.connectPrivateWebSocket(), 5000);
+      };
+    } catch (error) {
+      logger.error(`[BybitProvider] 连接私有 WebSocket 失败:`, error);
+      this.isConnectingPrivate = false;
+      setTimeout(() => this.connectPrivateWebSocket(), 5000);
+    }
+  }
+
+  /**
+   * [P1] 私有 WebSocket 认证
+   */
+  private authenticatePrivateWebSocket(): void {
+    if (!this.wsPrivate || this.wsPrivate.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const apiKey = this.config.apiKey;
+    const apiSecret = this.config.apiSecret;
+    const expires = Date.now() + 10000; // 10秒过期
+    const signature = createHmac('sha256', apiSecret)
+      .update(`GET/realtime${expires}`)
+      .digest('hex');
+
+    this.wsPrivate.send(JSON.stringify({
+      op: 'auth',
+      args: [apiKey, expires.toString(), signature],
+    }));
+
+    logger.info('[BybitProvider] 私有 WebSocket 认证请求已发送');
+  }
+
+  /**
+   * [P1] 处理私有 WebSocket 消息
+   */
+  private handlePrivateMessage(data: any): void {
+    // 认证响应
+    if (data.op === 'auth') {
+      if (data.success === true) {
+        logger.info('[BybitProvider] 私有 WebSocket 认证成功');
+        // 订阅 execution 频道
+        this.wsPrivate?.send(JSON.stringify({
+          op: 'subscribe',
+          args: ['execution'],
+        }));
+        logger.info('[BybitProvider] execution 频道订阅请求已发送');
+        this.startHeartbeatPrivate();
+      } else {
+        logger.error('[BybitProvider] 私有 WebSocket 认证失败:', data);
+      }
+      return;
+    }
+
+    // 订阅响应
+    if (data.op === 'subscribe') {
+      logger.info('[BybitProvider] 订阅响应:', data);
+      return;
+    }
+
+    // 响应 Ping
+    if (data.op === 'ping') {
+      this.wsPrivate?.send(JSON.stringify({ op: 'pong' }));
+      return;
+    }
+
+    // Execution 消息
+    if (data.topic === 'execution' && data.data) {
+      logger.info(`[BybitProvider] 收到 execution 事件: ${data.data.length} 条`);
+      for (const exec of data.data) {
+        logger.info(`[BybitProvider] execution: execId=${exec.execId}, symbol=${exec.symbol}, side=${exec.side}, execQty=${exec.execQty}, execPrice=${exec.execPrice}`);
+        if (this.executionCallback) {
+          this.executionCallback(exec);
+        }
+      }
+    }
+  }
+
+  /**
+   * [P1] 私有 WebSocket 心跳
+   */
+  private startHeartbeatPrivate(): void {
+    this.heartbeatTimerPrivate = setInterval(() => {
+      if (this.wsPrivate && this.wsPrivate.readyState === WebSocket.OPEN) {
+        this.wsPrivate.send(JSON.stringify({ op: 'ping' }));
+      }
+    }, 20000); // 20秒
+  }
+
+  private stopHeartbeatPrivate(): void {
+    if (this.heartbeatTimerPrivate) {
+      clearInterval(this.heartbeatTimerPrivate);
+      this.heartbeatTimerPrivate = undefined;
+    }
+  }
+
   /**
    * 买入
    */
@@ -353,25 +499,25 @@ export class BybitProvider implements TradingProvider {
       orderType: price ? 'Limit' : 'Market',
       qty: quantity.toString(),
     };
-    
+
     if (price) {
       params.price = price.toString();
     }
-    
+
     if (orderLinkId) {
       params.orderLinkId = orderLinkId;
     }
-    
+
     // P0修复：添加reduceOnly字段
     if (reduceOnly) {
       params.reduceOnly = true;
     }
-    
+
     // P0 DEBUG：确认 orderLinkId 是否被传递
     logger.info(`[BybitProvider] [P0 DEBUG] buy() 参数:`, { symbol, quantity, price, orderLinkId });
     logger.info(`[BybitProvider] [P0 DEBUG] buy() params:`, params);
     logger.info(`[BybitProvider] 下单请求: Buy ${quantity} ${symbol} @ ${price || 'Market'}`);
-    
+
     let result: any;
     try {
       result = await this.request('POST', '/v5/order/create', params);
@@ -390,19 +536,19 @@ export class BybitProvider implements TradingProvider {
       logger.error(`[BybitProvider] 下单失败: ${error.message}`);
       throw error;
     }
-    
+
     if (!result || !result.result) {
       logger.error(`[BybitProvider] 下单响应异常:`, result);
       throw new Error('Order response missing result field');
     }
-    
+
     if (!result.result.orderId) {
       logger.error(`[BybitProvider] 下单响应缺少 orderId:`, result.result);
       throw new Error('Order response missing orderId');
     }
-    
+
     logger.info(`[BybitProvider] 下单成功: orderId=${result.result.orderId}`);
-    
+
     // Phase 1: 记录订单到ndtsdb
     const order = this.parseOrder({
       ...result.result,
@@ -413,10 +559,10 @@ export class BybitProvider implements TradingProvider {
       price: price?.toString() || '0',
     });
     await this.recordOrder(order, 'Buy', price || 0, quantity);
-    
+
     return order;
   }
-  
+
   /**
    * 卖出
    */
@@ -428,25 +574,25 @@ export class BybitProvider implements TradingProvider {
       orderType: price ? 'Limit' : 'Market',
       qty: quantity.toString(),
     };
-    
+
     if (price) {
       params.price = price.toString();
     }
-    
+
     if (orderLinkId) {
       params.orderLinkId = orderLinkId;
     }
-    
+
     // P0修复：添加reduceOnly字段
     if (reduceOnly) {
       params.reduceOnly = true;
     }
-    
+
     // P0 DEBUG：确认 orderLinkId 是否被传递
     logger.info(`[BybitProvider] [P0 DEBUG] sell() 参数:`, { symbol, quantity, price, orderLinkId });
     logger.info(`[BybitProvider] [P0 DEBUG] sell() params:`, params);
     logger.info(`[BybitProvider] 下单请求: Sell ${quantity} ${symbol} @ ${price || 'Market'}`);
-    
+
     let result: any;
     try {
       result = await this.request('POST', '/v5/order/create', params);
@@ -465,19 +611,19 @@ export class BybitProvider implements TradingProvider {
       logger.error(`[BybitProvider] 下单失败: ${error.message}`);
       throw error;
     }
-    
+
     if (!result || !result.result) {
       logger.error(`[BybitProvider] 下单响应异常:`, result);
       throw new Error('Order response missing result field');
     }
-    
+
     if (!result.result.orderId) {
       logger.error(`[BybitProvider] 下单响应缺少 orderId:`, result.result);
       throw new Error('Order response missing orderId');
     }
-    
+
     logger.info(`[BybitProvider] 下单成功: orderId=${result.result.orderId}`);
-    
+
     // Phase 1: 记录订单到ndtsdb
     const order = this.parseOrder({
       ...result.result,
@@ -488,10 +634,10 @@ export class BybitProvider implements TradingProvider {
       price: price?.toString() || '0',
     });
     await this.recordOrder(order, 'Sell', price || 0, quantity);
-    
+
     return order;
   }
-  
+
   /**
    * 取消订单
    */
@@ -501,29 +647,29 @@ export class BybitProvider implements TradingProvider {
       logger.info(`[BybitProvider] 跳过撤单：pending 订单未提交到交易所 (${orderId})`);
       return;
     }
-    
+
     // orderId format: "symbol:id"
     const parts = orderId.split(':');
-    
+
     if (parts.length !== 2) {
       logger.error(`[BybitProvider] Invalid orderId format: ${orderId} (expected "symbol:id")`);
       throw new Error(`Invalid orderId format: ${orderId} (expected "symbol:id")`);
     }
-    
+
     const [symbolPart, id] = parts;
-    
+
     if (!symbolPart || !id) {
       throw new Error(`Invalid orderId: missing symbol or id (${orderId})`);
     }
-    
+
     logger.info(`[BybitProvider] 撤单请求: ${orderId} (symbol=${symbolPart}, id=${id})`);
-    
+
     const params = {
       category: this.category,
       symbol: this.toExchangeSymbol(symbolPart),
       orderId: id,
     };
-    
+
     try {
       await this.request('POST', '/v5/order/cancel', params);
       logger.info(`[BybitProvider] 撤单成功: ${orderId}`);
@@ -533,13 +679,13 @@ export class BybitProvider implements TradingProvider {
         logger.info(`[BybitProvider] 撤单已完成（订单已不存在）: ${orderId} - ${error.message}`);
         return;  // 不抛出异常，视为成功
       }
-      
+
       // 其他真正的撤单错误：继续抛出
       logger.error(`[BybitProvider] 撤单失败: ${orderId} - ${error.message}`);
       throw error;
     }
   }
-  
+
   /**
    * 获取账户信息
    */
@@ -548,9 +694,9 @@ export class BybitProvider implements TradingProvider {
     const params = {
       accountType: 'UNIFIED',
     };
-    
+
     const result = await this.request('GET', '/v5/account/wallet-balance', params);
-    
+
     let balance = 0;
     let equity = 0;
     let availableMargin = 0;  // P0修复：使用totalAvailableBalance
@@ -573,7 +719,7 @@ export class BybitProvider implements TradingProvider {
       availableMargin,  // ✅ 修复：使用totalAvailableBalance（66395 USDT）而非walletBalance（0 USDT）
     };
   }
-  
+
   /**
    * 获取持仓
    */
@@ -582,16 +728,16 @@ export class BybitProvider implements TradingProvider {
       category: this.category,
       symbol: this.toExchangeSymbol(symbol),
     };
-    
+
     const result = await this.request('GET', '/v5/position/list', params);
-    
+
     if (result.result && result.result.list && result.result.list[0]) {
       return this.parsePosition(result.result.list[0]);
     }
-    
+
     return null;
   }
-  
+
   /**
    * 获取所有持仓
    */
@@ -600,24 +746,24 @@ export class BybitProvider implements TradingProvider {
       category: this.category,
       settleCoin: 'USDT',
     };
-    
+
     const result = await this.request('GET', '/v5/position/list', params);
-    
+
     if (!result.result || !result.result.list) {
       return [];
     }
-    
+
     // P1 调试：打印完整的 Bybit API 响应（仅前 3 个持仓）
     logger.info('[BybitProvider] getPositions raw response (first 3):');
     result.result.list.slice(0, 3).forEach((p: any, i: number) => {
       logger.info(`  [${i}] symbol=${p.symbol}, side=${p.side}, size=${p.size}, positionValue=${p.positionValue}`);
     });
-    
+
     return result.result.list
       .filter((p: any) => parseFloat(p.size) > 0)
       .map((p: any) => this.parsePosition(p));
   }
-  
+
   /**
    * 获取最新报价
    */
@@ -707,12 +853,12 @@ export class BybitProvider implements TradingProvider {
         category: this.category,
         orderLinkId,
       });
-      
+
       const orders = result.result?.list || [];
       if (orders.length === 0) {
         return null;
       }
-      
+
       // 返回第一个匹配订单
       return this.parseOrder(orders[0]);
     } catch (error: any) {
@@ -783,7 +929,7 @@ export class BybitProvider implements TradingProvider {
   ): Promise<any> {
     const timestamp = Date.now().toString();
     const recvWindow = '5000';
-    
+
     // 构建请求参数（Bybit 对签名要求 queryString/params 顺序一致，建议按 key 排序）
     let queryString = '';
     let body = '';
@@ -802,14 +948,14 @@ export class BybitProvider implements TradingProvider {
       }
       body = JSON.stringify(sorted);
     }
-    
+
     // 生成签名
     const signString = timestamp + this.config.apiKey + recvWindow + (method === 'GET' ? queryString : body);
     const signature = this.generateSignature(signString);
-    
+
     // 构建 URL
     const url = `${this.baseUrl}${endpoint}${queryString ? '?' + queryString : ''}`;
-    
+
     const headers = {
       'X-BAPI-API-KEY': this.config.apiKey,
       'X-BAPI-SIGN': signature,
@@ -820,17 +966,17 @@ export class BybitProvider implements TradingProvider {
       'Accept': 'application/json',
       'User-Agent': 'quant-lab/3.0',
     };
-    
+
     // P0 DEBUG：打印实际发送的 body（特别是下单请求）
     if (method === 'POST' && endpoint === '/v5/order/create') {
       logger.info(`[BybitProvider] [P0 DEBUG] 下单请求 body:`, body);
       logger.info(`[BybitProvider] [P0 DEBUG] 下单请求 params:`, params);
     }
-    
+
     // 直接使用 curl（避免 undici fetch 被 CloudFront WAF 拦截）
     return this.requestViaCurl(method, url, body || undefined, headers);
   }
-  
+
   /**
    * Fallback REST request via curl (better proxy compatibility)
    */
@@ -886,7 +1032,7 @@ export class BybitProvider implements TradingProvider {
     const requestStartTime = Date.now();
 
     // 显式pipe stderr（鲶鱼建议1）
-    const result = spawnSync('curl', args, { 
+    const result = spawnSync('curl', args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'], // stdin, stdout, stderr
     });
@@ -970,12 +1116,12 @@ export class BybitProvider implements TradingProvider {
       this.curlErrorCount++;
       this.consecutiveCurlErrors++;
       this.lastCurlErrorTime = Date.now();
-      
+
       // 连续发生升级为warning
       const isConsecutiveWarning = this.consecutiveCurlErrors >= 3;
       const logLevel = isConsecutiveWarning ? 'error' : 'warn';
       const logPrefix = isConsecutiveWarning ? '[WARNING]' : '';
-      
+
       const errorMsg = err.trim() || result.error?.message || 'Unknown curl error';
       console[logLevel](
         `[BybitProvider] ${logPrefix} Curl failed: ` +
@@ -1014,13 +1160,13 @@ export class BybitProvider implements TradingProvider {
 
     try {
       const result = JSON.parse(text);
-      
+
       // 检查 Bybit API 错误响应
       if (result.retCode !== 0) {
         logger.error(`[BybitProvider] API error: ${result.retMsg} (code: ${result.retCode})`);
         throw new Error(`Bybit API error: ${result.retMsg}`);
       }
-      
+
       return result;
     } catch (error) {
       if (error instanceof SyntaxError) {
@@ -1038,7 +1184,7 @@ export class BybitProvider implements TradingProvider {
     hmac.update(message);
     return hmac.digest('hex');
   }
-  
+
   /**
    * 解析订单响应
    */
@@ -1059,7 +1205,7 @@ export class BybitProvider implements TradingProvider {
       timestamp: Math.floor(data.createdTime / 1000),
     };
   }
-  
+
   /**
    * 解析订单状态
    */
@@ -1117,10 +1263,10 @@ export class BybitProvider implements TradingProvider {
       logger.error(`[BybitProvider] ndtsdb记录订单失败: ${e}`);
     }
   }
-  
+
   /**
    * 解析持仓响应
-   * 
+   *
    * Bybit Position API 字段：
    * - size: 持仓数量（linear: 币数量；inverse: USD 张数）
    * - positionValue: 持仓价值（linear: USDT 价值；inverse: BTC 价值）
@@ -1134,7 +1280,7 @@ export class BybitProvider implements TradingProvider {
     const size = parseFloat(data.size);
     const avgPrice = parseFloat(data.avgPrice);
     const positionValue = parseFloat(data.positionValue);
-    
+
     // P1 调试：打印完整的 data 对象（关键字段）
     logger.info(`[BybitProvider] parsePosition raw data:`, {
       symbol: data.symbol,
@@ -1146,15 +1292,15 @@ export class BybitProvider implements TradingProvider {
       avgPrice: data.avgPrice,
       markPrice: data.markPrice,
     });
-    
+
     // P0 修复：side 映射
     // Bybit API 返回 'Buy' 或 'Sell'
     // 文档定义：Buy = long, Sell = short
     const side = data.side === 'Buy' ? 'LONG' : 'SHORT';
-    
+
     // P0 调试日志（增强：包含 side 信息）
     logger.info(`[BybitProvider] parsePosition: symbol=${data.symbol}, side=${data.side} → ${side}, size=${size}, positionValue=${positionValue}, markPrice=${data.markPrice}`);
-    
+
     return {
       symbol: this.fromExchangeSymbol(data.symbol),
       side: side,
@@ -1167,14 +1313,14 @@ export class BybitProvider implements TradingProvider {
       positionNotional: positionValue,
     };
   }
-  
+
   /**
    * 转换符号格式：BTC/USDT → BTCUSDT
    */
   private toExchangeSymbol(symbol: string): string {
     return symbol.replace('/', '').toUpperCase();
   }
-  
+
   /**
    * 转换符号格式：BTCUSDT → BTC/USDT
    */
@@ -1188,7 +1334,7 @@ export class BybitProvider implements TradingProvider {
     }
     return symbol;
   }
-  
+
   /**
    * Bybit interval mapping
    *
@@ -1234,17 +1380,17 @@ export class BybitProvider implements TradingProvider {
   async disconnect(): Promise<void> {
     this.shuttingDown = true;
     this.stopHeartbeat();
-    
+
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
-    
+
     if (this.ws) {
       this.ws.close();
       this.ws = undefined;
     }
-    
+
     this.klineCallbacks.clear();
     this.tickCallbacks.clear();
   }
