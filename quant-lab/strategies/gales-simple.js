@@ -267,7 +267,8 @@ let circuitBreakerState = {
   tripped: false,
   reason: '',
   tripAt: 0,
-  highWaterMark: 0,  // 最高权益（用于计算回撤）
+  highWaterMark: 0,  // 最高权益（用于计算回撤）- [P1修复] 实际用peakNetEq
+  peakNetEq: 0,      // [P1修复] 历史最高netEq，用于正确计算回撤
   // P1修复：熔断震荡
   recoveryTickCount: 0,  // 连续满足恢复条件的心跳数
   blockedSide: '',       // 熔断中禁止的开仓方向 ('Buy'/'Sell')
@@ -994,6 +995,8 @@ function checkCircuitBreaker() {
         // P1修复：恢复时重置highWaterMark为当前仓位
         // 为什么：避免用历史峰值计算新回撤，导致立即再次触发
         circuitBreakerState.highWaterMark = effectivePos;
+        // [P1修复] 恢复时重置peakNetEq为当前netEq
+        circuitBreakerState.peakNetEq = currentNetEq || circuitBreakerState.peakNetEq;
         logInfo('[熔断恢复] 仓位回落，恢复交易' +
                 ' | positionRatio=' + (positionRatio * 100).toFixed(2) + '%' +
                 ' | effectivePos=' + effectivePos.toFixed(2) +
@@ -1011,34 +1014,30 @@ function checkCircuitBreaker() {
   }
   
   // ===== 回撤熔断检查 =====
-  // 为什么用effectivePosition：策略账本和交易所数据可能不一致，取较大值更保守
+  // [P1修复] 改为基于netEq计算回撤，而不是仓位规模
+  // 原因：原逻辑用effectivePosition，导致盈利平仓（仓位下降）误触发熔断
   const effectivePosition = Math.max(
     Math.abs(state.positionNotional || 0),
     Math.abs(state.exchangePosition || 0)
   );
+  const currentNetEq = state.riskMetrics?.accountNetEquity || state.riskMetrics?.netEq || 0;
   
-  // 回撤计算基于highWaterMark（历史最高仓位）
-  // 为什么hwm用maxPosition初始化：避免初始小仓位时轻微回撤就触发
-  if (circuitBreakerState.highWaterMark === 0) {
-    // 冷启动：用当前权益初始化，没持仓时跳过回撤检查
-    if (effectivePosition === 0) {
-      // 为什么hwm保持0：无持仓时不计算回撤，避免0除法
-      circuitBreakerState.highWaterMark = 0;
-    } else {
-      circuitBreakerState.highWaterMark = effectivePosition;
-    }
+  // 冷启动：初始化peakNetEq
+  if (circuitBreakerState.peakNetEq === 0 && currentNetEq > 0) {
+    circuitBreakerState.peakNetEq = currentNetEq;
+    logInfo('[熔断初始化] peakNetEq=' + circuitBreakerState.peakNetEq.toFixed(2));
   }
   
-  // 更新历史最高水位
-  if (effectivePosition > circuitBreakerState.highWaterMark) {
-    circuitBreakerState.highWaterMark = effectivePosition;
+  // 更新历史最高净值
+  if (currentNetEq > circuitBreakerState.peakNetEq) {
+    circuitBreakerState.peakNetEq = currentNetEq;
   }
   
-  // highWaterMark 为 0 时跳过回撤检查（没有持仓历史）
-  if (circuitBreakerState.highWaterMark > 0) {
-    const drawdown = (circuitBreakerState.highWaterMark - effectivePosition) / circuitBreakerState.highWaterMark;
+  // peakNetEq > 0 时才计算回撤
+  if (circuitBreakerState.peakNetEq > 0) {
+    const drawdown = (circuitBreakerState.peakNetEq - currentNetEq) / circuitBreakerState.peakNetEq;
     const ddPct = (drawdown * 100).toFixed(2);
-    const ddBase = ' drawdown=' + ddPct + '% | hwm=' + circuitBreakerState.highWaterMark.toFixed(2) + ' | pos=' + effectivePosition.toFixed(2);
+    const ddBase = ' drawdown=' + ddPct + '% | peak=' + circuitBreakerState.peakNetEq.toFixed(2) + ' | netEq=' + currentNetEq.toFixed(2);
 
     // [硬拦截最小集] D类:账户生存 — 40%最后防线
     // 为什么是40%：基于历史回测，策略在40%回撤后恢复概率极低，保护剩余本金
@@ -2314,7 +2313,22 @@ function alignAccountingFromExchange() {
     
     // P1简化修复：直接设置账本为交易所持仓（强制同步）
     const oldLedger = state.positionNotional || 0;
+    
+    // P2修复：avgEntryPrice周期性同步（仅在方向相同时更新）
+    const oldDirection = oldLedger > 0 ? 'long' : (oldLedger < 0 ? 'short' : 'none');
+    const newDirection = signedExchangePos > 0 ? 'long' : (signedExchangePos < 0 ? 'short' : 'none');
+    
+    // 获取entryPrice用于后续更新
+    const entryPrice = Number(position.entryPrice || 0);
+    
     state.positionNotional = signedExchangePos;
+    
+    // 仅在方向相同时更新avgEntryPrice（穿零重置逻辑保持）
+    if (oldDirection === newDirection && newDirection !== 'none' && entryPrice > 0) {
+      state.avgEntryPrice = entryPrice;
+      logInfo('[账本对齐] avgEntryPrice同步: ' + entryPrice.toFixed(4) + 
+              ' (方向=' + newDirection + ', 旧=' + (state.avgEntryPrice || 0).toFixed(4) + ')');
+    }
     
     // P1修复：不再这里设置initialOffset（由调用方在调用前设置）
     // positionDiffState.initialOffset = 0;
