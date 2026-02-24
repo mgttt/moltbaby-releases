@@ -447,8 +447,9 @@ export class OrderStateManager {
 
   /**
    * 清理已完成订单（保留最近100条）
+   * @returns 删除的订单数量
    */
-  cleanupCompletedOrders(maxHistory = 100) {
+  cleanupCompletedOrders(maxHistory = 100): number {
     const terminalStates: OrderStateEnum[] = ['FILLED', 'CANCELLED'];
     const completedOrders = this.getAllOrders()
       .filter(o => terminalStates.includes(o.state))
@@ -460,7 +461,25 @@ export class OrderStateManager {
         this.orders.delete(order.orderLinkId);
       }
       logger.info(`[OrderStateManager] 清理完成: 删除 ${toDelete.length} 个历史订单`);
+      return toDelete.length;
     }
+    return 0;
+  }
+
+  /**
+   * 重置管理器状态（用于测试）
+   */
+  reset() {
+    this.orders.clear();
+    this.orderIdToLinkId.clear();
+    this.alertCallbacks = [];
+    this.stats = {
+      totalOrders: 0,
+      abnormalOrders: 0,
+      timeoutWarnings: 0,
+    };
+    this.stopDetection();
+    logger.info('[OrderStateManager] 管理器已重置');
   }
 }
 
