@@ -12,6 +12,7 @@
  */
 
 import { createLogger } from '../utils/logger';
+nimport { env } from '../config/env';
 const logger = createLogger('StateMigrationEngine');
 
 import type { StrategyContext } from '../types/strategy';
@@ -138,7 +139,7 @@ export class StateMigrationEngine {
     const { existsSync, readFileSync } = await import('fs');
     const { join } = await import('path');
     
-    const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
+    const homeDir = env.HOME;
     const stateFile = join(homeDir, '.quant-lab/state', `${strategyId}.json`);
     
     let fileState: Record<string, any> = {};
@@ -234,7 +235,7 @@ export class StateMigrationEngine {
     const { existsSync, mkdirSync, writeFileSync, renameSync } = await import('fs');
     const { join } = await import('path');
     
-    const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
+    const homeDir = env.HOME;
     const stateDir = join(homeDir, '.quant-lab/state');
     const stateFile = join(stateDir, `${state.strategyId || 'unknown'}.json`);
     

@@ -18,6 +18,7 @@
  */
 
 import { createLogger } from '../utils/logger';
+nimport { env } from '../config/env';
 const logger = createLogger('HotReloadManager');
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
@@ -28,7 +29,7 @@ import { ModuleReloader } from './ModuleReloader';
 
 // 兼容获取home目录
 function getHomeDir(): string {
-  return process.env.HOME || process.env.USERPROFILE || '/tmp';
+  return env.HOME;
 }
 
 // ================================

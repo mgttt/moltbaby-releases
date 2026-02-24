@@ -15,6 +15,7 @@
  */
 
 import { createLogger } from '../utils/logger';
+nimport { env } from '../config/env';
 const logger = createLogger('hot-reload-api');
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
@@ -24,7 +25,7 @@ import { HotReloadManager } from '../hot-reload/HotReloadManager';
 
 // 兼容获取home目录
 function getHomeDir(): string {
-  return process.env.HOME || process.env.USERPROFILE || '/tmp';
+  return env.HOME;
 }
 
 // ================================

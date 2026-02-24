@@ -1,4 +1,7 @@
 /**
+
+import { env } from '../config/env';
+
  * 统一分级熔断框架
  * 
  * 支持A/B/C/D四级熔断，对应不同严重程度：
@@ -177,7 +180,7 @@ export class TieredCircuitBreaker {
     
     // 设置默认状态文件路径
     if (!this.config.statePersistence.filePath) {
-      const homeDir = process.env.HOME || '/tmp';
+      const homeDir = env.HOME;
       this.config.statePersistence.filePath = join(
         homeDir, 
         '.quant-lab', 

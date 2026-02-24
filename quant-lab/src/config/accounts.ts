@@ -10,6 +10,8 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
+import { env } from './env';
+
 export type ExchangeId = 'bybit' | 'binance' | 'coinex' | 'htx';
 
 export interface AccountConfig {
@@ -28,7 +30,7 @@ export interface AccountConfig {
 }
 
 export function getAccountsPath(): string {
-  return process.env.QUANT_LAB_ACCOUNTS || join(homedir(), '.config', 'quant-lab', 'accounts.json');
+  return env.QUANT_LAB_ACCOUNTS || join(homedir(), '.config', 'quant-lab', 'accounts.json');
 }
 
 export function loadAccountConfigs(): AccountConfig[] {

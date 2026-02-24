@@ -1,4 +1,7 @@
 /**
+
+import { env } from '../config/env';
+
  * 多策略对比报告CLI
  * 基于performance-metrics，输出4策略对比表格
  * 用法: bun run compare-strategies.ts [strategyId]
@@ -10,7 +13,7 @@ const logger = createLogger('compare-strategies');
 import { aggregateStrategyMetrics, StrategyMetrics } from './performance-metrics';
 import { resolve } from 'path';
 
-const STATE_DIR = process.env.QUANT_LAB_STATE_DIR || '/home/devali/.quant-lab/state';
+const STATE_DIR = env.QUANT_LAB_STATE_DIR || '/home/devali/.quant-lab/state';
 
 // 策略列表
 const STRATEGIES = ['gales-short', 'gales-sim-b', 'gales-sim-c', 'gales-sim-d'];

@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../utils/logger';
+nimport { env } from '../config/env';
 const logger = createLogger('sim-pnl-api');
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
@@ -22,7 +23,7 @@ import type { QuickJSStrategy } from '../legacy/QuickJSStrategy';
 
 // 兼容获取home目录
 function getHomeDir(): string {
-  return process.env.HOME || process.env.USERPROFILE || '/tmp';
+  return env.HOME;
 }
 
 // ================================

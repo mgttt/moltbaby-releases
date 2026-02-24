@@ -1,4 +1,7 @@
 /**
+
+import { env } from '../config/env';
+
  * 策略性能指标聚合模块
  * 用途：系统性比较多策略（A/B/C/D参数组），为策略决策提供数据基础
  */
@@ -114,7 +117,7 @@ export function aggregateStrategyMetrics(stateFilePath: string): StrategyMetrics
 // CLI执行入口
 if (require.main === module) {
   const strategyId = process.argv[2] || 'gales-short';
-  const stateDir = process.env.QUANT_LAB_STATE_DIR || '/home/devali/.quant-lab/state';
+  const stateDir = env.QUANT_LAB_STATE_DIR || '/home/devali/.quant-lab/state';
   const stateFile = `${stateDir}/${strategyId}.json`;
 
   logger.info(`[PerformanceMetrics] 分析策略: ${strategyId}`);

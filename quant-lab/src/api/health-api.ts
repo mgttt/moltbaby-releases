@@ -12,6 +12,7 @@
  */
 
 import { createLogger } from '../utils/logger';
+nimport { env } from '../config/env';
 const logger = createLogger('health-api');
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
@@ -20,7 +21,7 @@ import { join } from 'path';
 
 // 兼容获取home目录
 function getHomeDir(): string {
-  return process.env.HOME || process.env.USERPROFILE || '/tmp';
+  return env.HOME;
 }
 
 // ================================
@@ -349,7 +350,7 @@ export class HealthAPI {
    */
   private checkBybit(): boolean {
     // 简化检查：检查环境变量或配置
-    return !!(process.env.BYBIT_API_KEY || process.env.BYBIT_KEY);
+    return !!(env.BYBIT_API_KEY || env.BYBIT_KEY);
   }
 
   /**
@@ -376,7 +377,7 @@ export class HealthAPI {
     return {
       timestamp: new Date().toISOString(),
       version: this.version,
-      mode: process.env.LIVE_TRADING === '1' ? 'live' : 'paper',
+      mode: env.LIVE_TRADING ? 'live' : 'paper',
       strategies,
       activeOrders,
       pendingOrders,

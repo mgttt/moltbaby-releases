@@ -7,6 +7,7 @@
  */
 
 import { createLogger } from '../utils/logger';
+nimport { env } from '../config/env';
 const logger = createLogger('AlertManager');
 
 import { execFileSync } from 'child_process';
@@ -136,7 +137,7 @@ export class AlertManager {
     // === 以下代码保留但不执行，等总裁解禁后恢复 ===
     // 分级告警：STRATEGY_ALERT_LEVEL控制 (CRITICAL/WARNING/ALL/NONE)
     // 向后兼容：STRATEGY_TG_ENABLED=1 等价于 ALL
-    const alertLevel = process.env.STRATEGY_TG_ENABLED === '1' ? 'ALL' : (process.env.STRATEGY_ALERT_LEVEL || 'CRITICAL');
+    const alertLevel = env.STRATEGY_TG_ENABLED === '1' ? 'ALL' : (env.STRATEGY_ALERT_LEVEL || 'CRITICAL');
 
     // NONE: 全部禁用
     if (alertLevel === 'NONE') {
