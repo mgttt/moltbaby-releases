@@ -61,6 +61,11 @@ export class PositionRiskManager {
   private reducer: PositionReducer;
   private config: PositionRiskManagerConfig;
   private onReduceCallback?: (action: ReduceAction) => Promise<boolean>;
+  
+  // 事件处理器引用（用于移除监听）
+  private handleReduceInitiatedBound: (action: ReduceAction) => void;
+  private handleReduceCompletedBound: (action: ReduceAction) => void;
+  private handleReduceFailedBound: (action: ReduceAction, error: string) => void;
 
   constructor(config: PositionRiskManagerConfig) {
     this.config = config;
@@ -83,14 +88,29 @@ export class PositionRiskManager {
       cooldownMs: config.reduceCooldownMs ?? 60000,
     });
 
+    // 绑定事件处理器
+    this.handleReduceInitiatedBound = this.handleReduceInitiated.bind(this);
+    this.handleReduceCompletedBound = this.handleReduceCompleted.bind(this);
+    this.handleReduceFailedBound = this.handleReduceFailed.bind(this);
+
     // 监听降仓事件
-    this.reducer.on('reduce:initiated', this.handleReduceInitiated.bind(this));
-    this.reducer.on('reduce:completed', this.handleReduceCompleted.bind(this));
-    this.reducer.on('reduce:failed', this.handleReduceFailed.bind(this));
+    this.reducer.on('reduce:initiated', this.handleReduceInitiatedBound);
+    this.reducer.on('reduce:completed', this.handleReduceCompletedBound);
+    this.reducer.on('reduce:failed', this.handleReduceFailedBound);
 
     logger.info(`[PositionRiskManager] 初始化完成 [${config.symbol}]`);
     logger.info(`  硬顶限制: ${config.maxLeverage}x / ${config.maxPositionValue} USDT`);
     logger.info(`  降仓阈值: WARNING ${config.warningLeverage ?? 3.0}x / REDUCE ${config.reduceLeverage ?? 3.5}x`);
+  }
+  
+  /**
+   * 销毁（清理事件监听）
+   */
+  destroy(): void {
+    this.reducer.off('reduce:initiated', this.handleReduceInitiatedBound);
+    this.reducer.off('reduce:completed', this.handleReduceCompletedBound);
+    this.reducer.off('reduce:failed', this.handleReduceFailedBound);
+    logger.info(`[PositionRiskManager] 已销毁，事件监听已清理`);
   }
 
   // ==================== 公共API ====================
