@@ -7,7 +7,7 @@
  */
 
 import { createLogger } from '../utils/logger';
-nimport { env } from '../config/env';
+import { env } from '../config/env';
 const logger = createLogger('AlertManager');
 
 import { execFileSync } from 'child_process';

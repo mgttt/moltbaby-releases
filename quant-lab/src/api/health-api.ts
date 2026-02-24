@@ -12,7 +12,7 @@
  */
 
 import { createLogger } from '../utils/logger';
-nimport { env } from '../config/env';
+import { env } from '../config/env';
 const logger = createLogger('health-api');
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';

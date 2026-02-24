@@ -176,8 +176,10 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
   if (p.recenterMinIdleTicks) CONFIG.recenterMinIdleTicks = p.recenterMinIdleTicks;
 
   if (p.simMode !== undefined) CONFIG.simMode = p.simMode;
-  // 【修复】支持lean参数，同时保持direction兼容
-  const leanValue = p.lean || p.direction;
+  // 【修复】支持lean参数，同时保持direction兼容（含值映射）
+  const rawLean = p.lean || p.direction;
+  var leanMap = { 'long': 'positive', 'short': 'negative', 'neutral': 'neutral', 'positive': 'positive', 'negative': 'negative' };
+  var leanValue = rawLean ? (leanMap[rawLean] || rawLean) : null;
   if (leanValue) CONFIG.lean = leanValue;
   // 【方案1修复】如果传入了lean/direction，默认禁用应急切换，防止覆盖
   if (leanValue && !p.emergencyLean) {

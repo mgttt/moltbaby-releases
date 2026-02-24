@@ -12,7 +12,7 @@
  */
 
 import { createLogger } from '../utils/logger';
-nimport { env } from '../config/env';
+import { env } from '../config/env';
 const logger = createLogger('StateMigrationEngine');
 
 import type { StrategyContext } from '../types/strategy';

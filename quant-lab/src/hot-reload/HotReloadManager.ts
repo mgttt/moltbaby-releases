@@ -18,7 +18,7 @@
  */
 
 import { createLogger } from '../utils/logger';
-nimport { env } from '../config/env';
+import { env } from '../config/env';
 const logger = createLogger('HotReloadManager');
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
