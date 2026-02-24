@@ -42,7 +42,7 @@ console.log();
 console.log('[测试 3] 命令构建检查');
 console.log('  （跳过实际运行测试，避免长时间运行）');
 console.log('  提示：可以手动运行以下命令验证:');
-console.log('    bun tools/strategy-cli.ts sim ./strategies/gales-simple.js --scenario sine-wave --speed 1000');
+console.log('    bun tools/strategy-cli.ts sim ./strategies/grid/gales-simple.js --scenario sine-wave --speed 1000');
 console.log();
 
 // 总结

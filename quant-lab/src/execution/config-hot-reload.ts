@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/execution/config-hot-reload.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('config-hot-reload');
+
 import { watch, readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -695,7 +698,7 @@ export class ConfigHotReloadManager {
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 }
 

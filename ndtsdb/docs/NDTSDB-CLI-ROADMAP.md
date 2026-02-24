@@ -132,7 +132,41 @@ db.close();
 - [ ] 流式指标（StreamingSMA/EMA/RSI/MACD/BB）
 - [ ] SQL 子集支持（SELECT/WHERE/LIMIT）
 - [ ] 批量导入/导出（CSV/JSON）
-- [ ] 跨平台（macOS, Windows）
+- [ ] 跨平台分发（职责分离架构）
+  
+  **设计原则**：可执行程序走cosmocc（一个.com全平台跑）；共享库走zig（天然per-platform绑定）。各司其职。
+  
+  ```
+  分发产物矩阵:
+  
+  ndtsdb-cli.com                    ← Cosmocc（可执行程序）
+  └── 单文件 APE，Linux/macOS/Windows/FreeBSD 直接运行
+  
+  libndtsdb_{arch}.{ext}            ← Zig Build（共享库）
+  ├── libndtsdb_x86_64.so           Linux x86_64
+  ├── libndtsdb_x86_64.dylib        macOS x86_64  
+  ├── libndtsdb_arm64.dylib         macOS ARM64
+  ├── libndtsdb_x86_64.dll          Windows x86_64
+  └── libndtsdb_arm64.so            Linux ARM64
+  ```
+  
+  - **ndtsdb-cli 可执行程序 → Cosmocc APE**
+    - [x] APE二进制编译通过（3.0MB）✅
+    - [x] make cosmo target集成 ✅
+    - [x] 功能验证（--help/write-json/query）✅
+    - [ ] Podman容器化构建（Dockerfile.cosmocc，CI可复现）
+    - [ ] macOS/Windows实机验证
+    - 用途：终端用户零配置分发、便携式部署、边缘设备
+    - 注：zig build仅用于Linux开发构建（make release → 1.2MB），跨平台分发走cosmocc
+  
+  - **libndtsdb 共享库 → Zig 交叉编译**
+    - [x] Linux x86_64 静态库验证 ✅
+    - [ ] 拆分 libndtsdb 为独立共享库（公开API头文件 + .so/.dylib/.dll）
+    - [ ] macOS x86_64 / ARM64
+    - [ ] Windows x86_64
+    - [ ] Linux ARM64
+    - [ ] make lib-all target（一次编译所有平台共享库）
+    - 用途：FFI绑定（Python/Node/Bun/Go 调用 libndtsdb）、嵌入式集成
 
 ### Phase 3: 高级特性（v0.3.0+）
 - [ ] 内置 HTTP 服务器模式（轻量 REST API）

@@ -1,9 +1,9 @@
-import { QuickJSBacktest } from './src/engine/quickjs-backtest';
+import { QuickJSBacktest } from './legacy/quickjs-backtest';
 import { logger } from 'quant-lib';
 
 async function test() {
   const backtest = new QuickJSBacktest({
-    strategyPath: './strategies/gales-simple.js',
+    strategyPath: './strategies/grid/gales-simple.js',
     symbol: 'BTCUSDT',
     from: Date.now() - 7 * 24 * 60 * 60 * 1000,
     to: Date.now(),

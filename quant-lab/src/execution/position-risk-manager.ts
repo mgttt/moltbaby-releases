@@ -5,6 +5,9 @@
  * 提供统一的仓位风险检查与自动降仓能力
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('position-risk-manager');
+
 import { LeverageLimiter, PositionRisk } from './leverage-limiter';
 import {
   PositionReducer,
@@ -85,9 +88,9 @@ export class PositionRiskManager {
     this.reducer.on('reduce:completed', this.handleReduceCompleted.bind(this));
     this.reducer.on('reduce:failed', this.handleReduceFailed.bind(this));
 
-    console.log(`[PositionRiskManager] 初始化完成 [${config.symbol}]`);
-    console.log(`  硬顶限制: ${config.maxLeverage}x / ${config.maxPositionValue} USDT`);
-    console.log(`  降仓阈值: WARNING ${config.warningLeverage ?? 3.0}x / REDUCE ${config.reduceLeverage ?? 3.5}x`);
+    logger.info(`[PositionRiskManager] 初始化完成 [${config.symbol}]`);
+    logger.info(`  硬顶限制: ${config.maxLeverage}x / ${config.maxPositionValue} USDT`);
+    logger.info(`  降仓阈值: WARNING ${config.warningLeverage ?? 3.0}x / REDUCE ${config.reduceLeverage ?? 3.5}x`);
   }
 
   // ==================== 公共API ====================
@@ -274,7 +277,7 @@ export class PositionRiskManager {
    */
   reset(): void {
     this.reducer.reset();
-    console.log(`[PositionRiskManager] 已重置`);
+    logger.info(`[PositionRiskManager] 已重置`);
   }
 
   // ==================== 私有方法 ====================
@@ -290,29 +293,29 @@ export class PositionRiskManager {
   }
 
   private async handleReduceInitiated(action: ReduceAction): Promise<void> {
-    console.log(`[PositionRiskManager] 🎯 降仓指令已生成: ${action.actionId}`);
+    logger.info(`[PositionRiskManager] 🎯 降仓指令已生成: ${action.actionId}`);
     
     // 如果有注册的回调，自动执行
     if (this.onReduceCallback) {
       try {
         const success = await this.onReduceCallback(action);
         if (success) {
-          console.log(`[PositionRiskManager] ✅ 降仓执行成功`);
+          logger.info(`[PositionRiskManager] ✅ 降仓执行成功`);
         } else {
-          console.log(`[PositionRiskManager] ⚠️ 降仓执行被跳过`);
+          logger.info(`[PositionRiskManager] ⚠️ 降仓执行被跳过`);
         }
       } catch (error) {
-        console.error(`[PositionRiskManager] ❌ 降仓执行失败:`, error);
+        logger.error(`[PositionRiskManager] ❌ 降仓执行失败:`, error);
       }
     }
   }
 
   private handleReduceCompleted(action: ReduceAction): void {
-    console.log(`[PositionRiskManager] ✅ 降仓完成确认: ${action.actionId}`);
+    logger.info(`[PositionRiskManager] ✅ 降仓完成确认: ${action.actionId}`);
   }
 
   private handleReduceFailed(action: ReduceAction, error?: string): void {
-    console.error(`[PositionRiskManager] ❌ 降仓失败: ${action.actionId}, 错误: ${error}`);
+    logger.error(`[PositionRiskManager] ❌ 降仓失败: ${action.actionId}, 错误: ${error}`);
   }
 
   private generateAuditLog(snapshot: PositionSnapshot, action?: ReduceAction): string {

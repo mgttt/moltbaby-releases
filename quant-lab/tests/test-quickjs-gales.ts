@@ -3,7 +3,7 @@
  * 测试 QuickJS Gales 策略
  */
 
-import { QuickJSStrategy } from '../src/sandbox/QuickJSStrategy';
+import { QuickJSStrategy } from '../legacy/QuickJSStrategy';
 import { LiveEngine } from '../src/engine/live';
 import { PaperTradingProvider } from '../../quant-lib/src/providers/paper-trading';
 import { PaperTradingProviderAdapter } from '../src/adapters/PaperTradingProviderAdapter';
@@ -18,7 +18,7 @@ async function main() {
   // 1. 创建策略
   const strategy = new QuickJSStrategy({
     strategyId: 'gales-quickjs-test',
-    strategyFile: './strategies/gales-simple.js',
+    strategyFile: './strategies/grid/gales-simple.js',
     params: {
       symbol: 'MYXUSDT',
       gridCount: 5,

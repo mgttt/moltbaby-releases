@@ -52,7 +52,7 @@ loadState();
 ## 📈 实盘操作手册
 
 ### 启动前检查清单
-- [ ] 配置文件已审核（symbol/direction/maxPosition）
+- [ ] 配置文件已审核（symbol/lean/maxPosition）
 - [ ] API Key 权限确认（下单/查询/持仓）
 - [ ] 资金充足（保证金 > maxPosition × 2）
 - [ ] 测试网验证通过（如适用）
@@ -65,7 +65,7 @@ cat configs/my-strategy.json
 # 2. 启动策略
 bun tools/strategy-cli.ts start ./strategies/my-strategy.js \
   --session my-strategy-live \
-  --params '{"symbol":"BTCUSDT","direction":"neutral"}' \
+  --params '{"symbol":"BTCUSDT","lean":"neutral"}' \
   --live
 
 # 3. 验证启动
@@ -99,7 +99,7 @@ bun tools/strategy-cli.ts status my-strategy-live
 ```json
 {
   "symbol": "MYXUSDT",
-  "direction": "short",
+  "lean": "negative",
   "gridSpacingUp": 0.02,
   "gridSpacingDown": 0.04,
   "orderSizeUp": 50,
@@ -125,7 +125,7 @@ bun tools/strategy-cli.ts status my-strategy-live
 ```bash
 bun tools/strategy-cli.ts start ./strategies/gales-simple.js \
   --session gales-myx-live \
-  --params '{"symbol":"MYXUSDT","direction":"short",...}' \
+  --params '{"symbol":"MYXUSDT","lean":"negative",...}' \
   --live
 ```
 

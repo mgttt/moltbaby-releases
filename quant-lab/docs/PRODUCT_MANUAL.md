@@ -36,7 +36,7 @@ bun install
 // strategies/my-strategy.js
 const CONFIG = {
   symbol: 'BTCUSDT',
-  direction: 'neutral',  // long/short/neutral
+  lean: 'neutral',  // positive/negative/neutral (仓位倾向)
   gridSpacing: 0.02,
   orderSize: 100,
   maxPosition: 10000,
@@ -64,7 +64,7 @@ bun tools/strategy-cli.ts start ./strategies/my-strategy.js \
 ```javascript
 {
   symbol: 'MYXUSDT',
-  direction: 'short',
+  lean: 'negative',
   gridSpacingUp: 0.02,      // 上升方向间距
   gridSpacingDown: 0.04,    // 下降方向间距
   orderSizeUp: 50,          // 上升订单大小

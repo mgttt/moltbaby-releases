@@ -6,6 +6,9 @@
  * - 多渠道告警（tg send + 日志）
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('AlertManager');
+
 import { execFileSync } from 'child_process';
 import type { ReloadResult } from './HotReloadManager';
 
@@ -32,7 +35,7 @@ export class AlertManager {
     const message = this.formatSuccessMessage(result);
     
     // 控制台输出
-    console.log(message);
+    logger.info(message);
     
     // Telegram告警
     if (this.config.enableTg) {
@@ -47,7 +50,7 @@ export class AlertManager {
     const message = this.formatFailureMessage(result);
     
     // 控制台输出
-    console.error(message);
+    logger.error(message);
     
     // Telegram告警（失败时强制发送）
     await this.sendTgAlert(message, true);
@@ -63,7 +66,7 @@ export class AlertManager {
 状态: 未执行热更新
 建议: 检查失败项后重试`;
 
-    console.warn(message);
+    logger.warn(message);
     
     if (this.config.enableTg) {
       await this.sendTgAlert(message);
@@ -125,7 +128,13 @@ export class AlertManager {
       return;
     }
 
-    // 2026-02-23 分级告警：STRATEGY_ALERT_LEVEL控制 (CRITICAL/WARNING/ALL/NONE)
+    // 2026-02-23 总裁指令：严禁策略系统直接调用tg-cli发信息（消息风暴防护）
+    // 硬禁用：所有告警仅记日志，不发tg
+    logger.warn(`[AlertManager][tg硬禁用] ${message.slice(0, 200)}`);
+    return;
+
+    // === 以下代码保留但不执行，等总裁解禁后恢复 ===
+    // 分级告警：STRATEGY_ALERT_LEVEL控制 (CRITICAL/WARNING/ALL/NONE)
     // 向后兼容：STRATEGY_TG_ENABLED=1 等价于 ALL
     const alertLevel = process.env.STRATEGY_TG_ENABLED === '1' ? 'ALL' : (process.env.STRATEGY_ALERT_LEVEL || 'CRITICAL');
 
@@ -136,7 +145,7 @@ export class AlertManager {
 
     // CRITICAL: 只放行[告急]标签
     if (alertLevel === 'CRITICAL' && !message.includes('[告急]')) {
-      console.warn(`[AlertManager][降级] ${message.slice(0, 100)}`);
+      logger.warn(`[AlertManager][降级] ${message.slice(0, 100)}`);
       return;
     }
 
@@ -145,7 +154,7 @@ export class AlertManager {
         !message.includes('[告急]') &&
         !message.includes('[告警]') &&
         !message.includes('[P1告警]')) {
-      console.warn(`[AlertManager][降级] ${message.slice(0, 100)}`);
+      logger.warn(`[AlertManager][降级] ${message.slice(0, 100)}`);
       return;
     }
 
@@ -159,7 +168,7 @@ export class AlertManager {
         stdio: 'ignore', // 忽略输出，避免干扰
       });
     } catch (error: any) {
-      console.error(`[AlertManager] Telegram告警发送失败:`, error.message);
+      logger.error(`[AlertManager] Telegram告警发送失败:`, error.message);
     }
   }
 }

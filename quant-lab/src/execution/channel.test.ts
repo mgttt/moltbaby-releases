@@ -9,6 +9,9 @@
  * 位置：quant-lab/src/execution/channel.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('channel.test');
+
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { OrderChannel, OrderChannelConfigManager } from "./channel";
 import { existsSync, rmSync, mkdirSync } from "fs";

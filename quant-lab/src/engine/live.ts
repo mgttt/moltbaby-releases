@@ -118,8 +118,8 @@ export class LiveEngine {
    */
   async start(): Promise<void> {
     logger.info(`[LiveEngine] 启动实盘引擎: ${this.strategy.name}`);
-    console.log(`  品种: ${this.config.symbols.join(', ')}`);
-    console.log(`  周期: ${this.config.interval}`);
+    logger.info(`  品种: ${this.config.symbols.join(', ')}`);
+    logger.info(`  周期: ${this.config.interval}`);
 
     this.running = true;
     this.stopped = false;
@@ -148,14 +148,14 @@ export class LiveEngine {
     // P1新增：启动资金费结算检测
     this.startFundingFeeCheck();
 
-    console.log(`[LiveEngine] 实盘引擎启动完成`);
+    logger.info(`[LiveEngine] 实盘引擎启动完成`);
   }
 
   /**
    * 停止实盘引擎
    */
   async stop(): Promise<void> {
-    console.log(`[LiveEngine] 停止实盘引擎`);
+    logger.info(`[LiveEngine] 停止实盘引擎`);
 
     this.running = false;
     this.stopped = true;
@@ -180,7 +180,7 @@ export class LiveEngine {
       await this.db.close();
     }
 
-    console.log(`[LiveEngine] 实盘引擎已停止`);
+    logger.info(`[LiveEngine] 实盘引擎已停止`);
   }
 
   /**
@@ -192,12 +192,12 @@ export class LiveEngine {
       this.balance = account.balance;
       this.equity = account.equity;
       this.positions = new Map(account.positions.map(p => [p.symbol, p]));
-      console.log(`[LiveEngine] 账户初始化（Provider）: $${this.balance.toLocaleString()}`);
+      logger.info(`[LiveEngine] 账户初始化（Provider）: $${this.balance.toLocaleString()}`);
     } else {
       // 无 Provider：使用配置的初始余额
       this.balance = this.config.initialBalance || 10000;
       this.equity = this.balance;
-      console.log(`[LiveEngine] 账户初始化（模拟）: $${this.balance.toLocaleString()}`);
+      logger.info(`[LiveEngine] 账户初始化（模拟）: $${this.balance.toLocaleString()}`);
     }
   }
 
@@ -212,7 +212,7 @@ export class LiveEngine {
         this.config.interval,
         (bar) => this.onKlineUpdate(bar)
       );
-      console.log(`[LiveEngine] 订阅 K线（Provider）: ${this.config.symbols.join(', ')} ${this.config.interval}`);
+      logger.info(`[LiveEngine] 订阅 K线（Provider）: ${this.config.symbols.join(', ')} ${this.config.interval}`);
     } else {
       // 无 Provider：注册回调（由外部推送）
       for (const symbol of this.config.symbols) {
@@ -222,7 +222,7 @@ export class LiveEngine {
           await this.onKlineUpdate(data);
         });
 
-        console.log(`[LiveEngine] 订阅 K线（手动）: ${symbol} ${this.config.interval}`);
+        logger.info(`[LiveEngine] 订阅 K线（手动）: ${symbol} ${this.config.interval}`);
       }
     }
   }
@@ -254,7 +254,7 @@ export class LiveEngine {
     try {
       await this.strategy.onBar(bar, ctx);
     } catch (error: any) {
-      console.error(`[LiveEngine] 策略执行错误:`, error.message);
+      logger.error(`[LiveEngine] 策略执行错误:`, error.message);
 
       // 风控：如果策略执行失败，是否停止？
       if (this.config.stopOnError) {
@@ -277,7 +277,7 @@ export class LiveEngine {
     try {
       await this.strategy.onTick(tick, ctx);
     } catch (error: any) {
-      console.error(`[LiveEngine] 策略 Tick 处理错误:`, error.message);
+      logger.error(`[LiveEngine] 策略 Tick 处理错误:`, error.message);
     }
   }
 
@@ -410,7 +410,7 @@ export class LiveEngine {
       } : undefined,
       log: (message: string, level: 'info' | 'warn' | 'error' = 'info') => {
         const timestamp = new Date().toISOString();
-        console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
+        logger.info(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
       },
     };
   }
@@ -457,7 +457,7 @@ export class LiveEngine {
     this.equity = account.equity;
     this.positions = new Map(account.positions.map(p => [p.symbol, p]));
 
-    console.log(`[LiveEngine] 账户同步完成: 余额=$${this.balance.toFixed(2)}, 权益=$${this.equity.toFixed(2)}`);
+    logger.info(`[LiveEngine] 账户同步完成: 余额=$${this.balance.toFixed(2)}, 权益=$${this.equity.toFixed(2)}`);
   }
 
   /**
@@ -476,7 +476,7 @@ export class LiveEngine {
     if (this.provider) {
       // 使用 Provider 执行订单
       order = await this.provider.buy(symbol, quantity, price, orderLinkId);
-      console.log(`[LiveEngine] 买入订单成交（Provider）: ${symbol} ${quantity} @ ${order.filledPrice}`);
+      logger.info(`[LiveEngine] 买入订单成交（Provider）: ${symbol} ${quantity} @ ${order.filledPrice}`);
     } else {
       // 无 Provider：模拟成交
       const bar = this.lastBarCache.get(symbol);
@@ -501,7 +501,7 @@ export class LiveEngine {
       // 更新持仓（简化版）
       this.updatePositionAfterBuy(symbol, quantity, order.filledPrice!);
 
-      console.log(`[LiveEngine] 买入订单成交（模拟）: ${symbol} ${quantity} @ ${order.filledPrice}`);
+      logger.info(`[LiveEngine] 买入订单成交（模拟）: ${symbol} ${quantity} @ ${order.filledPrice}`);
     }
 
     this.orders.push(order);
@@ -509,7 +509,7 @@ export class LiveEngine {
     // P0-3: 如果订单未完成，加入跟踪列表
     if (order.status === 'PENDING' || order.status === 'PARTIAL_FILLED') {
       this.trackedOrderIds.add(order.orderId);
-      console.log(`[LiveEngine] 开始跟踪订单: ${order.orderId}`);
+      logger.info(`[LiveEngine] 开始跟踪订单: ${order.orderId}`);
     }
 
     // 调用策略的 onOrder 回调（如果有）
@@ -532,7 +532,7 @@ export class LiveEngine {
     if (this.provider) {
       // 使用 Provider 执行订单
       order = await this.provider.sell(symbol, quantity, price, orderLinkId);
-      console.log(`[LiveEngine] 卖出订单成交（Provider）: ${symbol} ${quantity} @ ${order.filledPrice}`);
+      logger.info(`[LiveEngine] 卖出订单成交（Provider）: ${symbol} ${quantity} @ ${order.filledPrice}`);
     } else {
       // 无 Provider：模拟成交
       const bar = this.lastBarCache.get(symbol);
@@ -557,7 +557,7 @@ export class LiveEngine {
       // 更新持仓（简化版）
       this.updatePositionAfterSell(symbol, quantity, order.filledPrice!);
 
-      console.log(`[LiveEngine] 卖出订单成交（模拟）: ${symbol} ${quantity} @ ${order.filledPrice}`);
+      logger.info(`[LiveEngine] 卖出订单成交（模拟）: ${symbol} ${quantity} @ ${order.filledPrice}`);
     }
 
     this.orders.push(order);
@@ -565,7 +565,7 @@ export class LiveEngine {
     // P0-3: 如果订单未完成，加入跟踪列表
     if (order.status === 'PENDING' || order.status === 'PARTIAL_FILLED') {
       this.trackedOrderIds.add(order.orderId);
-      console.log(`[LiveEngine] 开始跟踪订单: ${order.orderId}`);
+      logger.info(`[LiveEngine] 开始跟踪订单: ${order.orderId}`);
     }
 
     // 调用策略的 onOrder 回调（如果有）
@@ -584,7 +584,7 @@ export class LiveEngine {
     if (this.provider) {
       // 使用 Provider 取消订单
       await this.provider.cancelOrder(orderId);
-      console.log(`[LiveEngine] 订单已取消（Provider）: ${orderId}`);
+      logger.info(`[LiveEngine] 订单已取消（Provider）: ${orderId}`);
     } else {
       // 无 Provider：本地取消
       const order = this.orders.find(o => o.orderId === orderId);
@@ -597,7 +597,7 @@ export class LiveEngine {
       }
 
       order.status = 'CANCELED';
-      console.log(`[LiveEngine] 订单已取消（本地）: ${orderId}`);
+      logger.info(`[LiveEngine] 订单已取消（本地）: ${orderId}`);
     }
   }
 
@@ -689,8 +689,8 @@ export class LiveEngine {
       const drawdown = (initialEquity - this.equity) / initialEquity;
 
       if (drawdown > this.config.maxDrawdown) {
-        console.error(`[LiveEngine] 触发最大回撤限制: ${(drawdown * 100).toFixed(2)}% > ${(this.config.maxDrawdown * 100).toFixed(2)}%`);
-        console.error(`[LiveEngine] 停止交易`);
+        logger.error(`[LiveEngine] 触发最大回撤限制: ${(drawdown * 100).toFixed(2)}% > ${(this.config.maxDrawdown * 100).toFixed(2)}%`);
+        logger.error(`[LiveEngine] 停止交易`);
 
         // 停止引擎
         this.stop();
@@ -725,15 +725,15 @@ export class LiveEngine {
    */
   private startOrderPolling(): void {
     if (!this.provider || !this.provider.getOrders) {
-      console.log(`[LiveEngine] Provider 不支持订单轮询，跳过`);
+      logger.info(`[LiveEngine] Provider 不支持订单轮询，跳过`);
       return;
     }
 
-    console.log(`[LiveEngine] 启动订单状态轮询（间隔 ${this.orderPollInterval}ms）`);
+    logger.info(`[LiveEngine] 启动订单状态轮询（间隔 ${this.orderPollInterval}ms）`);
 
     this.orderPollTimer = setInterval(() => {
       this.pollOrderStatus().catch((err) => {
-        console.error(`[LiveEngine] 订单状态轮询失败:`, err.message);
+        logger.error(`[LiveEngine] 订单状态轮询失败:`, err.message);
       });
     }, this.orderPollInterval);
   }
@@ -760,7 +760,7 @@ export class LiveEngine {
         const order = orders.find(o => o.orderId === orderId);
 
         if (!order) {
-          console.warn(`[LiveEngine] 订单 ${orderId} 未找到，移除跟踪`);
+          logger.warn(`[LiveEngine] 订单 ${orderId} 未找到，移除跟踪`);
           this.trackedOrderIds.delete(orderId);
           continue;
         }
@@ -773,7 +773,7 @@ export class LiveEngine {
 
         // 如果状态发生变化，触发回调
         if (localOrder.status !== order.status) {
-          console.log(`[LiveEngine] 订单状态更新: ${orderId} ${localOrder.status} → ${order.status}`);
+          logger.info(`[LiveEngine] 订单状态更新: ${orderId} ${localOrder.status} → ${order.status}`);
 
           // 更新本地订单
           Object.assign(localOrder, order);
@@ -791,7 +791,7 @@ export class LiveEngine {
         }
       }
     } catch (error: any) {
-      console.error(`[LiveEngine] 订单状态轮询异常:`, error.message);
+      logger.error(`[LiveEngine] 订单状态轮询异常:`, error.message);
     }
   }
 
@@ -842,20 +842,20 @@ export class LiveEngine {
    */
   private startFundingFeeCheck(): void {
     if (!this.provider || !this.provider.getFundingRate) {
-      console.log(`[LiveEngine] Provider 不支持资金费率查询，跳过资金费检测`);
+      logger.info(`[LiveEngine] Provider 不支持资金费率查询，跳过资金费检测`);
       return;
     }
 
     if (!this.strategy.onFundingFee) {
-      console.log(`[LiveEngine] 策略未实现 onFundingFee，跳过资金费检测`);
+      logger.info(`[LiveEngine] 策略未实现 onFundingFee，跳过资金费检测`);
       return;
     }
 
-    console.log(`[LiveEngine] 启动资金费结算检测（间隔 ${this.fundingFeeCheckInterval}ms）`);
+    logger.info(`[LiveEngine] 启动资金费结算检测（间隔 ${this.fundingFeeCheckInterval}ms）`);
 
     this.fundingFeeCheckTimer = setInterval(() => {
       this.checkFundingFee().catch((err) => {
-        console.error(`[LiveEngine] 资金费检测失败:`, err.message);
+        logger.error(`[LiveEngine] 资金费检测失败:`, err.message);
       });
     }, this.fundingFeeCheckInterval);
   }
@@ -892,7 +892,7 @@ export class LiveEngine {
             fundingFee = positionValue * fundingRate * (position.side === 'LONG' ? -1 : 1);
           }
 
-          console.log(`[LiveEngine] 资金费结算: ${symbol}, rate=${fundingRate}, fee=${fundingFee}`);
+          logger.info(`[LiveEngine] 资金费结算: ${symbol}, rate=${fundingRate}, fee=${fundingFee}`);
 
           // 触发策略回调
           const ctx = this.createContext();
@@ -907,7 +907,7 @@ export class LiveEngine {
           this.lastFundingFeeTime.set(symbol, now);
         }
       } catch (error: any) {
-        console.error(`[LiveEngine] 检测 ${symbol} 资金费失败:`, error.message);
+        logger.error(`[LiveEngine] 检测 ${symbol} 资金费失败:`, error.message);
       }
     }
   }
@@ -919,7 +919,7 @@ export class LiveEngine {
     if (this.fundingFeeCheckTimer) {
       clearInterval(this.fundingFeeCheckTimer);
       this.fundingFeeCheckTimer = undefined;
-      console.log(`[LiveEngine] 资金费结算检测已停止`);
+      logger.info(`[LiveEngine] 资金费结算检测已停止`);
     }
   }
 }

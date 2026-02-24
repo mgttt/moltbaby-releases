@@ -8,6 +8,9 @@
  * 4. 2h 窗口去重，防止刷屏
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('LegacyOrderTracker');
+
 import { execFileSync } from 'child_process';
 
 export interface LegacyOrderInfo {
@@ -50,7 +53,7 @@ export class LegacyOrderTracker {
   constructor(currentRunId: string, strategyId: string, config?: { dedupWindowMs?: number; resolveThreshold?: number; tgTarget?: string }) {
     this.currentRunId = currentRunId;
     this.strategyId = strategyId;
-    console.log(`[LegacyOrderTracker] 初始化: strategyId=${strategyId}, runId=${currentRunId}`);
+    logger.info(`[LegacyOrderTracker] 初始化: strategyId=${strategyId}, runId=${currentRunId}`);
     if (config) {
       if (config.dedupWindowMs) this.dedupWindowMs = config.dedupWindowMs;
       if (config.resolveThreshold) this.resolveThreshold = config.resolveThreshold;
@@ -87,7 +90,7 @@ export class LegacyOrderTracker {
     const isCurrentRunId = orderRunId === this.currentRunId;
     
     // P1调试日志
-    console.log(`[LegacyOrderTracker] 订单检查: orderLinkId=${orderLinkId}, direction=${orderDirection}==${strategyDirection}, orderRunId=${orderRunId} vs currentRunId=${this.currentRunId}, isLegacy=${!isCurrentRunId}`);
+    logger.info(`[LegacyOrderTracker] 订单检查: orderLinkId=${orderLinkId}, direction=${orderDirection}==${strategyDirection}, orderRunId=${orderRunId} vs currentRunId=${this.currentRunId}, isLegacy=${!isCurrentRunId}`);
     
     return !isCurrentRunId; // 只有runId不同才算遗留
   }
@@ -135,14 +138,14 @@ export class LegacyOrderTracker {
       } else {
         // 订单消失，增加 missingCount
         info.missingCount++;
-        console.log(`[LegacyOrderTracker] 订单消失检测: ${orderLinkId}, missingCount=${info.missingCount}/${this.resolveThreshold}`);
+        logger.info(`[LegacyOrderTracker] 订单消失检测: ${orderLinkId}, missingCount=${info.missingCount}/${this.resolveThreshold}`);
         
         // 检查是否达到消警阈值
         if (info.missingCount >= this.resolveThreshold) {
           info.state = 'RESOLVED';
           info.resolveReason = 'NOT_FOUND';
           // P3改进：RESOLVED时立即输出明确日志，便于线上grep验收
-          console.log(`[LegacyOrder][RESOLVED] orderLinkId=${info.orderLinkId} confirm=${info.missingCount} reason=${info.resolveReason} lastSeenAt=${new Date(info.lastSeenAt).toISOString()}`);
+          logger.info(`[LegacyOrder][RESOLVED] orderLinkId=${info.orderLinkId} confirm=${info.missingCount} reason=${info.resolveReason} lastSeenAt=${new Date(info.lastSeenAt).toISOString()}`);
           alerts.push(info);
         }
       }
@@ -163,7 +166,7 @@ export class LegacyOrderTracker {
             isReduceOnly: order.reduceOnly,
           };
           this.legacyOrders.set(order.orderLinkId, info);
-          console.log(`[LegacyOrderTracker] 发现新遗留订单: ${order.orderLinkId}, reduceOnly=${order.reduceOnly}`);
+          logger.info(`[LegacyOrderTracker] 发现新遗留订单: ${order.orderLinkId}, reduceOnly=${order.reduceOnly}`);
         }
       }
     }
@@ -174,7 +177,7 @@ export class LegacyOrderTracker {
       // 检查去重窗口
       const lastAlert = this.lastAlertTime.get(info.orderLinkId) || 0;
       if (now - lastAlert < this.dedupWindowMs) {
-        console.log(`[LegacyOrderTracker] 跳过告警（去重窗口）: ${info.orderLinkId}`);
+        logger.info(`[LegacyOrderTracker] 跳过告警（去重窗口）: ${info.orderLinkId}`);
         continue;
       }
       
@@ -234,6 +237,11 @@ export class LegacyOrderTracker {
    * 发送 Telegram 告警
    */
   async sendAlert(alert: LegacyOrderAlert): Promise<void> {
+    // 2026-02-23 总裁指令：严禁策略系统直接调用tg-cli发信息（消息风暴防护）
+    logger.warn(`[LegacyOrderTracker][tg硬禁用] ${alert.type}: ${alert.message.slice(0, 200)}`);
+    return;
+
+    // === 以下代码保留但不执行，等总裁解禁后恢复 ===
     const target = alert.type === 'LONG_LIVED_INFO' ? 'bot-008' : this.tgTarget;
     
     try {
@@ -241,9 +249,9 @@ export class LegacyOrderTracker {
         encoding: 'utf-8',
         stdio: 'ignore',
       });
-      console.log(`[LegacyOrderTracker] 已发送告警: ${alert.type} -> ${target}`);
+      logger.info(`[LegacyOrderTracker] 已发送告警: ${alert.type} -> ${target}`);
     } catch (error: any) {
-      console.error(`[LegacyOrderTracker] Telegram告警发送失败:`, error.message);
+      logger.error(`[LegacyOrderTracker] Telegram告警发送失败:`, error.message);
     }
   }
   
@@ -271,6 +279,6 @@ export class LegacyOrderTracker {
   updateRunId(newRunId: string): void {
     const oldRunId = this.currentRunId;
     this.currentRunId = newRunId;
-    console.log(`[LegacyOrderTracker] runId 更新: ${oldRunId} -> ${newRunId}`);
+    logger.info(`[LegacyOrderTracker] runId 更新: ${oldRunId} -> ${newRunId}`);
   }
 }

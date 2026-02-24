@@ -116,6 +116,9 @@ export interface StrategyContext {
 
   // 日志
   log(message: string, level?: 'info' | 'warn' | 'error'): void;
+  logInfo(message: string): void;
+  logWarn(message: string): void;
+  logError(message: string): void;
 }
 
 /**

@@ -28,6 +28,14 @@
 
 #include "ndtsdb_vector.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

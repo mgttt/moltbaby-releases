@@ -8,6 +8,9 @@
  * - 单步调试
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('simulated');
+
 import type { Scenario, ScenarioPhase } from './simulated/scenarios';
 import { validateScenario } from './simulated/scenarios';
 
@@ -100,7 +103,7 @@ export class SimulatedProvider {
       }
     }, interval);
 
-    console.log(`[SimulatedProvider] 启动 | 模式: ${this.config.mode} | 倍速: ${this.config.speed}x | 间隔: ${interval}ms`);
+    logger.info(`[SimulatedProvider] 启动 | 模式: ${this.config.mode} | 倍速: ${this.config.speed}x | 间隔: ${interval}ms`);
   }
 
   /**
@@ -116,7 +119,7 @@ export class SimulatedProvider {
       this.timer = undefined;
     }
 
-    console.log('[SimulatedProvider] 停止');
+    logger.info('[SimulatedProvider] 停止');
   }
 
   /**
@@ -124,7 +127,7 @@ export class SimulatedProvider {
    */
   pause(): void {
     this.paused = true;
-    console.log('[SimulatedProvider] 暂停');
+    logger.info('[SimulatedProvider] 暂停');
   }
 
   /**
@@ -132,7 +135,7 @@ export class SimulatedProvider {
    */
   resume(): void {
     this.paused = false;
-    console.log('[SimulatedProvider] 恢复');
+    logger.info('[SimulatedProvider] 恢复');
   }
 
   /**
@@ -220,7 +223,7 @@ export class SimulatedProvider {
 
       if (this.phaseIndex >= phases.length) {
         // 场景结束，循环或停止
-        console.log('[SimulatedProvider] 场景完成，重新开始');
+        logger.info('[SimulatedProvider] 场景完成，重新开始');
         this.phaseIndex = 0;
         this.phaseStartPrice = this.config.startPrice;
         this.currentPrice = this.config.startPrice;
@@ -318,7 +321,7 @@ export class SimulatedProvider {
 
     this.openOrders.set(orderId, order);
 
-    console.log(`[SimulatedProvider] 下单: ${params.side} ${params.qty} @ ${params.price}`);
+    logger.info(`[SimulatedProvider] 下单: ${params.side} ${params.qty} @ ${params.price}`);
 
     return { orderId };
   }
@@ -333,7 +336,7 @@ export class SimulatedProvider {
     order.status = 'Cancelled';
     this.openOrders.delete(orderId);
 
-    console.log(`[SimulatedProvider] 撤单: ${orderId}`);
+    logger.info(`[SimulatedProvider] 撤单: ${orderId}`);
 
     this.notifyOrderListeners({ ...order, status: 'Cancelled' });
   }
@@ -365,7 +368,7 @@ export class SimulatedProvider {
         order.filledAt = Date.now();
         order.filledPrice = currentPrice;
 
-        console.log(`[SimulatedProvider] 成交: ${order.side} ${order.qty} @ ${currentPrice} (订单价: ${order.price})`);
+        logger.info(`[SimulatedProvider] 成交: ${order.side} ${order.qty} @ ${currentPrice} (订单价: ${order.price})`);
 
         this.notifyOrderListeners({ ...order });
 

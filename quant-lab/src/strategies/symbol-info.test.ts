@@ -2,6 +2,9 @@
  * symbol-info.test.ts - 品种信息工具测试
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('symbol-info.test');
+
 import { describe, it, expect } from 'vitest';
 import {
   fetchSymbolInfo,

@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/execution/retry-policy.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('retry-policy.test');
+
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { RetryPolicy, ErrorClassifier } from "./retry-policy";
 import { OrderChannel } from "./channel";
@@ -62,7 +65,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       
       // 计算成功率
       const successRate = (successCount / totalAttempts) * 100;
-      console.log(`连接成功率: ${successRate.toFixed(2)}% (${successCount}/${totalAttempts})`);
+      logger.info(`连接成功率: ${successRate.toFixed(2)}% (${successCount}/${totalAttempts})`);
       
       // 验证：成功率应该 >= 90%（由于测试次数少，降低期望）
       expect(successRate).toBeGreaterThanOrEqual(80); // 80%作为测试目标
@@ -98,7 +101,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       
       // 计算成功率
       const successRate = (successCount / totalAttempts) * 100;
-      console.log(`撤单成功率: ${successRate.toFixed(2)}% (${successCount}/${totalAttempts})`);
+      logger.info(`撤单成功率: ${successRate.toFixed(2)}% (${successCount}/${totalAttempts})`);
       
       // 验证：成功率应该 >= 90%（由于110001错误被标记为成功，应该接近100%）
       expect(successRate).toBeGreaterThanOrEqual(90); // 90%作为测试目标
@@ -138,7 +141,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       
       // 验证：没有CANCEL_RACE（幂等保护）
       const stats = handler.getStats();
-      console.log(`撤单统计: 总数=${stats.totalOrders}, 已撤=${stats.cancelledOrders}, 活跃=${stats.activeOrders}`);
+      logger.info(`撤单统计: 总数=${stats.totalOrders}, 已撤=${stats.cancelledOrders}, 活跃=${stats.activeOrders}`);
       
       // 验证：已撤销订单数 = 1（幂等保护）
       expect(stats.cancelledOrders).toBe(1);
@@ -182,7 +185,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       
       // 初始状态应该是CLOSED
       expect(retryPolicy.canExecute()).toBe(true);
-      console.log("初始状态: CLOSED");
+      logger.info("初始状态: CLOSED");
       
       // 模拟连续5次失败（打开熔断器）
       for (let i = 0; i < 5; i++) {
@@ -191,12 +194,12 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       
       // 验证：熔断器打开
       expect(retryPolicy.canExecute()).toBe(false);
-      console.log("熔断器状态: OPEN");
+      logger.info("熔断器状态: OPEN");
       
       // 模拟成功（关闭熔断器）
       retryPolicy.recordCircuitSuccess();
       expect(retryPolicy.canExecute()).toBe(true);
-      console.log("熔断器状态: CLOSED");
+      logger.info("熔断器状态: CLOSED");
       
       // 清理：停止处理
       retryPolicy.stopProcessing();
@@ -213,7 +216,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       // 验证：操作已加入队列
       const stats = retryPolicy.getStats();
       expect(stats.queueLength).toBeGreaterThanOrEqual(1);
-      console.log(`队列长度: ${stats.queueLength}`);
+      logger.info(`队列长度: ${stats.queueLength}`);
     });
   });
 
@@ -233,7 +236,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       
       errors.forEach(({ error, expected }) => {
         const category = classifier.classify(error);
-        console.log(`错误: "${error.message}" -> 分类: ${category}`);
+        logger.info(`错误: "${error.message}" -> 分类: ${category}`);
         expect(category).toBe(expected);
       });
     });
@@ -243,7 +246,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       
       // 获取初始统计
       const initialStats = channel.getRetryStats();
-      console.log("初始统计:", initialStats);
+      logger.info("初始统计:", initialStats);
       
       // 执行一些操作
       await channel.connect();
@@ -251,7 +254,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       
       // 获取最终统计
       const finalStats = channel.getRetryStats();
-      console.log("最终统计:", finalStats);
+      logger.info("最终统计:", finalStats);
       
       // 验证：统计信息有更新
       expect(finalStats.total).toBeGreaterThanOrEqual(initialStats.total);
@@ -266,7 +269,7 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       // 1. 连接
       await channel.connect();
       expect(channel.getStatus()).toBe("CONNECTED");
-      console.log("✅ 连接成功");
+      logger.info("✅ 连接成功");
       
       // 2. 撤单
       const orderId = "order-full-test";
@@ -283,19 +286,19 @@ describe("订单通道重试策略 - 高标准验收测试", () => {
       });
       
       expect(result.success).toBe(true);
-      console.log("✅ 撤单成功");
+      logger.info("✅ 撤单成功");
       
       // 3. 获取统计
       const channelStats = channel.getRetryStats();
       const handlerStats = handler.getStats();
       
-      console.log("通道统计:", channelStats);
-      console.log("撤单统计:", handlerStats);
+      logger.info("通道统计:", channelStats);
+      logger.info("撤单统计:", handlerStats);
       
       // 4. 断开连接
       await channel.disconnect();
       expect(channel.getStatus()).toBe("DISCONNECTED");
-      console.log("✅ 断开成功");
+      logger.info("✅ 断开成功");
       
       // 验证：所有操作都成功
       expect(result.success).toBe(true);

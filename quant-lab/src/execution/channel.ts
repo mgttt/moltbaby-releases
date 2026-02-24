@@ -13,6 +13,11 @@
  * 时间：6h
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('channel');
+
+import { env } from '../config/env';
+
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -57,11 +62,11 @@ export class OrderChannelConfigManager {
         const content = readFileSync(this.configPath, "utf-8");
         return JSON.parse(content);
       } catch (error) {
-        console.error("[OrderChannelConfig] 配置文件损坏，使用默认配置");
+        logger.error("[OrderChannelConfig] 配置文件损坏，使用默认配置");
         return this.getDefaultConfig();
       }
     } else {
-      console.log("[OrderChannelConfig] 配置文件不存在，创建默认配置");
+      logger.info("[OrderChannelConfig] 配置文件不存在，创建默认配置");
       const defaultConfig = this.getDefaultConfig();
       this.saveConfig(defaultConfig);
       return defaultConfig;
@@ -81,9 +86,9 @@ export class OrderChannelConfigManager {
       }
 
       writeFileSync(this.configPath, JSON.stringify(config, null, 2));
-      console.log("[OrderChannelConfig] 配置已保存:", this.configPath);
+      logger.info("[OrderChannelConfig] 配置已保存:", this.configPath);
     } catch (error) {
-      console.error("[OrderChannelConfig] 配置保存失败:", error);
+      logger.error("[OrderChannelConfig] 配置保存失败:", error);
     }
   }
 
@@ -93,8 +98,8 @@ export class OrderChannelConfigManager {
   private getDefaultConfig(): OrderChannelConfig {
     return {
       channelId: "default",
-      endpoint: process.env.ORDER_CHANNEL_ENDPOINT || "wss://stream.bybit.com/v5/private",
-      apiKey: process.env.BYBIT_API_KEY || "",
+      endpoint: env.ORDER_CHANNEL_ENDPOINT,
+      apiKey: env.BYBIT_API_KEY,
       lastConnected: 0,
       status: "DISCONNECTED",
     };
@@ -283,7 +288,7 @@ export class OrderChannel {
    * 断开连接
    */
   async disconnect(): Promise<void> {
-    console.log("[OrderChannel] 断开连接");
+    logger.info("[OrderChannel] 断开连接");
 
     // 清除重连定时器
     if (this.reconnectTimer) {
@@ -301,7 +306,7 @@ export class OrderChannel {
    */
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error("[OrderChannel] 重连失败，已达最大重试次数");
+      logger.error("[OrderChannel] 重连失败，已达最大重试次数");
       this.configManager.updateStatus("FAILED");
       this.events.onStatusChange?.("FAILED");
       return;
@@ -310,7 +315,7 @@ export class OrderChannel {
     this.reconnectAttempts++;
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
 
-    console.log(
+    logger.info(
       `[OrderChannel] ${delay}ms 后尝试第 ${this.reconnectAttempts} 次重连`
     );
 
@@ -319,7 +324,7 @@ export class OrderChannel {
 
     this.reconnectTimer = setTimeout(() => {
       this.connect().catch((error) => {
-        console.error("[OrderChannel] 重连失败:", error.message);
+        logger.error("[OrderChannel] 重连失败:", error.message);
       });
     }, delay);
   }
@@ -343,7 +348,7 @@ export class OrderChannel {
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 
   /**

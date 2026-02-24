@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/reporting/daily-report.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('daily-report');
+
 import { writeFileSync, readFileSync, existsSync, mkdirSync, appendFileSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -486,7 +489,7 @@ ${data.errors.map((e, i) => `${i + 1}. [${new Date(e.time).toISOString()}] ${e.t
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 }
 

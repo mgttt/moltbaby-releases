@@ -11,6 +11,9 @@
  * 位置：quant-lab/src/engine/config-validator.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('config-validator');
+
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -397,7 +400,7 @@ export class ConfigValidator {
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 }
 
@@ -413,11 +416,11 @@ export async function validateBeforeStart(
   const result = validator.validate(backtestConfigPath, liveConfigPath);
 
   if (!result.isValid) {
-    console.error("❌ 配置一致性校验失败，禁止启动策略！");
-    console.error(`差异项: ${result.diffs.length} 个`);
+    logger.error("❌ 配置一致性校验失败，禁止启动策略！");
+    logger.error(`差异项: ${result.diffs.length} 个`);
 
     result.diffs.forEach((diff) => {
-      console.error(
+      logger.error(
         `  - ${diff.key}: ${diff.diffType} (${diff.severity})`
       );
     });
@@ -425,7 +428,7 @@ export async function validateBeforeStart(
     process.exit(1);
   }
 
-  console.log("✅ 配置一致性校验通过，允许启动策略");
+  logger.info("✅ 配置一致性校验通过，允许启动策略");
   return true;
 }
 

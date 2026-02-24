@@ -87,11 +87,11 @@ const CONFIG = {
   hedgeDustFills: true,      // 自动对冲残余风险（不足阈值但有成交）
   maxHedgeSlippagePct: 0.005,// 对冲最大滑点容忍 0.5%
 
-  // 策略方向: 'long' | 'short' | 'neutral'
-  // long: 只做多，卖单仅记账（虚仓）
-  // short: 只做空，买单仅记账（虚仓）
-  // neutral: 双向交易
-  direction: 'short',
+  // 策略倾向: 'positive' | 'negative' | 'neutral'
+  // positive: 做多敞口 — 网格双向挂单，Buy成交计入真实仓位，Sell成交仅记账
+  // negative: 做空敞口 — 网格双向挂单，Sell成交计入真实仓位，Buy成交仅减空
+  // neutral: 无偏好 — 网格双向挂单，所有成交都影响真实仓位
+  lean: 'negative',
 
   // 熔断机制 (P0 修复)
   circuitBreaker: {
@@ -109,7 +109,7 @@ const CONFIG = {
   },
 
   // 应急方向切换 (P0 修复)
-  emergencyDirection: 'auto',  // auto/long/short/neutral
+  emergencyLean: 'auto',  // auto/long/short/neutral
 
   // 市场状态检测（ADX趋势强度）
   enableMarketRegime: true,   // 是否启用市场状态检测
@@ -137,15 +137,29 @@ const CONFIG = {
 if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
   const rawParams = ctx.strategy.params;
   const p = (typeof rawParams === 'string') ? JSON.parse(rawParams) : rawParams;
+  logInfo('[DEBUG] 参数解析成功: ' + JSON.stringify({symbol: p.symbol, lean: p.lean || p.direction, gridSpacing: p.gridSpacing}));
   // 防御性检查：symbol 必须是有效字符串
   if (p.symbol && typeof p.symbol === 'string' && p.symbol.length > 0) {
     CONFIG.symbol = p.symbol;
   }
   if (p.gridCount) CONFIG.gridCount = p.gridCount;
   if (p.gridSpacing) CONFIG.gridSpacing = p.gridSpacing;
+  
+  // 【方案2修复】如果传了gridSpacing但没传Up/Down，自动用gridSpacing覆盖
+  if (p.gridSpacing !== undefined) {
+    if (p.gridSpacingUp === undefined) CONFIG.gridSpacingUp = p.gridSpacing;
+    if (p.gridSpacingDown === undefined) CONFIG.gridSpacingDown = p.gridSpacing;
+  }
   if (p.gridSpacingUp !== undefined) CONFIG.gridSpacingUp = p.gridSpacingUp;
   if (p.gridSpacingDown !== undefined) CONFIG.gridSpacingDown = p.gridSpacingDown;
+  
   if (p.orderSize) CONFIG.orderSize = p.orderSize;
+  
+  // 【方案2修复】如果传了orderSize但没传Up/Down，自动用orderSize覆盖
+  if (p.orderSize !== undefined) {
+    if (p.orderSizeUp === undefined) CONFIG.orderSizeUp = p.orderSize;
+    if (p.orderSizeDown === undefined) CONFIG.orderSizeDown = p.orderSize;
+  }
   if (p.orderSizeUp !== undefined) CONFIG.orderSizeUp = p.orderSizeUp;
   if (p.orderSizeDown !== undefined) CONFIG.orderSizeDown = p.orderSizeDown;
   if (p.maxPosition) CONFIG.maxPosition = p.maxPosition;
@@ -162,9 +176,16 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
   if (p.recenterMinIdleTicks) CONFIG.recenterMinIdleTicks = p.recenterMinIdleTicks;
 
   if (p.simMode !== undefined) CONFIG.simMode = p.simMode;
-  if (p.direction) CONFIG.direction = p.direction;
-  // P0修复：添加emergencyDirection参数覆盖
-  if (p.emergencyDirection) CONFIG.emergencyDirection = p.emergencyDirection;
+  // 【修复】支持lean参数，同时保持direction兼容
+  const leanValue = p.lean || p.direction;
+  if (leanValue) CONFIG.lean = leanValue;
+  // 【方案1修复】如果传入了lean/direction，默认禁用应急切换，防止覆盖
+  if (leanValue && !p.emergencyLean) {
+    CONFIG.emergencyLean = 'manual';
+    logInfo('[DEBUG] 传入lean/direction=' + leanValue + '，禁用应急切换');
+  }
+  // P0修复：添加emergencyLean参数覆盖
+  if (p.emergencyLean) CONFIG.emergencyLean = p.emergencyLean;
   // P2修复：添加initialOffset参数覆盖（持仓差值监控）
   // 如果用户传了initialOffset，使用用户值；否则在st_init中自动计算
   if (p.initialOffset !== undefined) {
@@ -174,6 +195,8 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
     // 标记为需要自动计算（在st_init中计算）
     CONFIG.initialOffset = null;
   }
+} else {
+  logWarn('[DEBUG] ctx或ctx.strategy.params未定义，使用默认CONFIG');
 }
 
 // ================================
@@ -182,18 +205,18 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
 
 // P0修复：锁定CONFIG关键字段（初始化后不可变）
 let LOCKED_SYMBOL = '';
-let LOCKED_DIRECTION = '';
+let LOCKED_LEAN = '';
 let SESSION_ID = '';
 
 // P1修复：多策略共享账户时账本隔离 - 生成唯一stateKey
 function getStateKey() {
   // P0修复：使用锁定后的字段，确保不可变
-  const strategyId = LOCKED_SYMBOL + ':' + LOCKED_DIRECTION;
+  const strategyId = LOCKED_SYMBOL + ':' + LOCKED_LEAN;
   return 'state:' + strategyId;
 }
 
 function getDedupKey() {
-  const strategyId = CONFIG.symbol + ':' + CONFIG.direction;
+  const strategyId = CONFIG.symbol + ':' + CONFIG.lean;
   return 'dedup:' + strategyId;
 }
 
@@ -229,6 +252,10 @@ let state = {
 
   // P0修复：应急方向切换并发锁（防止placeOrder执行中切换方向）
   isPlacingOrder: false,   // 正在下单标志，下单期间禁止方向切换
+
+  // P2修复：撤单异步竞争窗口保护
+  isCancellingAll: false, // 正在撤单中标志，防止撤单期间新订单
+  cancellingStartTick: 0, // 撤单开始时的tick计数
 
   // P2修复：avgEntryPrice持久化（解决accountingPnl=0根因）
   avgEntryPrice: 0,        // 加权平均入场价格，每次fill时更新，重启后持久化
@@ -377,6 +404,9 @@ function loadState() {
         }
         if (obj.ledgerRebuildDone === undefined) state.ledgerRebuildDone = false;
         if (obj.ledgerRebuildLastTick === undefined) state.ledgerRebuildLastTick = 0;
+        // P2修复：撤单标志兼容性
+        if (state.isCancellingAll === undefined) state.isCancellingAll = false;
+        if (state.cancellingStartTick === undefined) state.cancellingStartTick = 0;
 
         // P2修复：加载完整positionDiffState（7字段持久化）
         if (obj.positionDiffState) {
@@ -396,12 +426,15 @@ function loadState() {
 
         // P0新增：熔断状态兼容旧数据
         if (obj.circuitBreakerState) {
+          // P0修复: 恢复circuitBreakerState（包括peakNetEq），防止虚假熔断
+          Object.assign(circuitBreakerState, obj.circuitBreakerState);
+          
           // 兼容旧数据: 如active未定义, 默认为true
-          if (obj.circuitBreakerState.active === undefined) {
-            obj.circuitBreakerState.active = true;
+          if (circuitBreakerState.active === undefined) {
+            circuitBreakerState.active = true;
             logInfo('[熔断] 兼容旧数据: 设置active=true');
           }
-          circuitBreakerState = obj.circuitBreakerState;
+          
           // [hotfix] 重启时重置 highWaterMark=0
           // 原因: hwm 是基于历史会计账本累积值(positionNotional)，跨进程持久化后
           // 与真实仓位口径不匹配，导致重启入金时误触发 D 类回撤拦截
@@ -412,7 +445,8 @@ function loadState() {
           // P1修复：重置杠杆硬顶状态（重启后重新评估）
           circuitBreakerState.blockNewOrders = false;
           circuitBreakerState.leverageHardCapTriggeredAt = 0;
-          logInfo('[熔断] 重启重置: highWaterMark=0, tripped=false, blockNewOrders=false (防历史账本污染)');
+          logInfo('[熔断] 已恢复peakNetEq=' + (circuitBreakerState.peakNetEq || 0) + 
+                  ', 重置: highWaterMark=0, tripped=false, blockNewOrders=false');
         }
       }
     }
@@ -483,6 +517,7 @@ function saveState() {
       ...state,
       positionDiffState: positionDiffStateSnapshot,
       marketRegimeState: marketRegimeSnapshot,
+      circuitBreakerState: circuitBreakerState,  // P0修复: 持久化熔断状态
       _saveVersion: 1,           // 版本号，用于未来兼容
       _saveAt: Date.now(),       // 保存时间戳
     };
@@ -949,6 +984,10 @@ function hasOnlyActiveBuyOrders() {
 }
 
 function cancelAllOrders() {
+  // P2修复：设置撤单中标志和起始tick，防止异步窗口期间新订单
+  state.isCancellingAll = true;
+  state.cancellingStartTick = state.tickCount || 0;
+  
   logWarn('[撤销所有订单] 活跃订单数: ' + countActiveOrders());
 
   for (let i = 0; i < state.gridLevels.length; i++) {
@@ -964,6 +1003,7 @@ function cancelAllOrders() {
     if (!o) return false;
     return o.status !== 'Canceled';
   });
+  // 注意：isCancellingAll在st_heartbeat中根据tick计数自动清除
 }
 
 // ================================
@@ -1326,13 +1366,13 @@ function checkPositionDiff() {
       bridge_log('error', '[Gales] ' + msg);  // P0修复：直接用bridge_log
 
       // P2修复：TG通知bot-009、bot-004、bot-001（9号建议：加runId避免延迟消息误判）
-      // P0修复：添加direction标识（区分neutral/short实例）
-      const directionLabel = CONFIG.direction || 'neutral';
+      // P0修复：添加lean标识（区分neutral/negative实例）
+      const leanLabel = CONFIG.lean || 'neutral';
       try {
         if (typeof bridge_tgSend === 'function') {
-          bridge_tgSend('9号', '[告急][' + directionLabel + '] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
-          bridge_tgSend('4号', '[告急][' + directionLabel + '] 持仓差值熔断! 请检查策略代码和quant-lab模块 (runId=' + state.runId + ')');
-          bridge_tgSend('1号', '[告急][' + directionLabel + '] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('9号', '[告急][' + leanLabel + '] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('4号', '[告急][' + leanLabel + '] 持仓差值熔断! 请检查策略代码和quant-lab模块 (runId=' + state.runId + ')');
+          bridge_tgSend('1号', '[告急][' + leanLabel + '] 持仓差值熔断! diff=' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
         }
       } catch (e) {
         logWarn('[P2] tg通知失败: ' + e);
@@ -1360,12 +1400,12 @@ function checkPositionDiff() {
       logWarn(msg);
 
       // P2修复：TG通知bot-009和bot-001（9号建议：加runId避免延迟消息误判）
-      // P0修复：添加direction标识（区分neutral/short实例）
-      const directionLabel = CONFIG.direction || 'neutral';
+      // P0修复：添加lean标识（区分neutral/negative实例）
+      const leanLabel = CONFIG.lean || 'neutral';
       try {
         if (typeof bridge_tgSend === 'function') {
-          bridge_tgSend('9号', '[告警][' + directionLabel + '] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
-          bridge_tgSend('1号', '[告警][' + directionLabel + '] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('9号', '[告警][' + leanLabel + '] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
+          bridge_tgSend('1号', '[告警][' + leanLabel + '] 持仓差值过大: ' + currentDiff.toFixed(0) + ' USDT (runId=' + state.runId + ')');
         }
       } catch (e) {
         logWarn('[P2] tg通知失败: ' + e);
@@ -1379,7 +1419,7 @@ function checkPositionDiff() {
 // ================================
 
 function checkEmergencyDirectionSwitch() {
-  if (CONFIG.emergencyDirection !== 'auto') return;
+  if (CONFIG.emergencyLean !== 'auto') return;
 
   // P0修复：并发保护 - 下单期间禁止方向切换
   if (state.isPlacingOrder) {
@@ -1387,29 +1427,29 @@ function checkEmergencyDirectionSwitch() {
     return;
   }
 
-  // 买满仓 → 强制切换到 long 模式（只做多）
+  // 买满仓 → 强制切换到 positive（做多敞口）
   if (state.positionNotional >= CONFIG.maxPosition * 0.9) {
-    if (CONFIG.direction !== 'long') {
-      logWarn('[应急切换] 买满仓 → long 模式');
-      CONFIG.direction = 'long';
+    if (CONFIG.lean !== 'positive') {
+      logWarn('[应急切换] 买满仓 → positive 模式');
+      CONFIG.lean = 'positive';
       saveState();
     }
   }
 
-  // 卖满仓 → 强制切换到 short 模式（只做空）
+  // 卖满仓 → 强制切换到 negative（做空敞口）
   if (state.positionNotional <= -CONFIG.maxPosition * 0.9) {
-    if (CONFIG.direction !== 'short') {
-      logWarn('[应急切换] 卖满仓 → short 模式');
-      CONFIG.direction = 'short';
+    if (CONFIG.lean !== 'negative') {
+      logWarn('[应急切换] 卖满仓 → negative 模式');
+      CONFIG.lean = 'negative';
       saveState();
     }
   }
 
   // 仓位回到安全区 → 恢复 neutral
   if (Math.abs(state.positionNotional) < CONFIG.maxPosition * 0.5) {
-    if (CONFIG.direction !== 'neutral' && CONFIG.emergencyDirection === 'auto') {
+    if (CONFIG.lean !== 'neutral' && CONFIG.emergencyLean === 'auto') {
       logInfo('[应急切换] 仓位安全 → neutral 模式');
-      CONFIG.direction = 'neutral';
+      CONFIG.lean = 'neutral';
       saveState();
     }
   }
@@ -1606,26 +1646,26 @@ function updatePositionFromFill(side, fillQty, fillPrice) {
   const notional = fillQty * fillPrice;
 
   // 方向模式处理
-  if (CONFIG.direction === 'long') {
+  if (CONFIG.lean === 'positive') {
     // 做多模式：Buy 增加仓位，Sell 只是虚仓（对冲/减仓）
     if (side === 'Buy') {
       state.positionNotional += notional;
     } else {
       // Sell 成交只是对冲，记录虚仓但不减少实际仓位
       // 实际由操盘手跨产品对冲
-      logDebug('[虚仓] long 模式下 Sell 成交仅记账: -' + notional.toFixed(2));
+      logDebug('[虚仓] positive 模式下 Sell 成交仅记账: -' + notional.toFixed(2));
     }
     return;
   }
 
-  if (CONFIG.direction === 'short') {
+  if (CONFIG.lean === 'negative') {
     // 做空模式：Sell 增加空仓（更负），Buy 减少空仓（向0靠拢，回补）
     if (side === 'Sell') {
       state.positionNotional -= notional;
     } else {
       // Buy 减少空仓（修复：原来是虚仓逻辑，现在实际影响仓位）
       state.positionNotional += notional;
-      logDebug('[减空] short 模式下 Buy 成交减空仓: +' + notional.toFixed(2));
+      logDebug('[减空] negative 模式下 Buy 成交减空仓: +' + notional.toFixed(2));
     }
     return;
   }
@@ -1986,12 +2026,12 @@ function st_onExecution(execJson) {
     }
 
     // 直接更新positionNotional（与updatePositionFromFill相同逻辑）
-    if (CONFIG.direction === 'long') {
+    if (CONFIG.lean === 'positive') {
       if (side === 'Buy') {
         state.positionNotional += notional;
       }
       // Sell在long模式下是虚仓，不更新
-    } else if (CONFIG.direction === 'short') {
+    } else if (CONFIG.lean === 'negative') {
       if (side === 'Sell') {
         state.positionNotional -= notional;
       } else {
@@ -2315,7 +2355,7 @@ function findNearestGrid() {
  */
 function printGridStatus() {
   logInfo('=== 网格档位 ===');
-  logInfo('方向: ' + CONFIG.direction + (CONFIG.direction === 'neutral' ? '' : ' (虚仓仅记账)'));
+  logInfo('方向: ' + CONFIG.lean + (CONFIG.lean === 'neutral' ? '' : ' (虚仓仅记账)'));
 
   // 显示非对称参数
   const spacingDown = CONFIG.gridSpacingDown !== null ? CONFIG.gridSpacingDown : CONFIG.gridSpacing;
@@ -2380,8 +2420,8 @@ function alignAccountingFromExchange() {
     const oldLedger = state.positionNotional || 0;
 
     // P2修复：avgEntryPrice周期性同步（仅在方向相同时更新）
-    const oldDirection = oldLedger > 0 ? 'long' : (oldLedger < 0 ? 'short' : 'none');
-    const newDirection = signedExchangePos > 0 ? 'long' : (signedExchangePos < 0 ? 'short' : 'none');
+    const oldDirection = oldLedger > 0 ? 'positive' : (oldLedger < 0 ? 'negative' : 'none');
+    const newDirection = signedExchangePos > 0 ? 'positive' : (signedExchangePos < 0 ? 'negative' : 'none');
 
     // 获取entryPrice用于后续更新
     const entryPrice = Number(position.entryPrice || 0);
@@ -2422,8 +2462,8 @@ function alignAccountingFromExchange() {
  */
 function rebuildAccountingFromExecutions() {
   // P0修复：使用锁定后的字段，确保不可变
-  const directionLabel = LOCKED_DIRECTION.toLowerCase() || 'neutral';
-  const strategyPrefix = 'gales-' + LOCKED_SYMBOL + '-' + directionLabel + '-';
+  const leanLabel = LOCKED_LEAN.toLowerCase() || 'neutral';
+  const strategyPrefix = 'gales-' + LOCKED_SYMBOL + '-' + leanLabel + '-';
 
   if (typeof bridge_getExecutions !== 'function') {
     logWarn('[账本重建] bridge_getExecutions 不可用，跳过回放');
@@ -2462,7 +2502,7 @@ function rebuildAccountingFromExecutions() {
       // P0修复：严格匹配本策略成交（使用ownerStrategy/state key过滤）
       // orderLinkId格式: 'gales-MYXUSDT-short-{runId_last8}-seq-side' (≤45 chars)
       // getStateKey() = 'state:MYXUSDT:short' -> 需要匹配 'gales-MYXUSDT-short-'
-      const expectedPrefix = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-';
+      const expectedPrefix = 'gales-' + LOCKED_SYMBOL + '-' + LOCKED_LEAN + '-';
       const isOwnOrder = orderLinkId && orderLinkId.startsWith(expectedPrefix);
 
       if (!isOwnOrder) continue;
@@ -2473,9 +2513,9 @@ function rebuildAccountingFromExecutions() {
       const notional = execQty * execPrice;
       if (!isFinite(notional) || notional <= 0) continue;
 
-      if (CONFIG.direction === 'long') {
+      if (CONFIG.lean === 'positive') {
         if (side === 'Buy') rebuiltNotional += notional;
-      } else if (CONFIG.direction === 'short') {
+      } else if (CONFIG.lean === 'negative') {
         if (side === 'Sell') rebuiltNotional -= notional;
         else rebuiltNotional += notional;
       } else {
@@ -2519,23 +2559,23 @@ function st_init() {
   if (!CONFIG.symbol || typeof CONFIG.symbol !== 'string' || CONFIG.symbol.length === 0) {
     throw new Error('[C类启动校验] CONFIG.symbol 缺失或无效，拒绝启动');
   }
-  if (!CONFIG.direction || (CONFIG.direction !== 'neutral' && CONFIG.direction !== 'short' && CONFIG.direction !== 'long')) {
-    throw new Error('[C类启动校验] CONFIG.direction 缺失或无效(当前:' + CONFIG.direction + ')，拒绝启动');
+  if (!CONFIG.lean || (CONFIG.lean !== 'neutral' && CONFIG.lean !== 'negative' && CONFIG.lean !== 'positive')) {
+    throw new Error('[C类启动校验] CONFIG.lean 缺失或无效(当前:' + CONFIG.lean + ')，拒绝启动');
   }
   if (!CONFIG.maxPosition || CONFIG.maxPosition <= 0) {
     throw new Error('[C类启动校验] CONFIG.maxPosition 缺失或为0，拒绝启动');
   }
-  logInfo('[C类启动校验] 通过: symbol=' + CONFIG.symbol + ' direction=' + CONFIG.direction + ' maxPosition=' + CONFIG.maxPosition);
+  logInfo('[C类启动校验] 通过: symbol=' + CONFIG.symbol + ' lean=' + CONFIG.lean + ' maxPosition=' + CONFIG.maxPosition);
 
   // P0修复：锁定CONFIG关键字段（初始化后不可变）
   LOCKED_SYMBOL = CONFIG.symbol;
-  LOCKED_DIRECTION = CONFIG.direction;
+  LOCKED_LEAN = CONFIG.lean;
   SESSION_ID = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
 
   logInfo('策略初始化...');
   logInfo('Symbol: ' + LOCKED_SYMBOL + ' [已锁定]');
   logInfo('GridCount: ' + CONFIG.gridCount);
-  logInfo('Direction: ' + LOCKED_DIRECTION + ' [已锁定]');
+  logInfo('Direction: ' + LOCKED_LEAN + ' [已锁定]');
   logInfo('SimMode: ' + CONFIG.simMode);
   logInfo('SessionId: ' + SESSION_ID);
 
@@ -2563,7 +2603,7 @@ function st_init() {
       // 记录交易所持仓（仅用于显示和initialOffset计算）
       // 方案C：每个策略维护独立账本，不覆盖策略内部positionNotional
       let exchangePosition = position.positionNotional || 0;
-      const isShortSide = position.side === 'Sell' || position.side === 'SHORT' || position.side === 'short';
+      const isShortSide = position.side === 'Sell' || position.side === 'SHORT' || position.side === 'negative';
       if (isShortSide) {
         exchangePosition = -Math.abs(exchangePosition);
       }
@@ -2587,7 +2627,7 @@ function st_init() {
     const avgEntry = state.avgEntryPrice || 0;
     const maxPos = CONFIG.maxPosition || 0;
     const selfCheckMsg = '[冷启动自检] sym=' + LOCKED_SYMBOL + 
-                         ' dir=' + LOCKED_DIRECTION + 
+                         ' dir=' + LOCKED_LEAN + 
                          ' pos=' + pos.toFixed(0) + 
                          ' avgEntry=' + avgEntry.toFixed(3) + 
                          ' maxPos=' + maxPos + 
@@ -2608,8 +2648,8 @@ function st_init() {
   logInfo('[Init] P2: ADX冷启动保护 warmupTicks=' + marketRegimeState.warmupTicks + '（约' + (CONFIG.adxPeriod * 5) + '秒）');
 
   // P0修复：ownerStrategy与锁定后的CONFIG强绑定，确保不可变
-  // 使用 LOCKED_SYMBOL + LOCKED_DIRECTION + SESSION_ID 确保唯一性
-  state.ownerStrategy = 'state:' + LOCKED_SYMBOL + ':' + LOCKED_DIRECTION + ':' + SESSION_ID;
+  // 使用 LOCKED_SYMBOL + LOCKED_LEAN + SESSION_ID 确保唯一性
+  state.ownerStrategy = 'state:' + LOCKED_SYMBOL + ':' + LOCKED_LEAN + ':' + SESSION_ID;
   logInfo('[Init] P0: ownerStrategy锁定=' + state.ownerStrategy + '（不可变）');
 
   // P1修复：立即通知bridge新runId（确保tracker同步）
@@ -2756,12 +2796,12 @@ function checkLegacyOrders() {
 
     legacyOrders.forEach(function(o) {
       var isReduceOnly = o.reduceOnly === true || o.reduceOnly === 'true';
-      // 止盈单判断：side与策略方向相反 或 reduceOnly
+      // 止盈单判断：side与策略倾向相反 或 reduceOnly
       var isTakeProfit = isReduceOnly;
-      if (!isTakeProfit && CONFIG.direction === 'short' && o.side === 'Buy') {
+      if (!isTakeProfit && CONFIG.lean === 'negative' && o.side === 'Buy') {
         isTakeProfit = true;
       }
-      if (!isTakeProfit && CONFIG.direction === 'long' && o.side === 'Sell') {
+      if (!isTakeProfit && CONFIG.lean === 'positive' && o.side === 'Sell') {
         isTakeProfit = true;
       }
 
@@ -3008,6 +3048,17 @@ function st_heartbeat(tickJson) {
     return;
   }
 
+  // P2修复：撤单异步竞争窗口保护（tick计数器方案）
+  if (state.isCancellingAll) {
+    // 等待至少5个tick（约25秒）后自动清除
+    if ((state.tickCount - state.cancellingStartTick) < 5) {
+      logDebug('[撤单中] 跳过本轮心跳，等待撤单完成');
+      return;
+    }
+    state.isCancellingAll = false;
+    logInfo('[撤单完成] 冻结结束，恢复正常交易');
+  }
+
   // ================================
   // P1新增：杠杆硬顶检查
   // ================================
@@ -3050,11 +3101,11 @@ function st_heartbeat(tickJson) {
       // P2修复：方向性保护 - short只允许上移，long只允许下移
       const newCenter = state.lastPrice;
       const oldCenter = state.centerPrice || state.lastPrice;
-      if (CONFIG.direction === 'short' && newCenter < oldCenter) {
+      if (CONFIG.lean === 'negative' && newCenter < oldCenter) {
         logWarn('[autoRecenter拦截] short策略禁止追跌: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
         return;
       }
-      if (CONFIG.direction === 'long' && newCenter > oldCenter) {
+      if (CONFIG.lean === 'positive' && newCenter > oldCenter) {
         logWarn('[autoRecenter拦截] long策略禁止追涨: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
         return;
       }
@@ -3215,8 +3266,8 @@ function st_onParamsUpdate(newParamsJson) {
     logInfo('[Gales] 重心最小空闲 ticks: ' + CONFIG.recenterMinIdleTicks);
   }
   if (newParams.direction !== undefined) {
-    CONFIG.direction = newParams.direction;
-    logInfo('[Gales] 策略方向: ' + CONFIG.direction);
+    CONFIG.lean = newParams.direction;
+    logInfo('[Gales] 策略倾向: ' + CONFIG.lean);
   }
   // symbol 热更新（防御性检查）
   if (newParams.symbol !== undefined) {
@@ -3536,18 +3587,19 @@ function shouldPlaceOrder(grid, distance) {
 
   // ===== 5. 方向限制检查 =====
   // 为什么允许止盈单：long模式下有多仓时允许Sell止盈，short模式下有空仓时允许Buy回补
-  if (CONFIG.direction === 'long' && grid.side === 'Sell') {
+  logInfo('[DEBUG] 方向检查: lean=' + CONFIG.lean + ' grid.side=' + grid.side + ' positionNotional=' + state.positionNotional);
+  if (CONFIG.lean === 'positive' && grid.side === 'Sell') {
     // long模式：有多仓(>0)时允许Sell止盈，无仓(<=0)时禁止Sell开空
     if (state.positionNotional <= 0) {
-      logDebug('[方向限制] long 模式下无多仓时禁止 Sell 开空 gridId=' + grid.id);
+      logInfo('[方向限制] long模式下无多仓，禁止Sell开空 gridId=' + grid.id);
       return false;
     }
     // 有多仓时允许Sell止盈
   }
-  if (CONFIG.direction === 'short' && grid.side === 'Buy') {
+  if (CONFIG.lean === 'negative' && grid.side === 'Buy') {
     // short模式：有空仓(<0)时允许Buy回补，无仓(>=0)时禁止Buy做多
     if (state.positionNotional >= 0) {
-      logDebug('[方向限制] short 模式下无空仓时禁止 Buy 做多 gridId=' + grid.id);
+      logInfo('[方向限制] short模式下无空仓，禁止Buy做多 gridId=' + grid.id);
       return false;
     }
     // 有空仓时允许Buy回补
@@ -3570,8 +3622,8 @@ function shouldPlaceOrder(grid, distance) {
   const orderNotional = CONFIG.orderSize;
 
   if (grid.side === 'Buy') {
-    // short 模式下，Buy 只是虚仓（平仓），不限制 - 为什么：short策略的Buy是减少风险
-    if (CONFIG.direction !== 'short') {
+    // negative 模式下，Buy 只是虚仓（平仓），不限制 - 为什么：negative策略的Buy是减少风险
+    if (CONFIG.lean !== 'negative') {
       const pendingBuy = calcPendingNotional('Buy');
       // 为什么加pendingBuy：已挂但未成交的Buy订单也算入风险敞口
       const afterFill = effectivePosSigned + pendingBuy + orderNotional;
@@ -3585,8 +3637,8 @@ function shouldPlaceOrder(grid, distance) {
   }
 
   if (grid.side === 'Sell') {
-    // long 模式下，Sell 只是虚仓（平仓），不限制 - 为什么：long策略的Sell是减少风险
-    if (CONFIG.direction !== 'long') {
+    // positive 模式下，Sell 只是虚仓（平仓），不限制 - 为什么：positive策略的Sell是减少风险
+    if (CONFIG.lean !== 'positive') {
       const pendingSell = calcPendingNotional('Sell');
       const afterFill = effectivePosSigned - pendingSell - orderNotional;
       if (afterFill < -CONFIG.maxPosition) {
@@ -3603,6 +3655,12 @@ function shouldPlaceOrder(grid, distance) {
 }
 
 function placeOrder(grid) {
+  // P2修复：撤单期间冻结下单
+  if (state.isCancellingAll) {
+    logDebug('[placeOrder] 撤单中，跳过下单 gridId=' + grid.id);
+    return;
+  }
+  
   // P0修复：设置并发锁，防止方向切换
   state.isPlacingOrder = true;
 
@@ -3654,15 +3712,15 @@ function placeOrder(grid) {
     state.isPlacingOrder = false;
     return;
   }
-  // P1修复：110072根治 - orderLinkId加入direction防止跨策略误报
-  const directionLabel = CONFIG.direction || 'neutral';
+  // P1修复：110072根治 - orderLinkId加入lean防止跨策略误报
+  const leanLabel = CONFIG.lean || 'neutral';
   // P0修复：orderLinkId使用锁定后的字段，确保唯一性
   // fix: Bybit orderLinkId ≤ 45 chars - 去掉 SESSION_ID，runId 取后8位
   // P2修复：使用grid.id+attempts生成确定性orderLinkId，重试时不变
-  // 格式: gales-{symbol}-{direction}-{runId_last8}-g{gridId}a{attempt}-{side}
+  // 格式: gales-{symbol}-{lean}-{runId_last8}-g{gridId}a{attempt}-{side}
   // 最长: gales-MYXUSDT-neutral-12345678-g10a3-Sell = 44 chars (≤45)
   const _runSuffix = String(state.runId).slice(-8);
-  const orderLinkId = ('gales-' + LOCKED_SYMBOL + '-' + LOCKED_DIRECTION + '-' + _runSuffix + '-g' + grid.id + 'a' + grid.attempts + '-' + grid.side).slice(0, 45);
+  const orderLinkId = ('gales-' + LOCKED_SYMBOL + '-' + LOCKED_LEAN + '-' + _runSuffix + '-g' + grid.id + 'a' + grid.attempts + '-' + grid.side).slice(0, 45);
 
   // P2修复：幂等性检查 - 查询Bybit是否已有该orderLinkId的订单
   try {
@@ -3743,17 +3801,20 @@ function placeOrder(grid) {
       throw new Error('Invalid symbol: ' + CONFIG.symbol);
     }
 
-    // P0修复：添加reduceOnly字段（neutral只减仓，short允许开空）
+    // 【方案A修复】添加reduceOnly字段
+    // neutral: 无偏好 — 网格双向挂单，所有成交都影响真实仓位，不限制
+    // short: 允许开空(Sell)，Buy是回补
+    // long: 允许开多(Buy)，Sell是止盈
     let reduceOnly = false;
-    if (CONFIG.direction === 'neutral') {
-      // neutral策略：只减仓，不开新仓
-      reduceOnly = true;
-    } else if (CONFIG.direction === 'short' && grid.side === 'Sell') {
+    if (CONFIG.lean === 'neutral') {
+      // 【方案A】neutral策略：无偏好，允许开仓
+      reduceOnly = false;
+    } else if (CONFIG.lean === 'negative' && grid.side === 'Sell') {
       // short策略开空仓：允许
       reduceOnly = false;
-    } else if (CONFIG.direction === 'short' && grid.side === 'Buy') {
+    } else if (CONFIG.lean === 'negative' && grid.side === 'Buy') {
       // short策略回补：通常是平仓，但也能是开多（根据设计决定）
-      // 目前保持false允许操作，如果需要严格只做空可设为true
+      // 目前保持false允许操作，如果需要严格做空敞口可设为true
       reduceOnly = false;
     }
 

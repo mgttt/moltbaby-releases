@@ -18,3 +18,4 @@ export * from './StateMigrationEngine';
 export * from './AlertManager';
 export * from './StrategyReloader';
 export * from './ModuleReloader';
+export * from './StrategyRegistry';

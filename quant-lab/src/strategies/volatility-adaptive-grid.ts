@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/strategies/volatility-adaptive-grid.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('volatility-adaptive-grid');
+
 import type { Kline } from '../../../quant-lib/src';
 
 // ============ 类型定义 ============
@@ -244,7 +247,7 @@ export class VolatilityAdaptiveGridManager {
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 }
 

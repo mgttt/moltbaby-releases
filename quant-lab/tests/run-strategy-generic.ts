@@ -48,19 +48,19 @@ const logger = createLogger('RUN_STRATEGY_GENERIC');
  * 
  * 示例:
  *   # Paper Trade（默认）
- *   bun tests/run-strategy-generic.ts ./strategies/gales-simple.js
+ *   bun tests/run-strategy-generic.ts ./strategies/grid/gales-simple.js
  *   
  *   # 实盘模式
- *   DRY_RUN=false bun tests/run-strategy-generic.ts ./strategies/gales-simple.js --live
+ *   DRY_RUN=false bun tests/run-strategy-generic.ts ./strategies/grid/gales-simple.js --live
  *   
  *   # Demo Trading 模式
- *   bun tests/run-strategy-generic.ts ./strategies/gales-simple.js --demo '{"symbol":"MYXUSDT"}'
+ *   bun tests/run-strategy-generic.ts ./strategies/grid/gales-simple.js --demo '{"symbol":"MYXUSDT"}'
  *   
  *   # 自定义参数
- *   bun tests/run-strategy-generic.ts ./strategies/gales-simple.js --live '{"gridCount":10}' bybit wjcgm@bbt-sub1
+ *   bun tests/run-strategy-generic.ts ./strategies/grid/gales-simple.js --live '{"gridCount":10}' bybit wjcgm@bbt-sub1
  */
 
-import { QuickJSStrategy } from '../src/sandbox/QuickJSStrategy';
+import { QuickJSStrategy } from '../legacy/QuickJSStrategy';
 import { BybitProvider } from '../src/providers/bybit.js';
 import { BybitStrategyContext } from '../src/contexts/BybitStrategyContext';
 import { existsSync } from 'fs';

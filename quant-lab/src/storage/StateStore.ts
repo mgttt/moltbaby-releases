@@ -155,7 +155,7 @@ export class StateStore {
       try {
         // 依赖OS缓冲区，必要时可fsync
       } catch (e) {
-        console.error(`[StateStore] flush失败: ${path}`, e);
+        logger.error(`[StateStore] flush失败: ${path}`, e);
       }
     }
   }
@@ -169,7 +169,7 @@ export class StateStore {
       try {
         await (writer as any).close?.();
       } catch (e) {
-        console.error(`[StateStore] close失败: ${path}`, e);
+        logger.error(`[StateStore] close失败: ${path}`, e);
       }
     }
     this.writers.clear();

@@ -4,6 +4,9 @@
  * 测试 LeverageLimiter + PositionReducer 的协同工作
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('position-risk-manager.test');
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   PositionRiskManager,

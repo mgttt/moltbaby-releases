@@ -8,6 +8,9 @@
  * 4. 状态一致性检查
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('OrderStateManager');
+
 export type OrderStateEnum = 
   | 'OUTSIDE_MAGNET'   // 磁性外未提交
   | 'SUBMITTING'       // 尝试提交
@@ -72,7 +75,7 @@ export class OrderStateManager {
       this.checkAbnormalOrders();
     }, intervalMs);
     
-    console.log(`[OrderStateManager] 异常检测已启动，间隔 ${intervalMs}ms`);
+    logger.info(`[OrderStateManager] 异常检测已启动，间隔 ${intervalMs}ms`);
   }
 
   /**
@@ -82,7 +85,7 @@ export class OrderStateManager {
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = undefined;
-      console.log('[OrderStateManager] 异常检测已停止');
+      logger.info('[OrderStateManager] 异常检测已停止');
     }
   }
 
@@ -100,7 +103,7 @@ export class OrderStateManager {
     this.orders.set(order.orderLinkId, fullOrder);
     this.stats.totalOrders++;
     
-    console.log(`[OrderStateManager] 订单注册: ${order.orderLinkId} [${order.state}]`);
+    logger.info(`[OrderStateManager] 订单注册: ${order.orderLinkId} [${order.state}]`);
     return fullOrder;
   }
 
@@ -110,7 +113,7 @@ export class OrderStateManager {
   updateState(orderLinkId: string, newState: OrderStateEnum, updates?: Partial<OrderState>): boolean {
     const order = this.orders.get(orderLinkId);
     if (!order) {
-      console.warn(`[OrderStateManager] 订单不存在: ${orderLinkId}`);
+      logger.warn(`[OrderStateManager] 订单不存在: ${orderLinkId}`);
       return false;
     }
     
@@ -133,7 +136,7 @@ export class OrderStateManager {
       order.timeoutWarningSent = false;
     }
     
-    console.log(`[OrderStateManager] 状态更新: ${orderLinkId} [${oldState} -> ${newState}]`);
+    logger.info(`[OrderStateManager] 状态更新: ${orderLinkId} [${oldState} -> ${newState}]`);
     return true;
   }
 
@@ -143,7 +146,7 @@ export class OrderStateManager {
   updateStateByOrderId(orderId: string, newState: OrderStateEnum, updates?: Partial<OrderState>): boolean {
     const orderLinkId = this.orderIdToLinkId.get(orderId);
     if (!orderLinkId) {
-      console.warn(`[OrderStateManager] orderId未找到映射: ${orderId}`);
+      logger.warn(`[OrderStateManager] orderId未找到映射: ${orderId}`);
       return false;
     }
     return this.updateState(orderLinkId, newState, updates);
@@ -155,13 +158,13 @@ export class OrderStateManager {
   setOrderId(orderLinkId: string, orderId: string): boolean {
     const order = this.orders.get(orderLinkId);
     if (!order) {
-      console.warn(`[OrderStateManager] 订单不存在: ${orderLinkId}`);
+      logger.warn(`[OrderStateManager] 订单不存在: ${orderLinkId}`);
       return false;
     }
     
     order.orderId = orderId;
     this.orderIdToLinkId.set(orderId, orderLinkId);
-    console.log(`[OrderStateManager] orderId映射: ${orderId} -> ${orderLinkId}`);
+    logger.info(`[OrderStateManager] orderId映射: ${orderId} -> ${orderLinkId}`);
     return true;
   }
 
@@ -246,7 +249,7 @@ export class OrderStateManager {
     }
     
     if (abnormalCount > 0) {
-      console.log(`[OrderStateManager] 检测完成: ${checkedCount} 个订单, ${abnormalCount} 个异常`);
+      logger.info(`[OrderStateManager] 检测完成: ${checkedCount} 个订单, ${abnormalCount} 个异常`);
     }
   }
 
@@ -313,15 +316,15 @@ export class OrderStateManager {
     const duration = Date.now() - order.createdAt;
     
     // 打印日志
-    console.error(`[OrderStateManager] [ABNORMAL] 异常单检测: ${order.orderLinkId}`);
-    console.error(`  原因: ${reason}`);
-    console.error(`  状态: ${oldState} -> ABNORMAL`);
-    console.error(`  策略: ${order.strategyId}`);
-    console.error(`  产品: ${order.product}`);
-    console.error(`  方向: ${order.side}`);
-    console.error(`  持续时间: ${(duration / 1000).toFixed(1)}s`);
+    logger.error(`[OrderStateManager] [ABNORMAL] 异常单检测: ${order.orderLinkId}`);
+    logger.error(`  原因: ${reason}`);
+    logger.error(`  状态: ${oldState} -> ABNORMAL`);
+    logger.error(`  策略: ${order.strategyId}`);
+    logger.error(`  产品: ${order.product}`);
+    logger.error(`  方向: ${order.side}`);
+    logger.error(`  持续时间: ${(duration / 1000).toFixed(1)}s`);
     if (details) {
-      console.error(`  详情:`, details);
+      logger.error(`  详情:`, details);
     }
     
     // 发送告警
@@ -341,11 +344,11 @@ export class OrderStateManager {
    * 发送超时警告
    */
   private sendTimeoutWarning(order: OrderState, reason: string, elapsed: number) {
-    console.warn(`[OrderStateManager] [WARNING] 订单超时警告: ${order.orderLinkId}`);
-    console.warn(`  原因: ${reason}`);
-    console.warn(`  策略: ${order.strategyId}`);
-    console.warn(`  已挂单: ${(elapsed / 1000).toFixed(1)}s`);
-    console.warn(`  成交: ${order.filledQty}/${order.qty}`);
+    logger.warn(`[OrderStateManager] [WARNING] 订单超时警告: ${order.orderLinkId}`);
+    logger.warn(`  原因: ${reason}`);
+    logger.warn(`  策略: ${order.strategyId}`);
+    logger.warn(`  已挂单: ${(elapsed / 1000).toFixed(1)}s`);
+    logger.warn(`  成交: ${order.filledQty}/${order.qty}`);
   }
 
   /**
@@ -357,7 +360,7 @@ export class OrderStateManager {
       try {
         callback(alert);
       } catch (error) {
-        console.error('[OrderStateManager] 告警回调失败:', error);
+        logger.error('[OrderStateManager] 告警回调失败:', error);
       }
     }
     
@@ -369,35 +372,12 @@ export class OrderStateManager {
    * 发送Telegram告警
    */
   private sendTelegramAlert(alert: AbnormalOrderAlert) {
-    // 2026-02-23 分级告警：STRATEGY_ALERT_LEVEL控制 (CRITICAL/WARNING/ALL/NONE)
-    // 向后兼容：STRATEGY_TG_ENABLED=1 等价于 ALL
-    const alertLevel = process.env.STRATEGY_TG_ENABLED === '1' ? 'ALL' : (process.env.STRATEGY_ALERT_LEVEL || 'CRITICAL');
-
-    // NONE: 全部禁用
-    if (alertLevel === 'NONE') {
-      return;
-    }
-
-    const message = `[异常单] ${alert.product} ${alert.strategyId}\n` +
-                    `订单: ${alert.orderLinkId}\n` +
-                    `原因: ${alert.reason}\n` +
-                    `原状态: ${alert.oldState}\n` +
-                    `持续时间: ${(alert.duration / 1000).toFixed(1)}s`;
-
-    // CRITICAL: 只放行[告急]标签（异常单不算告急，降级处理）
-    if (alertLevel === 'CRITICAL') {
-      console.warn(`[OrderStateManager][降级] ${message.replace(/\n/g, ' ')}`);
-      return;
-    }
-
-    // 通过过滤→执行tg-cli发送
-    try {
-      const { execSync } = require('child_process');
-      const cmd = `/usr/local/bin/tg send! bot-001 9号 "${message.replace(/"/g, '\\"')}"`;
-      execSync(cmd, { stdio: 'ignore' });
-    } catch (error) {
-      console.warn('[OrderStateManager] Telegram告警发送失败');
-    }
+    // 2026-02-23 总裁指令：严禁策略系统直接调用tg-cli发信息
+    // 告警仅记录到日志，不发tg消息
+    const message = `[异常单] ${alert.product} ${alert.strategyId} | ` +
+                    `订单: ${alert.orderLinkId} | 原因: ${alert.reason} | ` +
+                    `原状态: ${alert.oldState} | 持续: ${(alert.duration / 1000).toFixed(1)}s`;
+    logger.warn(`[OrderStateManager][仅日志] ${message}`);
   }
 
   /**
@@ -448,9 +428,9 @@ export class OrderStateManager {
         timeSinceUpdate,
       });
     } else {
-      console.warn(`[OrderStateManager] 状态不一致(观察中): ${orderLinkId}`);
-      console.warn(`  策略: ${order.state}, 交易所: ${exchangeStatus}`);
-      console.warn(`  等待 ${((threshold - timeSinceUpdate) / 1000).toFixed(0)}s 后检查`);
+      logger.warn(`[OrderStateManager] 状态不一致(观察中): ${orderLinkId}`);
+      logger.warn(`  策略: ${order.state}, 交易所: ${exchangeStatus}`);
+      logger.warn(`  等待 ${((threshold - timeSinceUpdate) / 1000).toFixed(0)}s 后检查`);
     }
   }
 
@@ -479,7 +459,7 @@ export class OrderStateManager {
       for (const order of toDelete) {
         this.orders.delete(order.orderLinkId);
       }
-      console.log(`[OrderStateManager] 清理完成: 删除 ${toDelete.length} 个历史订单`);
+      logger.info(`[OrderStateManager] 清理完成: 删除 ${toDelete.length} 个历史订单`);
     }
   }
 }

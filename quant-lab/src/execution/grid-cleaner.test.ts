@@ -9,6 +9,9 @@
  * 位置：quant-lab/src/execution/grid-cleaner.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('grid-cleaner.test');
+
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { GridCleaner, GridOrder } from "./grid-cleaner";
 

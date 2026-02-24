@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/execution/order-recovery.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('order-recovery.test');
+
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { OrderRecoveryManager, PendingOrder } from "./order-recovery";
 import { existsSync, rmSync, mkdirSync } from "fs";
@@ -235,15 +238,15 @@ describe("未完成订单补偿机制 - 验收测试", () => {
         status: "PENDING",
       });
 
-      console.log("✅ 订单已添加");
+      logger.info("✅ 订单已添加");
 
       // 2. 恢复订单
       const result = await manager.recoverOrders();
-      console.log(`✅ 订单恢复完成: ${result.recovered}/${result.total}`);
+      logger.info(`✅ 订单恢复完成: ${result.recovered}/${result.total}`);
 
       // 3. 清理已完成订单
       const cleaned = manager.cleanupCompletedOrders(0);
-      console.log(`✅ 清理已完成订单: ${cleaned} 个`);
+      logger.info(`✅ 清理已完成订单: ${cleaned} 个`);
 
       // 验证：流程完成
       expect(result.total).toBeGreaterThanOrEqual(1);

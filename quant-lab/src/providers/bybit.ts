@@ -34,6 +34,97 @@ export interface BybitProviderConfig {
 }
 
 /**
+ * Bybit API 类型定义
+ */
+
+// WebSocket 消息基础类型
+interface BybitWSMessage {
+  topic?: string;
+  type?: string;
+  ts?: number;
+  data?: unknown;
+  op?: string;
+  success?: boolean;
+  ret_msg?: string;
+  conn_id?: string;
+}
+
+// 成交数据
+interface BybitExecution {
+  execId: string;
+  orderId: string;
+  orderLinkId: string;
+  symbol: string;
+  side: string;
+  execPrice: string;
+  execQty: string;
+  execTime: string;
+  execType: string;
+  execValue: string;
+  feeRate: string;
+  fee: string;
+  isMaker: boolean;
+}
+
+// REST API 成交响应
+interface BybitExecutionResponse {
+  list: BybitExecutionItem[];
+}
+
+interface BybitExecutionItem {
+  execId: string;
+  orderId: string;
+  orderLinkId: string;
+  symbol: string;
+  side: string;
+  execPrice: string;
+  execQty: string;
+  execTime: string;
+}
+
+// 账户资产
+interface BybitAccountCoin {
+  coin: string;
+  walletBalance: string;
+  availableToWithdraw: string;
+  unrealisedPnl: string;
+}
+
+interface BybitAccountInfo {
+  coin?: BybitAccountCoin[];
+}
+
+// 持仓数据
+interface BybitPositionData {
+  symbol: string;
+  side: string;
+  size: string;
+  entryPrice: string;
+  markPrice: string;
+  unrealisedPnl: string;
+  leverage: string;
+  positionValue: string;
+  positionIdx: number;
+}
+
+// 订单数据
+interface BybitOrderData {
+  orderId: string;
+  orderLinkId: string;
+  symbol: string;
+  side: string;
+  orderType: string;
+  price: string;
+  qty: string;
+  cumExecQty: string;
+  cumExecValue: string;
+  avgPrice: string;
+  status: string;
+  createdTime: string;
+  updatedTime: string;
+}
+
+/**
  * Bybit K线响应
  */
 interface BybitKlineData {
@@ -68,7 +159,7 @@ export class BybitProvider implements TradingProvider {
   private wsPrivate?: WebSocket;  // [P1] 私有WebSocket连接（execution等）
   private klineCallbacks: Map<string, (bar: Kline) => void> = new Map();
   private tickCallbacks: Map<string, (tick: Tick) => void> = new Map();
-  private executionCallback?: (execution: any) => void;  // [P1] execution回调
+  private executionCallback?: (execution: BybitExecution) => void;  // [P1] execution回调
   private reconnectTimer?: NodeJS.Timeout;
   private reconnectTimerPrivate?: NodeJS.Timeout;  // [P2] private WS重连计时器
   private heartbeatTimer?: NodeJS.Timeout;
@@ -266,7 +357,7 @@ export class BybitProvider implements TradingProvider {
   /**
    * 处理 WebSocket 消息
    */
-  private handleMessage(data: any): void {
+  private handleMessage(data: BybitWSMessage): void {
     // 响应 Ping
     if (data.op === 'ping') {
       this.ws?.send(JSON.stringify({ op: 'pong' }));
@@ -361,7 +452,7 @@ export class BybitProvider implements TradingProvider {
    * [P1] 订阅 execution WebSocket (私有流)
    * 用于实时接收成交事件
    */
-  async subscribeExecutions(callback: (execution: any) => void): Promise<void> {
+  async subscribeExecutions(callback: (execution: BybitExecution) => void): Promise<void> {
     this.executionCallback = callback;
     await this.connectPrivateWebSocket();
   }
@@ -507,7 +598,7 @@ export class BybitProvider implements TradingProvider {
   /**
    * [P2] 获取成交记录
    */
-  private async getExecutions(since: number): Promise<any[]> {
+  private async getExecutions(since: number): Promise<BybitExecutionItem[]> {
     try {
       const result = await this.request('GET', '/v5/execution/list', {
         category: this.category,
@@ -516,7 +607,7 @@ export class BybitProvider implements TradingProvider {
 
       if (result?.list) {
         // 过滤出指定时间之后的成交
-        return result.list.filter((exec: any) => {
+        return (result.list as BybitExecutionItem[]).filter((exec) => {
           const execTime = parseInt(exec.execTime || '0');
           return execTime >= since;
         });
@@ -553,7 +644,7 @@ export class BybitProvider implements TradingProvider {
   /**
    * [P1] 处理私有 WebSocket 消息
    */
-  private handlePrivateMessage(data: any): void {
+  private handlePrivateMessage(data: BybitWSMessage): void {
     // 认证响应
     if (data.op === 'auth') {
       if (data.success === true) {
@@ -643,12 +734,13 @@ export class BybitProvider implements TradingProvider {
     logger.info(`[BybitProvider] [P0 DEBUG] buy() params:`, params);
     logger.info(`[BybitProvider] 下单请求: Buy ${quantity} ${symbol} @ ${price || 'Market'}`);
 
-    let result: any;
+    let result: Record<string, unknown> | undefined;
     try {
       result = await this.request('POST', '/v5/order/create', params);
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as Error;
       // P0修复：110072幂等成功处理（OrderLinkedID is duplicate）
-      if (error.message?.includes('110072') || error.message?.includes('OrderLinkedID is duplicate')) {
+      if (err.message?.includes('110072') || err.message?.includes('OrderLinkedID is duplicate')) {
         if (params.orderLinkId) {
           logger.info(`[BybitProvider] 110072幂等处理：查询订单 orderLinkId=${params.orderLinkId}`);
           const existingOrder = await this.getOrderByLinkId(params.orderLinkId);
@@ -658,7 +750,7 @@ export class BybitProvider implements TradingProvider {
           }
         }
       }
-      logger.error(`[BybitProvider] 下单失败: ${error.message}`);
+      logger.error(`[BybitProvider] 下单失败: ${err.message}`);
       throw error;
     }
 
@@ -718,12 +810,13 @@ export class BybitProvider implements TradingProvider {
     logger.info(`[BybitProvider] [P0 DEBUG] sell() params:`, params);
     logger.info(`[BybitProvider] 下单请求: Sell ${quantity} ${symbol} @ ${price || 'Market'}`);
 
-    let result: any;
+    let result: Record<string, unknown> | undefined;
     try {
       result = await this.request('POST', '/v5/order/create', params);
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as Error;
       // P0修复：110072幂等成功处理（OrderLinkedID is duplicate）
-      if (error.message?.includes('110072') || error.message?.includes('OrderLinkedID is duplicate')) {
+      if (err.message?.includes('110072') || err.message?.includes('OrderLinkedID is duplicate')) {
         if (params.orderLinkId) {
           logger.info(`[BybitProvider] 110072幂等处理：查询订单 orderLinkId=${params.orderLinkId}`);
           const existingOrder = await this.getOrderByLinkId(params.orderLinkId);
@@ -733,7 +826,7 @@ export class BybitProvider implements TradingProvider {
           }
         }
       }
-      logger.error(`[BybitProvider] 下单失败: ${error.message}`);
+      logger.error(`[BybitProvider] 下单失败: ${err.message}`);
       throw error;
     }
 
@@ -798,15 +891,16 @@ export class BybitProvider implements TradingProvider {
     try {
       await this.request('POST', '/v5/order/cancel', params);
       logger.info(`[BybitProvider] 撤单成功: ${orderId}`);
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as Error;
       // 正常竞态：订单在撤单前已成交/过期/不存在
-      if (error.message && error.message.includes('order not exists or too late to cancel')) {
-        logger.info(`[BybitProvider] 撤单已完成（订单已不存在）: ${orderId} - ${error.message}`);
+      if (err.message && err.message.includes('order not exists or too late to cancel')) {
+        logger.info(`[BybitProvider] 撤单已完成（订单已不存在）: ${orderId} - ${err.message}`);
         return;  // 不抛出异常，视为成功
       }
 
       // 其他真正的撤单错误：继续抛出
-      logger.error(`[BybitProvider] 撤单失败: ${orderId} - ${error.message}`);
+      logger.error(`[BybitProvider] 撤单失败: ${orderId} - ${err.message}`);
       throw error;
     }
   }
@@ -832,7 +926,7 @@ export class BybitProvider implements TradingProvider {
       availableMargin = parseFloat(account.totalAvailableBalance) || 0;  // ✅ 使用totalAvailableBalance
 
       // pick USDT walletBalance as a rough available number
-      const coin = account.coin?.find((c: any) => c.coin === 'USDT');
+      const coin = (account.coin as BybitAccountCoin[] | undefined)?.find((c) => c.coin === 'USDT');
       if (coin) {
         balance = parseFloat(coin.walletBalance) || 0;
       }
@@ -880,13 +974,13 @@ export class BybitProvider implements TradingProvider {
 
     // P1 调试：打印完整的 Bybit API 响应（仅前 3 个持仓）
     logger.info('[BybitProvider] getPositions raw response (first 3):');
-    result.result.list.slice(0, 3).forEach((p: any, i: number) => {
+    (result.result.list as BybitPositionData[]).slice(0, 3).forEach((p, i) => {
       logger.info(`  [${i}] symbol=${p.symbol}, side=${p.side}, size=${p.size}, positionValue=${p.positionValue}`);
     });
 
-    return result.result.list
-      .filter((p: any) => parseFloat(p.size) > 0)
-      .map((p: any) => this.parsePosition(p));
+    return (result.result.list as BybitPositionData[])
+      .filter((p) => parseFloat(p.size) > 0)
+      .map((p) => this.parsePosition(p));
   }
 
   /**
@@ -986,8 +1080,9 @@ export class BybitProvider implements TradingProvider {
 
       // 返回第一个匹配订单
       return this.parseOrder(orders[0]);
-    } catch (error: any) {
-      logger.error(`[BybitProvider] 查询订单失败（orderLinkId=${orderLinkId}）: ${error.message}`);
+    } catch (error) {
+      const err = error as Error;
+      logger.error(`[BybitProvider] 查询订单失败（orderLinkId=${orderLinkId}）: ${err.message}`);
       return null;
     }
   }
@@ -999,20 +1094,21 @@ export class BybitProvider implements TradingProvider {
     symbol?: string,
     category: 'spot' | 'linear' | 'inverse' = 'linear',
     limit: number = 50
-  ): Promise<any[]> {
+  ): Promise<BybitOrderData[]> {
     try {
-      const params: Record<string, any> = {
+      const params: Record<string, unknown> = {
         category,
         limit,
       };
       if (symbol) params.symbol = symbol;
 
       const result = await this.request('GET', '/v5/order/realtime', params);
-      const list = result.result?.list || [];
+      const list = (result.result?.list as BybitOrderData[]) || [];
       logger.info(`[BybitProvider] getOpenOrders: ${list.length} 个未完成订单`);
       return list;
-    } catch (error: any) {
-      logger.error(`[BybitProvider] getOpenOrders failed: ${error.message}`);
+    } catch (error) {
+      const err = error as Error;
+      logger.error(`[BybitProvider] getOpenOrders failed: ${err.message}`);
       return [];
     }
   }
@@ -1025,9 +1121,9 @@ export class BybitProvider implements TradingProvider {
     category: 'spot' | 'linear' | 'inverse' = 'linear',
     limit: number = 50,
     startTime?: number
-  ): Promise<any[]> {
+  ): Promise<BybitExecutionItem[]> {
     try {
-      const params: Record<string, any> = {
+      const params: Record<string, unknown> = {
         category,
         limit,
       };
@@ -1035,11 +1131,12 @@ export class BybitProvider implements TradingProvider {
       if (startTime) params.startTime = startTime;
 
       const result = await this.request('GET', '/v5/execution/list', params);
-      const list = result.result?.list || [];
+      const list = (result.result?.list as BybitExecutionItem[]) || [];
       logger.info(`[BybitProvider] getExecutions: ${list.length} 个成交记录`);
       return list;
-    } catch (error: any) {
-      logger.error(`[BybitProvider] getExecutions failed: ${error.message}`);
+    } catch (error) {
+      const err = error as Error;
+      logger.error(`[BybitProvider] getExecutions failed: ${err.message}`);
       return [];
     }
   }
@@ -1050,8 +1147,8 @@ export class BybitProvider implements TradingProvider {
   private async request(
     method: string,
     endpoint: string,
-    params: Record<string, any>
-  ): Promise<any> {
+    params: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
     const timestamp = Date.now().toString();
     const recvWindow = '5000';
 
@@ -1110,7 +1207,7 @@ export class BybitProvider implements TradingProvider {
     url: string,
     body: string | undefined,
     headers: Record<string, string>
-  ): any {
+  ): unknown {
     const args: string[] = [
       '-sS',
       '-X', method,
@@ -1313,7 +1410,7 @@ export class BybitProvider implements TradingProvider {
   /**
    * 解析订单响应
    */
-  private parseOrder(data: any): Order {
+  private parseOrder(data: BybitOrderData): Order {
     if (!data || !data.symbol) {
       logger.warn('[BybitProvider] parseOrder: invalid data', data);
       throw new Error('Invalid order data: missing symbol');
@@ -1399,7 +1496,7 @@ export class BybitProvider implements TradingProvider {
    * - markPrice: 标记价格（用作 currentPrice）
    * - unrealisedPnl: 未实现盈亏
    */
-  private parsePosition(data: any): Position {
+  private parsePosition(data: BybitPositionData): Position {
     // P0 修复：添加 currentPrice 字段（使用 markPrice）
     const currentPrice = parseFloat(data.markPrice) || 0;
     const size = parseFloat(data.size);

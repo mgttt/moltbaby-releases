@@ -8,6 +8,9 @@
  * - 告警触发
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('strategy-health.test');
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   StrategyHealthStateMachine,

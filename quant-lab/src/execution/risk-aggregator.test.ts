@@ -7,6 +7,9 @@
  * - 边界条件: 超限/警告/并发
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('risk-aggregator.test');
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   GlobalRiskAggregator,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createLogger } from '../utils/logger';
+import { createLogger } from './utils/logger';
 const logger = createLogger('CLI');
 /**
  * Quant-Lab CLI - 策略实验室命令行工具
@@ -283,7 +283,7 @@ async function cmdRun(args: string[]): Promise<void> {
   // TODO: 实际执行策略
   
   // 模拟执行
-  const { runStrategy } = await import('./run-strategy');
+  const { runStrategy } = await import('../scripts/run-strategy');
   await runStrategy(strategyId);
 }
 

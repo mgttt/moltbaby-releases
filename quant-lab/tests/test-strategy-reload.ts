@@ -8,7 +8,7 @@
  * - 状态连续性（runId保留）
  */
 
-import { QuickJSStrategy } from '../src/sandbox/QuickJSStrategy';
+import { QuickJSStrategy } from '../legacy/QuickJSStrategy';
 import type { StrategyContext } from '../src/engine/types';
 
 async function main() {
@@ -17,7 +17,7 @@ async function main() {
   // 1. 创建策略实例
   const strategy = new QuickJSStrategy({
     strategyId: 'test-reload-123',
-    strategyFile: './strategies/gales-simple.js',
+    strategyFile: './strategies/grid/gales-simple.js',
     params: { symbol: 'MYXUSDT', direction: 'neutral' },
   });
 

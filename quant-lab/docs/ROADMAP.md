@@ -248,6 +248,15 @@
 - 实现：新增st_prepareIndicators(klinesJson)，框架在每次心跳前调用，结果缓存到tickCache
 - 价值：指标计算逻辑与交易逻辑解耦，更清晰
 
+**P3: 策略实例UUID + displayName**
+- 当前：策略用硬编码名（如gales-short）作为唯一标识，改名需要停服务+改systemd+改监控
+- 设计：每个策略实例分配UUID作为内部标识，displayName作为人读标签
+  - UUID：系统层使用（systemd service名、日志文件、状态持久化路径、orderLinkId前缀）
+  - displayName：展示层使用（监控面板、告警消息、CLI列表、日报）
+  - 改名 = 只改displayName，零停机零风险
+- 实现：策略注册时自动生成UUID，配置文件增加displayName字段
+- 迁移：现有策略自动以当前名作为UUID和displayName（向后兼容）
+
 **P3: Alpha/Execution分层架构（QuantConnect）**
 - QuantConnect：Alpha Model生成信号 → Portfolio Construction → Execution Model执行
 - 对我们：策略JS = Alpha Model；框架TS = Execution Model；Bridge = 信号传递层

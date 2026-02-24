@@ -126,7 +126,7 @@ async function main() {
 
   // 5. 加载策略代码
   console.log('\n[5] 加载策略代码...');
-  const code = readFileSync('./strategies/gales-simple.js', 'utf-8');
+  const code = readFileSync('./strategies/grid/gales-simple.js', 'utf-8');
   const result = ctx.evalCode(code, 'gales-simple.js');
 
   if (result.error) {

@@ -80,7 +80,7 @@ export class BinanceProvider implements TradingProvider {
 
     if (config.proxy) {
       this.proxyAgent = new ProxyAgent(config.proxy);
-      console.log(`[BinanceProvider] 使用代理: ${config.proxy}`);
+      logger.info(`[BinanceProvider] 使用代理: ${config.proxy}`);
     }
   }
   
@@ -132,12 +132,12 @@ export class BinanceProvider implements TradingProvider {
     
     try {
       const wsUrl = `${this.wsUrl}/${streams.join('/')}`;
-      console.log(`[BinanceProvider] 连接 WebSocket: ${wsUrl}`);
+      logger.info(`[BinanceProvider] 连接 WebSocket: ${wsUrl}`);
       
       this.ws = new WebSocket(wsUrl);
       
       this.ws.onopen = () => {
-        console.log(`[BinanceProvider] WebSocket 已连接`);
+        logger.info(`[BinanceProvider] WebSocket 已连接`);
         this.isConnecting = false;
         this.startHeartbeat();
       };
@@ -147,23 +147,23 @@ export class BinanceProvider implements TradingProvider {
           const data = JSON.parse(event.data as string);
           this.handleMessage(data);
         } catch (error) {
-          console.error(`[BinanceProvider] 解析消息失败:`, error);
+          logger.error(`[BinanceProvider] 解析消息失败:`, error);
         }
       };
       
       this.ws.onerror = (error) => {
-        console.error(`[BinanceProvider] WebSocket 错误:`, error);
+        logger.error(`[BinanceProvider] WebSocket 错误:`, error);
         this.isConnecting = false;
       };
       
       this.ws.onclose = () => {
-        console.log(`[BinanceProvider] WebSocket 已断开，5秒后重连...`);
+        logger.info(`[BinanceProvider] WebSocket 已断开，5秒后重连...`);
         this.isConnecting = false;
         this.stopHeartbeat();
         this.scheduleReconnect(streams);
       };
     } catch (error) {
-      console.error(`[BinanceProvider] 连接失败:`, error);
+      logger.error(`[BinanceProvider] 连接失败:`, error);
       this.isConnecting = false;
       this.scheduleReconnect(streams);
     }

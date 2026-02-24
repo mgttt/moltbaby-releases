@@ -70,7 +70,7 @@ bun tools/strategy-cli.ts start ./strategies/gales-asymmetric.js \
     "gridSpacingDown": 0.04,
     "orderSizeUp": 50,
     "orderSizeDown": 100,
-    "direction": "short",
+    "lean": "negative",
     "simMode": false
   }'
 ```

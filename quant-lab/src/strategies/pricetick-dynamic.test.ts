@@ -4,6 +4,9 @@
  * 验证GalesStrategy正确从config或交易所获取priceTick
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('pricetick-dynamic.test');
+
 import { describe, it, expect, beforeEach } from 'bun:test';
 import { GalesStrategy, GalesConfig } from './GalesStrategy';
 import { StrategyContext } from '../engine/types';
@@ -68,7 +71,7 @@ describe('GalesStrategy priceTick动态获取', () => {
       await strategy.onInit(mockContext);
 
       expect(strategy.symbolInfo?.priceTick).toBe(expectedPriceTick);
-      console.log(`✓ ${symbol}: priceTick=${strategy.symbolInfo?.priceTick}`);
+      logger.info(`✓ ${symbol}: priceTick=${strategy.symbolInfo?.priceTick}`);
     }
   });
 
@@ -154,6 +157,6 @@ describe('GalesStrategy priceTick动态获取', () => {
     await ethStrategy.onInit(mockContext);
     expect(ethStrategy.symbolInfo?.priceTick).toBe(0.01);
 
-    console.log('✓ BTC策略priceTick=0.1, ETH策略priceTick=0.01');
+    logger.info('✓ BTC策略priceTick=0.1, ETH策略priceTick=0.01');
   });
 });

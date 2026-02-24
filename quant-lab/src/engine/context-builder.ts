@@ -1,4 +1,7 @@
 import type { QuickJSContext } from 'quickjs-emscripten';
+
+import { env } from '../config/env';
+
 import type { 
   AccountConfig, 
   BybitAPI, 
@@ -53,7 +56,7 @@ function normalizeBybitAccountConfig(raw: any, accountName: string): AccountConf
 }
 
 export async function loadAccountConfig(accountName: string): Promise<AccountConfig> {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
+  const homeDir = env.HOME;
   const envPath = `${homeDir}/env.jsonl`;
 
   try {
@@ -293,28 +296,67 @@ class BybitAPIWrapper implements ExchangeAPI {
     if (this.config.readonly) {
       throw new Error(`Account ${this.config.name} is read-only`);
     }
-    
-    // TODO: 实现真实下单
-    throw new Error('Real trading not yet implemented in quant-lab');
+
+    const { symbol, side, orderType, qty, price } = params;
+    const orderLinkId = `ctx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    try {
+      let result;
+      if (side === 'Buy') {
+        result = await this.bybit.buy(symbol, qty, price, orderLinkId);
+      } else {
+        result = await this.bybit.sell(symbol, qty, price, orderLinkId);
+      }
+      return {
+        orderId: result.orderId,
+        symbol: result.symbol,
+        side: result.side,
+        orderType: result.orderType,
+        qty: result.qty,
+        price: result.price,
+        status: result.status,
+        createdAt: result.createdAt,
+        orderLinkId,
+      };
+    } catch (error: any) {
+      throw new Error(`Place order failed: ${error.message}`);
+    }
   }
 
   async cancelOrder(orderId: string): Promise<boolean> {
     if (this.config.readonly) {
       throw new Error(`Account ${this.config.name} is read-only`);
     }
-    
-    // TODO: 实现真实撤单
-    throw new Error('Real trading not yet implemented in quant-lab');
+
+    try {
+      await this.bybit.cancelOrder(orderId);
+      return true;
+    } catch (error: any) {
+      return false;
+    }
   }
 
   async getOrder(orderId: string): Promise<any | null> {
-    // TODO: 实现查询订单
-    throw new Error('Not yet implemented');
+    // orderId format: "symbol:id" 或直接使用orderLinkId查询
+    try {
+      // 尝试通过orderLinkId查询
+      const order = await this.bybit.getOrderByLinkId?.(orderId);
+      if (order) return order;
+
+      // 如果找不到，返回null
+      return null;
+    } catch (error: any) {
+      return null;
+    }
   }
 
   async getActiveOrders(symbol?: string): Promise<any[]> {
-    // TODO: 实现查询活跃订单
-    return [];
+    try {
+      const orders = await this.bybit.getOpenOrders?.(symbol);
+      return orders || [];
+    } catch (error: any) {
+      return [];
+    }
   }
 
   async getPosition(symbol: string): Promise<any | null> {
@@ -380,10 +422,10 @@ export class ContextBuilder {
    */
   injectLogger(strategyId: string): void {
     const logger = {
-      info: (message: string) => console.log(`[${strategyId}] INFO: ${message}`),
-      warn: (message: string) => console.warn(`[${strategyId}] WARN: ${message}`),
-      error: (message: string) => console.error(`[${strategyId}] ERROR: ${message}`),
-      debug: (message: string) => console.log(`[${strategyId}] DEBUG: ${message}`)
+      info: (message: string) => logger.info(`[${strategyId}] INFO: ${message}`),
+      warn: (message: string) => logger.warn(`[${strategyId}] WARN: ${message}`),
+      error: (message: string) => logger.error(`[${strategyId}] ERROR: ${message}`),
+      debug: (message: string) => logger.info(`[${strategyId}] DEBUG: ${message}`)
     };
 
     // 注入到 QuickJS

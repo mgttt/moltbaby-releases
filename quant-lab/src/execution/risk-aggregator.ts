@@ -11,6 +11,9 @@
  * 4. 实时风险视图接口
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('risk-aggregator');
+
 import { EventEmitter } from 'events';
 
 // ==================== 类型定义 ====================
@@ -78,10 +81,10 @@ export class GlobalRiskAggregator extends EventEmitter {
       lastUpdated: Date.now(),
     };
 
-    console.log('[GlobalRiskAggregator] 初始化完成');
-    console.log(`  全局杠杆限制: ${config.limits.maxTotalLeverage}x`);
-    console.log(`  全局持仓限制: ${config.limits.maxTotalPositionValue} USDT`);
-    console.log(`  最大策略数量: ${config.limits.maxStrategyCount}`);
+    logger.info('[GlobalRiskAggregator] 初始化完成');
+    logger.info(`  全局杠杆限制: ${config.limits.maxTotalLeverage}x`);
+    logger.info(`  全局持仓限制: ${config.limits.maxTotalPositionValue} USDT`);
+    logger.info(`  最大策略数量: ${config.limits.maxStrategyCount}`);
   }
 
   /**
@@ -90,12 +93,12 @@ export class GlobalRiskAggregator extends EventEmitter {
    * @returns 是否允许启动
    */
   async registerStrategy(snapshot: StrategyRiskSnapshot): Promise<boolean> {
-    console.log(`[GlobalRiskAggregator] 📝 注册策略: ${snapshot.strategyId}`);
+    logger.info(`[GlobalRiskAggregator] 📝 注册策略: ${snapshot.strategyId}`);
 
     // 检查策略数量限制
     if (this.state.strategyCount >= this.config.limits.maxStrategyCount) {
       const reason = `策略数量超限: ${this.state.strategyCount}/${this.config.limits.maxStrategyCount}`;
-      console.error(`[GlobalRiskAggregator] ❌ ${reason}`);
+      logger.error(`[GlobalRiskAggregator] ❌ ${reason}`);
       this.emit('strategy:rejected', { snapshot, reasons: [reason] });
       await this.sendAlert('strategy_count_exceeded', reason);
       return false;
@@ -106,7 +109,7 @@ export class GlobalRiskAggregator extends EventEmitter {
     const checkResult = this.checkLimits(simulatedState);
 
     if (!checkResult.allowed) {
-      console.error(`[GlobalRiskAggregator] ❌ 策略注册被拒绝: ${checkResult.violations.join(', ')}`);
+      logger.error(`[GlobalRiskAggregator] ❌ 策略注册被拒绝: ${checkResult.violations.join(', ')}`);
       await this.sendAlert('registration_rejected', checkResult.violations.join('; '));
       this.emit('strategy:rejected', { snapshot, reasons: checkResult.violations });
       return false;
@@ -116,16 +119,16 @@ export class GlobalRiskAggregator extends EventEmitter {
     this.state.strategies.set(snapshot.strategyId, snapshot);
     this.recalculateTotals();
 
-    console.log(`[GlobalRiskAggregator] ✅ 策略注册成功: ${snapshot.strategyId}`);
-    console.log(`  当前策略数: ${this.state.strategyCount}`);
-    console.log(`  总持仓价值: ${this.state.totalPositionValue.toFixed(2)} USDT`);
-    console.log(`  总杠杆: ${this.state.totalLeverage.toFixed(2)}x`);
+    logger.info(`[GlobalRiskAggregator] ✅ 策略注册成功: ${snapshot.strategyId}`);
+    logger.info(`  当前策略数: ${this.state.strategyCount}`);
+    logger.info(`  总持仓价值: ${this.state.totalPositionValue.toFixed(2)} USDT`);
+    logger.info(`  总杠杆: ${this.state.totalLeverage.toFixed(2)}x`);
 
     this.emit('strategy:registered', snapshot);
     
     // 检查警告
     if (checkResult.warnings.length > 0) {
-      console.warn(`[GlobalRiskAggregator] ⚠️ 警告: ${checkResult.warnings.join(', ')}`);
+      logger.warn(`[GlobalRiskAggregator] ⚠️ 警告: ${checkResult.warnings.join(', ')}`);
       await this.sendAlert('warning', checkResult.warnings.join('; '));
     }
 
@@ -138,7 +141,7 @@ export class GlobalRiskAggregator extends EventEmitter {
   updateStrategySnapshot(strategyId: string, snapshot: Partial<StrategyRiskSnapshot>): void {
     const existing = this.state.strategies.get(strategyId);
     if (!existing) {
-      console.warn(`[GlobalRiskAggregator] ⚠️ 策略不存在: ${strategyId}`);
+      logger.warn(`[GlobalRiskAggregator] ⚠️ 策略不存在: ${strategyId}`);
       return;
     }
 
@@ -149,8 +152,8 @@ export class GlobalRiskAggregator extends EventEmitter {
     // 检查是否触发限制
     const checkResult = this.checkLimits(this.state);
     if (!checkResult.allowed) {
-      console.error(`[GlobalRiskAggregator] 🚨 全局风险超限!`);
-      console.error(`  违规项: ${checkResult.violations.join(', ')}`);
+      logger.error(`[GlobalRiskAggregator] 🚨 全局风险超限!`);
+      logger.error(`  违规项: ${checkResult.violations.join(', ')}`);
       this.sendAlert('limit_exceeded', checkResult.violations.join('; '));
       this.emit('risk:limit_exceeded', checkResult);
     }
@@ -169,9 +172,9 @@ export class GlobalRiskAggregator extends EventEmitter {
     this.state.strategies.delete(strategyId);
     this.recalculateTotals();
 
-    console.log(`[GlobalRiskAggregator] 🗑️ 策略注销: ${strategyId}`);
-    console.log(`  当前策略数: ${this.state.strategyCount}`);
-    console.log(`  总持仓价值: ${this.state.totalPositionValue.toFixed(2)} USDT`);
+    logger.info(`[GlobalRiskAggregator] 🗑️ 策略注销: ${strategyId}`);
+    logger.info(`  当前策略数: ${this.state.strategyCount}`);
+    logger.info(`  总持仓价值: ${this.state.totalPositionValue.toFixed(2)} USDT`);
 
     this.emit('strategy:unregistered', { strategyId });
   }
@@ -371,7 +374,7 @@ export class GlobalRiskAggregator extends EventEmitter {
       return;
     }
 
-    console.error(`[GlobalRiskAggregator] 🚨 告警[${type}]: ${message}`);
+    logger.error(`[GlobalRiskAggregator] 🚨 告警[${type}]: ${message}`);
 
     try {
       if (this.config.alertConfig.onViolation) {
@@ -384,7 +387,7 @@ export class GlobalRiskAggregator extends EventEmitter {
       }
       this.emit('alert:sent', { type, message });
     } catch (error) {
-      console.error('[GlobalRiskAggregator] ❌ 告警发送失败:', error);
+      logger.error('[GlobalRiskAggregator] ❌ 告警发送失败:', error);
     }
   }
 }

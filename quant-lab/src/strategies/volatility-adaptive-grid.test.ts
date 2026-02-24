@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/strategies/volatility-adaptive-grid.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('volatility-adaptive-grid.test');
+
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { VolatilityAdaptiveGridManager } from "./volatility-adaptive-grid";
 import type { Kline } from '../../../quant-lib/src';
@@ -193,10 +196,10 @@ describe("波动率自适应网格间距 - 验收测试", () => {
         smoothingFactor: 0.3,
       });
 
-      console.log("1. 初始状态");
+      logger.info("1. 初始状态");
       expect(manager.getCurrentGridSpacing()).toBe(0.02);
 
-      console.log("2. 模拟高波动率市场");
+      logger.info("2. 模拟高波动率市场");
       const highVolatilityPrices = [
         100, 110, 95, 115, 90, 120, 85, 125, 80, 130, 75, 135, 70, 140, 65, 145, 60, 150, 55, 155
       ];
@@ -206,11 +209,11 @@ describe("波动率自适应网格间距 - 验收测试", () => {
       }
       
       const highVolatilityGridSpacing = manager.getCurrentGridSpacing();
-      console.log(`高波动率网格间距: ${(highVolatilityGridSpacing * 100).toFixed(2)}%`);
+      logger.info(`高波动率网格间距: ${(highVolatilityGridSpacing * 100).toFixed(2)}%`);
       // 验证：高波动率时，网格间距应该调整（可能增大或减小，取决于计算方式）
       expect(highVolatilityGridSpacing).toBeGreaterThan(0); // 只要不是0就算通过
 
-      console.log("3. 模拟低波动率市场");
+      logger.info("3. 模拟低波动率市场");
       manager.reset();
       
       const lowVolatilityPrices = [
@@ -223,15 +226,15 @@ describe("波动率自适应网格间距 - 验收测试", () => {
       }
       
       const lowVolatilityGridSpacing = manager.getCurrentGridSpacing();
-      console.log(`低波动率网格间距: ${(lowVolatilityGridSpacing * 100).toFixed(2)}%`);
+      logger.info(`低波动率网格间距: ${(lowVolatilityGridSpacing * 100).toFixed(2)}%`);
       // 验证：低波动率时，网格间距应该调整
       expect(lowVolatilityGridSpacing).toBeGreaterThan(0); // 只要不是0就算通过
 
-      console.log("4. 验证上下限");
+      logger.info("4. 验证上下限");
       expect(highVolatilityGridSpacing).toBeLessThanOrEqual(0.05); // 不超过上限5%
       expect(lowVolatilityGridSpacing).toBeGreaterThanOrEqual(0.005); // 不低于下限0.5%
 
-      console.log("✅ 完整流程测试通过");
+      logger.info("✅ 完整流程测试通过");
     });
   });
 });

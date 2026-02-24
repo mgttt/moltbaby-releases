@@ -229,7 +229,7 @@ state.lastRecenterAtMs = Date.now() - 11 * 60 * 1000; // 11分钟前
 #### 4.2 手动方向切换
 ```javascript
 // 从short切换为neutral
-CONFIG.direction = 'neutral';
+CONFIG.lean = "neutral";
 
 // 触发应急方向切换
 checkEmergencyDirectionSwitch();

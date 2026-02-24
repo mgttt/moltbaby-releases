@@ -5,6 +5,9 @@
  * 触发条件: 杠杆 > 3.0x 进入降仓流程
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('position-reducer');
+
 import { EventEmitter } from 'events';
 
 // ==================== 类型定义 ====================
@@ -102,10 +105,10 @@ export class PositionReducer extends EventEmitter {
       updatedAt: Date.now(),
     };
 
-    console.log(`[PositionReducer] 初始化 [${this.sessionId}]`);
-    console.log(`  预警阈值: ${this.config.warningLeverage}x`);
-    console.log(`  降仓阈值: ${this.config.reduceLeverage}x`);
-    console.log(`  目标杠杆: ${this.config.targetLeverage}x`);
+    logger.info(`[PositionReducer] 初始化 [${this.sessionId}]`);
+    logger.info(`  预警阈值: ${this.config.warningLeverage}x`);
+    logger.info(`  降仓阈值: ${this.config.reduceLeverage}x`);
+    logger.info(`  目标杠杆: ${this.config.targetLeverage}x`);
   }
 
   // ==================== 公共API ====================
@@ -178,7 +181,7 @@ export class PositionReducer extends EventEmitter {
       return null;
     }
 
-    console.log(`[PositionReducer] 🚨 强制降仓触发: ${reason}`);
+    logger.info(`[PositionReducer] 🚨 强制降仓触发: ${reason}`);
     this.transitionTo(ReducePositionState.REDUCE, `FORCE: ${reason}`);
     return this.executeReduce(this.currentPosition, reason);
   }
@@ -194,7 +197,7 @@ export class PositionReducer extends EventEmitter {
   }): void {
     const action = this.audit.actions.find(a => a.actionId === actionId);
     if (!action) {
-      console.error(`[PositionReducer] ❌ 未找到 action: ${actionId}`);
+      logger.error(`[PositionReducer] ❌ 未找到 action: ${actionId}`);
       return;
     }
 
@@ -206,11 +209,11 @@ export class PositionReducer extends EventEmitter {
     this.reduceInProgress = false;
 
     if (executionResult.executed) {
-      console.log(`[PositionReducer] ✅ 降仓完成: ${actionId}`);
+      logger.info(`[PositionReducer] ✅ 降仓完成: ${actionId}`);
       this.transitionTo(ReducePositionState.RECOVERY, '降仓执行成功');
       this.emit('reduce:completed', action);
     } else {
-      console.error(`[PositionReducer] ❌ 降仓失败: ${executionResult.error}`);
+      logger.error(`[PositionReducer] ❌ 降仓失败: ${executionResult.error}`);
       this.emit('reduce:failed', action, executionResult.error);
     }
 
@@ -221,7 +224,7 @@ export class PositionReducer extends EventEmitter {
    * 重置为IDLE状态（仅用于测试或手动恢复）
    */
   reset(): void {
-    console.log(`[PositionReducer] 🔄 手动重置状态`);
+    logger.info(`[PositionReducer] 🔄 手动重置状态`);
     this.transitionTo(ReducePositionState.IDLE, 'MANUAL_RESET');
     this.reduceInProgress = false;
   }
@@ -313,7 +316,7 @@ export class PositionReducer extends EventEmitter {
     this.audit.updatedAt = Date.now();
 
     const icon = this.getStateIcon(newState);
-    console.log(`[PositionReducer] ${icon} 状态流转: ${oldState} → ${newState} | 触发: ${trigger}`);
+    logger.info(`[PositionReducer] ${icon} 状态流转: ${oldState} → ${newState} | 触发: ${trigger}`);
 
     this.emit('state:changed', transition);
     this.emit(`state:${newState.toLowerCase()}`, transition);
@@ -325,7 +328,7 @@ export class PositionReducer extends EventEmitter {
   private canReduce(): boolean {
     const now = Date.now();
     if (now - this.lastReduceTime < this.config.cooldownMs!) {
-      console.log(`[PositionReducer] ⏳ 降仓冷却中，还需 ${Math.ceil((this.config.cooldownMs! - (now - this.lastReduceTime)) / 1000)}秒`);
+      logger.info(`[PositionReducer] ⏳ 降仓冷却中，还需 ${Math.ceil((this.config.cooldownMs! - (now - this.lastReduceTime)) / 1000)}秒`);
       return false;
     }
     return true;
@@ -357,11 +360,11 @@ export class PositionReducer extends EventEmitter {
     this.audit.actions.push(action);
     this.audit.updatedAt = Date.now();
 
-    console.log(`[PositionReducer] 🎯 生成降仓指令:`);
-    console.log(`  Action ID: ${action.actionId}`);
-    console.log(`  减仓数量: ${action.reduceQty}`);
-    console.log(`  减仓比例: ${(action.reduceRatio * 100).toFixed(2)}%`);
-    console.log(`  预期降仓后杠杆: ${action.expectedLeverageAfter.toFixed(2)}x`);
+    logger.info(`[PositionReducer] 🎯 生成降仓指令:`);
+    logger.info(`  Action ID: ${action.actionId}`);
+    logger.info(`  减仓数量: ${action.reduceQty}`);
+    logger.info(`  减仓比例: ${(action.reduceRatio * 100).toFixed(2)}%`);
+    logger.info(`  预期降仓后杠杆: ${action.expectedLeverageAfter.toFixed(2)}x`);
 
     // 注意：事件由调用方触发，确保状态记录先于事件处理
 
@@ -391,7 +394,7 @@ export class PositionReducer extends EventEmitter {
     // 限制单次最大减仓比例
     const maxReduceQty = positionSize * this.config.maxReduceRatio!;
     if (reduceQty > maxReduceQty) {
-      console.log(`[PositionReducer] ⚠️ 减仓量超限，从 ${reduceQty.toFixed(4)} 调整为 ${maxReduceQty.toFixed(4)}`);
+      logger.info(`[PositionReducer] ⚠️ 减仓量超限，从 ${reduceQty.toFixed(4)} 调整为 ${maxReduceQty.toFixed(4)}`);
       reduceQty = maxReduceQty;
     }
 

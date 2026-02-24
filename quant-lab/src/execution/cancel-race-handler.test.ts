@@ -9,6 +9,9 @@
  * 位置：quant-lab/src/execution/cancel-race-handler.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('cancel-race-handler.test');
+
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { CancelRaceHandler, CancelRequest } from "./cancel-race-handler";
 

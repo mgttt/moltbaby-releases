@@ -15,6 +15,11 @@
  *   1m → 48s | 5m → 240s | 1h → 2880s | 1d → 69120s
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('BarCacheLayer');
+
+import { env } from '../config/env';
+
 import { AppendWriter } from '../../../ndtsdb/src/append.ts';
 import { existsSync, mkdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
@@ -75,8 +80,8 @@ export class BarCacheLayer {
 
   constructor(opts: BarCacheOptions = {}) {
     this.cacheDir = opts.cacheDir ?? join(homedir(), '.wp', 'cache', 'bars');
-    this.disabled = opts.disabled ?? (process.env.DISABLE_BAR_CACHE === '1');
-    this.log = opts.logger ?? ((msg: string) => console.log('[BarCache]', msg));
+    this.disabled = opts.disabled ?? env.DISABLE_BAR_CACHE;
+    this.log = opts.logger ?? ((msg: string) => logger.info('[BarCache]', msg));
   }
 
   private filePath(symbol: string, interval: string): string {

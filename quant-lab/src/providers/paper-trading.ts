@@ -9,6 +9,9 @@
  * - 实时落盘到 ndtsdb（AppendWriter 增量写入）
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('paper-trading');
+
 import { BybitProvider } from './bybit.js';
 import type { 
   CoinBalance, 
@@ -672,7 +675,7 @@ export class PaperTradingProvider {
     // 保存空状态
     await this.saveState();
     
-    console.log(`[PaperTrading] Account ${this.config.accountName} cleared`);
+    logger.info(`[PaperTrading] Account ${this.config.accountName} cleared`);
   }
 
   private executeTrade(order: PaperOrder, price: number, qty: number): PaperTrade {
@@ -942,7 +945,7 @@ export class PaperTradingProvider {
     } catch (error: any) {
       if (error.code === 'ENOENT') {
         // 文件不存在，使用初始状态
-        console.log(`[PaperTrading] Creating new account: ${this.config.accountName}`);
+        logger.info(`[PaperTrading] Creating new account: ${this.config.accountName}`);
         await this.saveState();
       } else {
         throw error;
@@ -958,7 +961,7 @@ export class PaperTradingProvider {
       await writeFile(tmpPath, JSON.stringify(this.state, null, 2), 'utf-8');
       await rename(tmpPath, this.stateFile);
     } catch (error) {
-      console.error('[PaperTrading] Failed to save state:', error);
+      logger.error('[PaperTrading] Failed to save state:', error);
     }
   }
 

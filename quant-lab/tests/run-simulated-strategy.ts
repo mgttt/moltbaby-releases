@@ -419,13 +419,13 @@ function showHelp() {
 
 示例:
   # 使用内置场景
-  bun tests/run-simulated-strategy.ts ./strategies/gales-simple.js --scenario range-then-dump --speed 100
+  bun tests/run-simulated-strategy.ts ./strategies/grid/gales-simple.js --scenario range-then-dump --speed 100
 
   # 使用随机游走
-  bun tests/run-simulated-strategy.ts ./strategies/gales-simple.js --mode random-walk --speed 50
+  bun tests/run-simulated-strategy.ts ./strategies/grid/gales-simple.js --mode random-walk --speed 50
 
   # 正弦波动
-  bun tests/run-simulated-strategy.ts ./strategies/gales-simple.js --mode sine --speed 200
+  bun tests/run-simulated-strategy.ts ./strategies/grid/gales-simple.js --mode sine --speed 200
 `);
 }
 

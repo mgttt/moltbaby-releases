@@ -2,6 +2,9 @@
  * 健康检查 API 单元测试
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('health-api.test');
+
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { HealthAPI, type StrategyStatus } from './health-api';
 

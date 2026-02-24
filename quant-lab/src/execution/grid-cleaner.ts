@@ -10,6 +10,9 @@
  * 时间：4h
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('grid-cleaner');
+
 import { setInterval, clearInterval } from "timers";
 
 // ============ 类型定义 ============
@@ -68,7 +71,7 @@ export class GridCleaner {
    */
   addOrder(order: GridOrder): void {
     this.orders.set(order.orderId, order);
-    console.log(`[GridCleaner] 添加订单: ${order.orderId}, 网格: ${order.gridId}`);
+    logger.info(`[GridCleaner] 添加订单: ${order.orderId}, 网格: ${order.gridId}`);
   }
 
   /**
@@ -76,7 +79,7 @@ export class GridCleaner {
    */
   removeOrder(orderId: string): void {
     this.orders.delete(orderId);
-    console.log(`[GridCleaner] 移除订单: ${orderId}`);
+    logger.info(`[GridCleaner] 移除订单: ${orderId}`);
   }
 
   /**
@@ -98,17 +101,17 @@ export class GridCleaner {
    */
   startCleaner(): void {
     if (this.checkTimer) {
-      console.warn("[GridCleaner] 清理任务已在运行");
+      logger.warn("[GridCleaner] 清理任务已在运行");
       return;
     }
 
-    console.log("[GridCleaner] 启动定时清理任务");
-    console.log(`[GridCleaner] 检查间隔: ${this.config.checkInterval}ms`);
-    console.log(`[GridCleaner] 超时阈值: ${this.config.maxOrderAge}ms`);
+    logger.info("[GridCleaner] 启动定时清理任务");
+    logger.info(`[GridCleaner] 检查间隔: ${this.config.checkInterval}ms`);
+    logger.info(`[GridCleaner] 超时阈值: ${this.config.maxOrderAge}ms`);
 
     this.checkTimer = setInterval(() => {
       this.cleanTimeoutOrders().catch((error) => {
-        console.error("[GridCleaner] 清理失败:", error);
+        logger.error("[GridCleaner] 清理失败:", error);
         this.events.onError?.(error);
       });
     }, this.config.checkInterval);
@@ -121,7 +124,7 @@ export class GridCleaner {
     if (this.checkTimer) {
       clearInterval(this.checkTimer);
       this.checkTimer = null;
-      console.log("[GridCleaner] 停止定时清理任务");
+      logger.info("[GridCleaner] 停止定时清理任务");
     }
   }
 
@@ -138,7 +141,7 @@ export class GridCleaner {
 
       if (age > this.config.maxOrderAge && order.status === "New") {
         timeoutOrders.push(order);
-        console.log(
+        logger.info(
           `[GridCleaner] 检测到超时订单: ${order.orderId}, 年龄: ${age}ms`
         );
         this.events.onTimeoutDetected?.(order);
@@ -153,7 +156,7 @@ export class GridCleaner {
           await this.cancelOrder(order);
           cancelledCount++;
         } catch (error: any) {
-          console.error(
+          logger.error(
             `[GridCleaner] 取消订单失败: ${order.orderId}, 错误: ${error.message}`
           );
           this.events.onError?.(error, order);
@@ -162,7 +165,7 @@ export class GridCleaner {
     }
 
     if (cancelledCount > 0) {
-      console.log(`[GridCleaner] 清理完成，取消 ${cancelledCount} 个超时订单`);
+      logger.info(`[GridCleaner] 清理完成，取消 ${cancelledCount} 个超时订单`);
     }
 
     return cancelledCount;
@@ -172,7 +175,7 @@ export class GridCleaner {
    * 取消订单
    */
   private async cancelOrder(order: GridOrder): Promise<void> {
-    console.log(`[GridCleaner] 取消订单: ${order.orderId}`);
+    logger.info(`[GridCleaner] 取消订单: ${order.orderId}`);
 
     // 模拟取消订单（实际实现需要调用交易所 API）
     await this.simulateCancelOrder(order);
@@ -208,7 +211,7 @@ export class GridCleaner {
    * 清理整个网格
    */
   async cleanGrid(gridId: string): Promise<number> {
-    console.log(`[GridCleaner] 清理网格: ${gridId}`);
+    logger.info(`[GridCleaner] 清理网格: ${gridId}`);
 
     const gridOrders = Array.from(this.orders.values()).filter(
       (order) => order.gridId === gridId
@@ -221,7 +224,7 @@ export class GridCleaner {
           await this.cancelOrder(order);
           cancelledCount++;
         } catch (error: any) {
-          console.error(
+          logger.error(
             `[GridCleaner] 取消订单失败: ${order.orderId}, 错误: ${error.message}`
           );
           this.events.onError?.(error, order);
@@ -229,7 +232,7 @@ export class GridCleaner {
       }
     }
 
-    console.log(
+    logger.info(
       `[GridCleaner] 网格清理完成: ${gridId}, 取消 ${cancelledCount} 个订单`
     );
     this.events.onGridCleaned?.(gridId, cancelledCount);
@@ -241,12 +244,12 @@ export class GridCleaner {
    * GRID_TIMEOUT 触发器
    */
   async triggerGridTimeout(gridId: string): Promise<void> {
-    console.error(`[GridCleaner] GRID_TIMEOUT 触发: ${gridId}`);
+    logger.error(`[GridCleaner] GRID_TIMEOUT 触发: ${gridId}`);
 
     // 清理整个网格
     const cancelledCount = await this.cleanGrid(gridId);
 
-    console.log(
+    logger.info(
       `[GridCleaner] GRID_TIMEOUT 处理完成: ${gridId}, 取消 ${cancelledCount} 个订单`
     );
   }

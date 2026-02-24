@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/execution/retry-policy.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('retry-policy');
+
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -540,7 +543,7 @@ export class RetryPolicy {
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 }
 

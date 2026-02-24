@@ -19,10 +19,13 @@
  *   - 审计日志记录所有请求
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('metrics-api');
+
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { existsSync, readFileSync, mkdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
-import type { QuickJSStrategy } from '../sandbox/QuickJSStrategy';
+import type { QuickJSStrategy } from '../legacy/QuickJSStrategy';
 
 // 兼容获取home目录
 function getHomeDir(): string {
@@ -89,7 +92,7 @@ function writeAuditLog(log: AuditLog) {
     const line = JSON.stringify(log) + '\n';
     appendFileSync(logFile, line);
   } catch (error) {
-    console.error('[MetricsAPI] 审计日志写入失败:', error);
+    logger.error('[MetricsAPI] 审计日志写入失败:', error);
   }
 }
 
@@ -234,7 +237,7 @@ class MetricsAPI {
    */
   registerStrategy(strategyId: string, strategy: QuickJSStrategy) {
     this.strategyMap.set(strategyId, strategy);
-    console.log(`[MetricsAPI] 注册策略: ${strategyId}`);
+    logger.info(`[MetricsAPI] 注册策略: ${strategyId}`);
   }
 
   /**
@@ -242,7 +245,7 @@ class MetricsAPI {
    */
   unregisterStrategy(strategyId: string) {
     this.strategyMap.delete(strategyId);
-    console.log(`[MetricsAPI] 注销策略: ${strategyId}`);
+    logger.info(`[MetricsAPI] 注销策略: ${strategyId}`);
   }
 
   /**
@@ -256,8 +259,8 @@ class MetricsAPI {
 
       // 仅监听127.0.0.1
       this.server.listen(port, '127.0.0.1', () => {
-        console.log(`[MetricsAPI] HTTP服务启动: http://127.0.0.1:${port}`);
-        console.log(`[MetricsAPI] 仅本机可访问 (127.0.0.1)`);
+        logger.info(`[MetricsAPI] HTTP服务启动: http://127.0.0.1:${port}`);
+        logger.info(`[MetricsAPI] 仅本机可访问 (127.0.0.1)`);
         resolve();
       });
     });
@@ -436,7 +439,7 @@ class MetricsAPI {
     return new Promise((resolve) => {
       if (this.server) {
         this.server.close(() => {
-          console.log('[MetricsAPI] HTTP服务已停止');
+          logger.info('[MetricsAPI] HTTP服务已停止');
           resolve();
         });
       } else {

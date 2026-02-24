@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/execution/config-hot-reload.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('config-hot-reload.test');
+
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { ConfigHotReloadManager } from "./config-hot-reload";
 import { writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "fs";
@@ -115,7 +118,7 @@ describe("配置热重载 - 验收测试", () => {
       manager.setEvents({
         onConfigChange: (changes) => {
           changeDetected = true;
-          console.log(`检测到 ${changes.length} 项变更`);
+          logger.info(`检测到 ${changes.length} 项变更`);
         },
       });
 
@@ -238,9 +241,9 @@ describe("配置热重载 - 验收测试", () => {
       manager.setEvents({
         onConfigChange: (changes) => {
           changesLogged = true;
-          console.log("变更日志:");
+          logger.info("变更日志:");
           changes.forEach((change) => {
-            console.log(
+            logger.info(
               `  ${change.key}: ${change.oldValue} -> ${change.newValue}`
             );
           });
@@ -386,7 +389,7 @@ describe("配置热重载 - 验收测试", () => {
       // 1. 启动监听
       manager.startWatching();
       await new Promise((resolve) => setTimeout(resolve, 100)); // 等watch初始化
-      console.log("✅ 监听已启动");
+      logger.info("✅ 监听已启动");
 
       // 2. 修改配置文件
       const newConfig = {
@@ -398,26 +401,26 @@ describe("配置热重载 - 验收测试", () => {
       };
 
       writeFileSync(testConfigPath, JSON.stringify(newConfig, null, 2));
-      console.log("✅ 配置文件已修改");
+      logger.info("✅ 配置文件已修改");
 
       // 3. 等待变更检测和应用
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      console.log("✅ 变更已检测并应用");
+      logger.info("✅ 变更已检测并应用");
 
       // 4. 验证新配置
       const currentConfig = manager.getConfig();
       expect(currentConfig.gridCount).toBe(50);
       expect(currentConfig.gridSpacing).toBe(0.02);
-      console.log("✅ 新配置已验证");
+      logger.info("✅ 新配置已验证");
 
       // 5. 回滚
       const success = manager.rollbackToPrevious();
       expect(success).toBe(true);
-      console.log("✅ 配置已回滚");
+      logger.info("✅ 配置已回滚");
 
       // 6. 停止监听
       manager.stopWatching();
-      console.log("✅ 监听已停止");
+      logger.info("✅ 监听已停止");
     });
   });
 

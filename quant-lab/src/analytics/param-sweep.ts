@@ -19,10 +19,13 @@
  *   bun run param-sweep.ts --symbol MYXUSDT --days 30 --spacing 0.01,0.02 --orderSize 50,100
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('param-sweep');
+
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { KlineDatabase } from '../../../quant-lib/src';
-import { QuickJSBacktestEngine } from '../engine/quickjs-backtest';
+import { QuickJSBacktestEngine } from '../../legacy/quickjs-backtest';
 
 // ============================================================
 // 类型定义
@@ -118,7 +121,7 @@ function parseArgs() {
 }
 
 function showHelp() {
-  console.log(`
+  logger.info(`
 策略参数扫描工具 (Param Sweep)
 
 用法:
@@ -205,7 +208,7 @@ async function prepareData(
   });
 
   if (existing.length < days * 0.8) {
-    console.log(`[ParamSweep] 数据库中 ${normalizedSymbol} ${interval} 数据不足 (${existing.length} 条)，尝试从交易所拉取...`);
+    logger.info(`[ParamSweep] 数据库中 ${normalizedSymbol} ${interval} 数据不足 (${existing.length} 条)，尝试从交易所拉取...`);
 
     // 尝试从 Bybit 拉取数据
     try {
@@ -221,9 +224,9 @@ async function prepareData(
 
       // 存入数据库（klines已包含normalized symbol和interval属性）
       await db.insertKlines(klines);
-      console.log(`[ParamSweep] 成功拉取并存储 ${klines.length} 条K线数据`);
+      logger.info(`[ParamSweep] 成功拉取并存储 ${klines.length} 条K线数据`);
     } catch (e) {
-      console.warn(`[ParamSweep] 拉取数据失败: ${e}`);
+      logger.warn(`[ParamSweep] 拉取数据失败: ${e}`);
     }
   }
 
@@ -237,7 +240,7 @@ async function prepareData(
   const dataAvailable = finalData.length >= days * 0.5; // 至少50%数据才算可用
 
   if (!dataAvailable) {
-    console.warn(`[ParamSweep] 警告: 仅获取到 ${finalData.length} 条K线，不足以进行有效回测`);
+    logger.warn(`[ParamSweep] 警告: 仅获取到 ${finalData.length} 条K线，不足以进行有效回测`);
   }
 
   return { startTime: startTimeSec, endTime: endTimeSec, count: finalData.length, dataAvailable };
@@ -259,9 +262,9 @@ async function runSerialBacktests(
 ): Promise<SweepResult[]> {
   const results: SweepResult[] = [];
 
-  console.log(`[ParamSweep] 使用 QuickJSBacktestEngine 串行模式`);
-  console.log(`[ParamSweep] 总共 ${combinations.length} 组参数待测试`);
-  console.log('');
+  logger.info(`[ParamSweep] 使用 QuickJSBacktestEngine 串行模式`);
+  logger.info(`[ParamSweep] 总共 ${combinations.length} 组参数待测试`);
+  logger.info('');
 
   // 计算日期范围
   const endDate = new Date();
@@ -281,12 +284,12 @@ async function runSerialBacktests(
   });
 
   if (klines.length === 0) {
-    console.warn('[ParamSweep] 警告: 没有可用的K线数据');
+    logger.warn('[ParamSweep] 警告: 没有可用的K线数据');
     return results;
   }
 
-  console.log(`[ParamSweep] 数据范围: ${fromDate} ~ ${toDate} (${klines.length} 条K线)`);
-  console.log('');
+  logger.info(`[ParamSweep] 数据范围: ${fromDate} ~ ${toDate} (${klines.length} 条K线)`);
+  logger.info('');
 
   // 遍历参数组合，每组使用 QuickJSBacktestEngine 运行
   // 第1个engine会从Bybit拉取+存到quant-lab/data/klines.db，后续复用本地缓存
@@ -296,7 +299,7 @@ async function runSerialBacktests(
     try {
       // 创建 QuickJSBacktestEngine 实例（都传proxy，第1个拉取，后续复用缓存）
       const engine = new QuickJSBacktestEngine({
-        strategyPath: 'strategies/gales-simple.js',
+        strategyPath: 'strategies/grid/gales-simple.js',
         symbol: normalizedSymbol,
         from: fromDate,
         to: toDate,
@@ -347,9 +350,9 @@ async function runSerialBacktests(
       };
 
       results.push(result);
-      console.log(`[${i + 1}/${combinations.length}] spacing=${params.spacing.toFixed(3)} orderSize=${params.orderSize.toString().padStart(3)} magnet=${params.magnetDistance.toFixed(3)} → Sharpe=${result.sharpeRatio.toFixed(2)} PnL=${result.totalPnL.toFixed(2)} maxDD=${(result.maxDrawdown * 100).toFixed(1)}% winRate=${(result.winRate * 100).toFixed(1)}%`);
+      logger.info(`[${i + 1}/${combinations.length}] spacing=${params.spacing.toFixed(3)} orderSize=${params.orderSize.toString().padStart(3)} magnet=${params.magnetDistance.toFixed(3)} → Sharpe=${result.sharpeRatio.toFixed(2)} PnL=${result.totalPnL.toFixed(2)} maxDD=${(result.maxDrawdown * 100).toFixed(1)}% winRate=${(result.winRate * 100).toFixed(1)}%`);
     } catch (e) {
-      console.warn(`[${i + 1}/${combinations.length}] spacing=${params.spacing} orderSize=${params.orderSize} magnet=${params.magnetDistance} → 失败: ${e}`);
+      logger.warn(`[${i + 1}/${combinations.length}] spacing=${params.spacing} orderSize=${params.orderSize} magnet=${params.magnetDistance} → 失败: ${e}`);
     }
   }
 
@@ -427,18 +430,18 @@ function formatResultsCSV(results: SweepResult[]): string {
 async function main() {
   const args = parseArgs();
 
-  console.log('='.repeat(60));
-  console.log('          策略参数扫描工具 (Param Sweep)');
-  console.log('='.repeat(60));
-  console.log('');
-  console.log(`交易品种: ${args.symbol}`);
-  console.log(`回测周期: ${args.days} 天`);
-  console.log(`K线间隔: ${args.interval}`);
-  console.log(`网格间距: [${args.spacings.join(', ')}]`);
-  console.log(`订单大小: [${args.orderSizes.join(', ')}]`);
-  console.log(`磁铁距离: [${args.magnetDistances.join(', ')}]`);  // [P1] 新增
-  console.log(`参数组合: ${args.spacings.length * args.orderSizes.length * args.magnetDistances.length} 组`);  // [P1] 更新计算
-  console.log('');
+  logger.info('='.repeat(60));
+  logger.info('          策略参数扫描工具 (Param Sweep)');
+  logger.info('='.repeat(60));
+  logger.info('');
+  logger.info(`交易品种: ${args.symbol}`);
+  logger.info(`回测周期: ${args.days} 天`);
+  logger.info(`K线间隔: ${args.interval}`);
+  logger.info(`网格间距: [${args.spacings.join(', ')}]`);
+  logger.info(`订单大小: [${args.orderSizes.join(', ')}]`);
+  logger.info(`磁铁距离: [${args.magnetDistances.join(', ')}]`);  // [P1] 新增
+  logger.info(`参数组合: ${args.spacings.length * args.orderSizes.length * args.magnetDistances.length} 组`);  // [P1] 更新计算
+  logger.info('');
 
   // 生成参数组合
   const combinations = generateParamCombinations(args.spacings, args.orderSizes, args.magnetDistances);  // [P1] 传递magnetDistances
@@ -453,26 +456,26 @@ async function main() {
 
   try {
     // 准备数据
-    console.log('[ParamSweep] 准备数据...');
+    logger.info('[ParamSweep] 准备数据...');
     const dataInfo = await prepareData(db, args.symbol, args.interval, args.days);
 
     if (!dataInfo.dataAvailable) {
-      console.log('');
-      console.log('[ParamSweep] ⚠️ 数据不足，无法继续回测');
-      console.log(`[ParamSweep] 仅获取到 ${dataInfo.count} 条K线，需要至少 ${Math.floor(args.days * 24 * 0.5)} 条`);
-      console.log('[ParamSweep] 建议: 检查数据库连接或尝试其他交易品种');
+      logger.info('');
+      logger.info('[ParamSweep] ⚠️ 数据不足，无法继续回测');
+      logger.info(`[ParamSweep] 仅获取到 ${dataInfo.count} 条K线，需要至少 ${Math.floor(args.days * 24 * 0.5)} 条`);
+      logger.info('[ParamSweep] 建议: 检查数据库连接或尝试其他交易品种');
       return;
     }
 
-    console.log(`[ParamSweep] 数据准备完成: ${dataInfo.count} 条K线`);
-    console.log('');
+    logger.info(`[ParamSweep] 数据准备完成: ${dataInfo.count} 条K线`);
+    logger.info('');
 
     // 执行回测
     const results = await runSerialBacktests(combinations, args.symbol, args.days, args.interval, db, dbPath, args.direction, args.proxy);
 
     if (results.length === 0) {
-      console.log('');
-      console.log('[ParamSweep] ⚠️ 没有成功完成任何回测');
+      logger.info('');
+      logger.info('[ParamSweep] ⚠️ 没有成功完成任何回测');
       return;
     }
 
@@ -491,24 +494,24 @@ async function main() {
       if (outputPath.endsWith('.json')) {
         // JSON格式 - 直接序列化 SweepResult[]
         writeFileSync(outputPath, JSON.stringify(results, null, 2));
-        console.log('');
-        console.log(`[ParamSweep] JSON结果已保存: ${outputPath}`);
+        logger.info('');
+        logger.info(`[ParamSweep] JSON结果已保存: ${outputPath}`);
       } else {
         // 文本和 CSV 格式
         writeFileSync(outputPath, tableOutput);
         writeFileSync(outputPath.replace(/\.txt$/, '.csv').replace(/\.md$/, '.csv'), csvOutput);
-        console.log('');
-        console.log(`[ParamSweep] 结果已保存: ${outputPath}`);
+        logger.info('');
+        logger.info(`[ParamSweep] 结果已保存: ${outputPath}`);
       }
     } else {
-      console.log('');
-      console.log(tableOutput);
+      logger.info('');
+      logger.info(tableOutput);
     }
 
     // 输出 CSV 到 stdout（方便管道处理）
-    console.log('');
-    console.log('--- CSV 格式 ---');
-    console.log(csvOutput);
+    logger.info('');
+    logger.info('--- CSV 格式 ---');
+    logger.info(csvOutput);
 
   } finally {
     await db.close();
@@ -516,6 +519,6 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error('[ParamSweep] 错误:', err);
+  logger.error('[ParamSweep] 错误:', err);
   process.exit(1);
 });

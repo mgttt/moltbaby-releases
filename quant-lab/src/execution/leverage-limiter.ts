@@ -1,4 +1,8 @@
 // leverage-limiter.ts - 杠杆硬顶机制
+
+import { createLogger } from '../utils/logger';
+const logger = createLogger('$(basename $f .ts)');
+
 // P1: 杠杆硬顶机制实现
 
 export interface LeverageLimitConfig {
@@ -23,7 +27,7 @@ export class LeverageLimiter {
 
   constructor(config: LeverageLimitConfig) {
     this.config = config;
-    console.log(`[LeverageLimiter] 初始化: ${config.symbol}, 最大杠杆=${config.maxLeverage}x`);
+    logger.info(`[LeverageLimiter] 初始化: ${config.symbol}, 最大杠杆=${config.maxLeverage}x`);
   }
 
   /**
@@ -81,7 +85,7 @@ export class LeverageLimiter {
    */
   updatePosition(size: number, entryPrice: number, side: 'LONG' | 'SHORT'): void {
     this.currentPosition = { size, entryPrice, side };
-    console.log(`[LeverageLimiter] 持仓更新: ${side} ${size} @ ${entryPrice}`);
+    logger.info(`[LeverageLimiter] 持仓更新: ${side} ${size} @ ${entryPrice}`);
   }
 
   /**
@@ -126,12 +130,12 @@ export class HardLimitTrigger {
   }
 
   trigger(): void {
-    console.log('[HardLimitTrigger] 硬顶触发！执行保护动作...');
+    logger.info('[HardLimitTrigger] 硬顶触发！执行保护动作...');
     this.actions.forEach(action => {
       try {
         action();
       } catch (e) {
-        console.error('[HardLimitTrigger] 动作执行失败:', e);
+        logger.error('[HardLimitTrigger] 动作执行失败:', e);
       }
     });
   }
@@ -139,7 +143,7 @@ export class HardLimitTrigger {
 
 // 测试函数
 async function testLeverageLimiter() {
-  console.log('=== 杠杆硬顶机制测试 ===\n');
+  logger.info('=== 杠杆硬顶机制测试 ===\n');
 
   // 创建限制器: BTCUSDT, 最大5x杠杆, 最大持仓100000 USDT, 最大保证金使用率80%
   const limiter = new LeverageLimiter({
@@ -152,36 +156,36 @@ async function testLeverageLimiter() {
   const availableMargin = 10000; // 可用保证金10000 USDT
 
   // 测试1: 正常订单
-  console.log('测试1: 正常订单 (1 BTC @ 50000)');
+  logger.info('测试1: 正常订单 (1 BTC @ 50000)');
   const result1 = limiter.checkOrder(1, 50000, availableMargin);
-  console.log('  允许:', result1.allowed);
-  console.log('  风险:', JSON.stringify(result1.risk, null, 2));
-  console.log();
+  logger.info('  允许:', result1.allowed);
+  logger.info('  风险:', JSON.stringify(result1.risk, null, 2));
+  logger.info();
 
   // 测试2: 杠杆超限
-  console.log('测试2: 杠杆超限 (2 BTC @ 50000)');
+  logger.info('测试2: 杠杆超限 (2 BTC @ 50000)');
   const result2 = limiter.checkOrder(2, 50000, availableMargin);
-  console.log('  允许:', result2.allowed);
-  console.log('  原因:', result2.reason);
-  console.log();
+  logger.info('  允许:', result2.allowed);
+  logger.info('  原因:', result2.reason);
+  logger.info();
 
   // 测试3: 持仓价值超限
-  console.log('测试3: 持仓价值超限 (3 BTC @ 50000 = 150000 USDT)');
+  logger.info('测试3: 持仓价值超限 (3 BTC @ 50000 = 150000 USDT)');
   const result3 = limiter.checkOrder(3, 50000, availableMargin);
-  console.log('  允许:', result3.allowed);
-  console.log('  原因:', result3.reason);
-  console.log();
+  logger.info('  允许:', result3.allowed);
+  logger.info('  原因:', result3.reason);
+  logger.info();
 
   // 测试4: 硬顶触发器
-  console.log('测试4: 硬顶触发器');
+  logger.info('测试4: 硬顶触发器');
   const trigger = new HardLimitTrigger();
-  trigger.onHardLimit(() => console.log('  ✅ 触发保护: 禁止新开仓'));
-  trigger.onHardLimit(() => console.log('  ✅ 触发保护: 发送告警'));
+  trigger.onHardLimit(() => logger.info('  ✅ 触发保护: 禁止新开仓'));
+  trigger.onHardLimit(() => logger.info('  ✅ 触发保护: 发送告警'));
   trigger.trigger();
-  console.log();
+  logger.info();
 
-  console.log('=== 测试完成 ===');
+  logger.info('=== 测试完成 ===');
 }
 
 // 运行测试
-testLeverageLimiter().catch(console.error);
+testLeverageLimiter().catch((err) => logger.error(err));

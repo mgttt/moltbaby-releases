@@ -16,6 +16,9 @@
  *   bun run backtest-report.ts --input results.json --output report.html
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('backtest-report');
+
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { resolve, dirname } from 'path';
 
@@ -73,12 +76,12 @@ function parseArgs() {
   }
 
   if (!input) {
-    console.error('错误: 必须指定 --input <results.json>');
+    logger.error('错误: 必须指定 --input <results.json>');
     process.exit(1);
   }
 
   if (!existsSync(input)) {
-    console.error(`错误: 输入文件不存在: ${input}`);
+    logger.error(`错误: 输入文件不存在: ${input}`);
     process.exit(1);
   }
 
@@ -86,7 +89,7 @@ function parseArgs() {
 }
 
 function showHelp() {
-  console.log(`
+  logger.info(`
 回测报告生成器 (Backtest Report Generator)
 
 用法:
@@ -411,22 +414,22 @@ function generateHTML(results: SweepResult[], title: string): string {
 async function main() {
   const args = parseArgs();
 
-  console.log('='.repeat(60));
-  console.log('          回测报告生成器 (Backtest Report Generator)');
-  console.log('='.repeat(60));
-  console.log('');
-  console.log(`输入文件: ${args.input}`);
-  console.log(`输出文件: ${args.output}`);
-  console.log(`报告标题: ${args.title}`);
-  console.log('');
+  logger.info('='.repeat(60));
+  logger.info('          回测报告生成器 (Backtest Report Generator)');
+  logger.info('='.repeat(60));
+  logger.info('');
+  logger.info(`输入文件: ${args.input}`);
+  logger.info(`输出文件: ${args.output}`);
+  logger.info(`报告标题: ${args.title}`);
+  logger.info('');
 
   // 加载结果
-  console.log('[Report] 加载回测结果...');
+  logger.info('[Report] 加载回测结果...');
   const results = loadResults(args.input);
-  console.log(`[Report] 加载完成: ${results.length} 组结果`);
+  logger.info(`[Report] 加载完成: ${results.length} 组结果`);
 
   // 生成HTML
-  console.log('[Report] 生成HTML报告...');
+  logger.info('[Report] 生成HTML报告...');
   const html = generateHTML(results, args.title);
 
   // 写入文件
@@ -436,20 +439,20 @@ async function main() {
   }
   writeFileSync(args.output, html);
 
-  console.log('');
-  console.log('='.repeat(60));
-  console.log('✅ 报告生成成功!');
-  console.log('='.repeat(60));
-  console.log(`文件路径: ${args.output}`);
-  console.log(`文件大小: ${(html.length / 1024).toFixed(1)} KB`);
-  console.log('');
-  console.log('打开方式:');
-  console.log(`  浏览器: file://${args.output}`);
-  console.log(`  命令:   open ${args.output}`);
-  console.log('='.repeat(60));
+  logger.info('');
+  logger.info('='.repeat(60));
+  logger.info('✅ 报告生成成功!');
+  logger.info('='.repeat(60));
+  logger.info(`文件路径: ${args.output}`);
+  logger.info(`文件大小: ${(html.length / 1024).toFixed(1)} KB`);
+  logger.info('');
+  logger.info('打开方式:');
+  logger.info(`  浏览器: file://${args.output}`);
+  logger.info(`  命令:   open ${args.output}`);
+  logger.info('='.repeat(60));
 }
 
 main().catch(err => {
-  console.error('[Report] 错误:', err);
+  logger.error('[Report] 错误:', err);
   process.exit(1);
 });

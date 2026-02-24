@@ -6,6 +6,9 @@
  * 背景：策略启动时无pre-flight check，导致历史持仓超限后新策略静默失败30分钟无人知晓
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('preflight-check');
+
 import { EventEmitter } from 'events';
 
 // ==================== 类型定义 ====================
@@ -83,7 +86,7 @@ export class PreflightChecker extends EventEmitter {
     this.config = config;
     this.alertConfig = alertConfig;
     
-    console.log(`[PreflightChecker] 初始化 [${config.strategyId}/${config.sessionId}]`);
+    logger.info(`[PreflightChecker] 初始化 [${config.strategyId}/${config.sessionId}]`);
   }
 
   /**
@@ -116,7 +119,7 @@ export class PreflightChecker extends EventEmitter {
           result.summary.passedChecks++;
         } else {
           result.summary.failedChecks++;
-          console.error(`[PreflightChecker] ❌ 持仓检查失败: ${result.checks.position.reason}`);
+          logger.error(`[PreflightChecker] ❌ 持仓检查失败: ${result.checks.position.reason}`);
         }
       }
 
@@ -128,7 +131,7 @@ export class PreflightChecker extends EventEmitter {
           result.summary.passedChecks++;
         } else {
           result.summary.failedChecks++;
-          console.error(`[PreflightChecker] ❌ 账户检查失败: ${result.checks.account.reason}`);
+          logger.error(`[PreflightChecker] ❌ 账户检查失败: ${result.checks.account.reason}`);
         }
       }
 
@@ -140,7 +143,7 @@ export class PreflightChecker extends EventEmitter {
           result.summary.passedChecks++;
         } else {
           result.summary.failedChecks++;
-          console.error(`[PreflightChecker] ❌ 参数检查失败: ${result.checks.parameters.reason}`);
+          logger.error(`[PreflightChecker] ❌ 参数检查失败: ${result.checks.parameters.reason}`);
         }
       }
 
@@ -155,7 +158,7 @@ export class PreflightChecker extends EventEmitter {
             result.summary.passedChecks++;
           } else {
             result.summary.failedChecks++;
-            console.error(`[PreflightChecker] ❌ 自定义检查失败: ${checkResult.reason}`);
+            logger.error(`[PreflightChecker] ❌ 自定义检查失败: ${checkResult.reason}`);
           }
         }
       }
@@ -163,11 +166,11 @@ export class PreflightChecker extends EventEmitter {
       // 确定最终状态
       if (result.summary.failedChecks === 0) {
         result.status = PreflightCheckStatus.PASSED;
-        console.log(`[PreflightChecker] ✅ 全部检查通过 (${result.summary.totalChecks}项)`);
+        logger.info(`[PreflightChecker] ✅ 全部检查通过 (${result.summary.totalChecks}项)`);
         this.emit('check:passed', result);
       } else {
         result.status = PreflightCheckStatus.FAILED;
-        console.error(`[PreflightChecker] ❌ 检查失败: ${result.summary.failedChecks}/${result.summary.totalChecks}项未通过`);
+        logger.error(`[PreflightChecker] ❌ 检查失败: ${result.summary.failedChecks}/${result.summary.totalChecks}项未通过`);
         
         // 发送告警
         await this.sendAlert(result);
@@ -179,7 +182,7 @@ export class PreflightChecker extends EventEmitter {
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`[PreflightChecker] ❌ 检查异常: ${errorMessage}`);
+      logger.error(`[PreflightChecker] ❌ 检查异常: ${errorMessage}`);
       
       result.status = PreflightCheckStatus.FAILED;
       result.summary.failedChecks++;
@@ -278,7 +281,7 @@ export class PreflightChecker extends EventEmitter {
   private async checkPosition(): Promise<{ passed: boolean; reason?: string }> {
     const config = this.config.positionCheck!;
     
-    console.log(`[PreflightChecker] 🔍 持仓检查: ${config.currentPosition}/${config.maxPosition}`);
+    logger.info(`[PreflightChecker] 🔍 持仓检查: ${config.currentPosition}/${config.maxPosition}`);
 
     // 检查是否超限
     if (config.currentPosition > config.maxPosition) {
@@ -291,7 +294,7 @@ export class PreflightChecker extends EventEmitter {
     // 检查是否接近限制（警告阈值90%）
     const warningThreshold = config.maxPosition * 0.9;
     if (config.currentPosition > warningThreshold) {
-      console.warn(`[PreflightChecker] ⚠️ 持仓接近限制: ${config.currentPosition}/${config.maxPosition} (${((config.currentPosition/config.maxPosition)*100).toFixed(1)}%)`);
+      logger.warn(`[PreflightChecker] ⚠️ 持仓接近限制: ${config.currentPosition}/${config.maxPosition} (${((config.currentPosition/config.maxPosition)*100).toFixed(1)}%)`);
       // 警告但不阻止启动
     }
 
@@ -305,7 +308,7 @@ export class PreflightChecker extends EventEmitter {
   private async checkAccount(): Promise<{ passed: boolean; reason?: string }> {
     const config = this.config.accountCheck!;
     
-    console.log(`[PreflightChecker] 🔍 账户检查: 余额${config.currentBalance}/${config.minBalance}`);
+    logger.info(`[PreflightChecker] 🔍 账户检查: 余额${config.currentBalance}/${config.minBalance}`);
 
     // 检查余额
     if (config.currentBalance < config.minBalance) {
@@ -339,7 +342,7 @@ export class PreflightChecker extends EventEmitter {
   private async checkParameters(): Promise<{ passed: boolean; reason?: string }> {
     const config = this.config.parameterCheck!;
     
-    console.log(`[PreflightChecker] 🔍 参数检查: ${Object.keys(config.providedParams).length}项`);
+    logger.info(`[PreflightChecker] 🔍 参数检查: ${Object.keys(config.providedParams).length}项`);
 
     // 检查必需参数是否存在
     const missingParams = config.requiredParams.filter(
@@ -385,13 +388,13 @@ export class PreflightChecker extends EventEmitter {
 
       // 输出告警日志
       const report = this.generateReport();
-      console.error(`[PreflightChecker] 🚨 启动前置检查失败告警:\n${report}`);
+      logger.error(`[PreflightChecker] 🚨 启动前置检查失败告警:\n${report}`);
       
       // 触发告警事件
       this.emit('alert:sent', { result, errorMessage });
 
     } catch (alertError) {
-      console.error(`[PreflightChecker] ❌ 告警发送失败:`, alertError);
+      logger.error(`[PreflightChecker] ❌ 告警发送失败:`, alertError);
       this.emit('alert:error', alertError);
     }
   }

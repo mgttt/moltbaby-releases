@@ -6,6 +6,9 @@
  * - 集成测试: 与LeverageLimiter联动、事件监听
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('position-reducer.test');
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   PositionReducer,

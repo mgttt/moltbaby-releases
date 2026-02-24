@@ -18,6 +18,9 @@
  *   --config <path>            指定配置文件 (默认 ecosystem.config.js)
  */
 
+import { createLogger } from './utils/logger';
+const logger = createLogger('CLI');
+
 import { StrategyConfigManager } from '../src/strategy/ConfigManager';
 import { resolve } from 'path';
 
@@ -67,7 +70,7 @@ async function main() {
   const args = process.argv.slice(2);
   
   if (args.length === 0 || args[0] === '-h' || args[0] === '--help') {
-    console.log(HELP);
+    logger.info(HELP);
     process.exit(0);
   }
   
@@ -122,7 +125,7 @@ async function main() {
     case 'delete': {
       const name = positionalArgs[0];
       if (!name) {
-        console.error('Usage: qlab delete <name>');
+        logger.error('Usage: qlab delete <name>');
         process.exit(1);
       }
       await manager.delete(name);
@@ -134,23 +137,23 @@ async function main() {
       const instances = manager.list();
       
       if (instances.length === 0) {
-        console.log('No running instances');
+        logger.info('No running instances');
         return;
       }
       
-      console.log('┌────────────────────────┬──────────┬──────────┬────────────┬──────────┐');
-      console.log('│ Name                   │ Status   │ Uptime   │ Restarts   │ Memory   │');
-      console.log('├────────────────────────┼──────────┼──────────┼────────────┼──────────┤');
+      logger.info('┌────────────────────────┬──────────┬──────────┬────────────┬──────────┐');
+      logger.info('│ Name                   │ Status   │ Uptime   │ Restarts   │ Memory   │');
+      logger.info('├────────────────────────┼──────────┼──────────┼────────────┼──────────┤');
       
       for (const inst of instances) {
         const uptime = formatUptime(Date.now() - inst.started_at);
         const memory = 'N/A'; // TODO: get memory usage
-        console.log(
+        logger.info(
           "│ " + inst.name.padEnd(22) + " │ ${inst.status.padEnd(8)} │ ${uptime.padEnd(8)} │ ${inst.restart_count.toString().padEnd(10)} │ ${memory.padEnd(8)} │"
         );
       }
       
-      console.log('└────────────────────────┴──────────┴──────────┴────────────┴──────────┘');
+      logger.info('└────────────────────────┴──────────┴──────────┴────────────┴──────────┘');
       break;
     }
     
@@ -158,32 +161,32 @@ async function main() {
     case 'describe': {
       const name = positionalArgs[0];
       if (!name) {
-        console.error('Usage: qlab show <name>');
+        logger.error('Usage: qlab show <name>');
         process.exit(1);
       }
       
       const inst = manager.describe(name);
       if (!inst) {
-        console.error("Instance " + name + " not found");
+        logger.error("Instance " + name + " not found");
         process.exit(1);
       }
       
-      console.log('Instance Details');
-      console.log('================');
-      console.log("Name:        " + inst.name + "");
-      console.log("Status:      " + inst.status + "");
-      console.log("PID:         " + inst.pid);
-      console.log("Uptime:      " + formatUptime(Date.now() - inst.started_at));
-      console.log("Restarts:    " + inst.restart_count);
-      console.log("Script:      " + inst.config.script);
-      console.log("Log File:    " + inst.config.log_file);
-      console.log('');
-      console.log('Environment Variables:');
+      logger.info('Instance Details');
+      logger.info('================');
+      logger.info("Name:        " + inst.name + "");
+      logger.info("Status:      " + inst.status + "");
+      logger.info("PID:         " + inst.pid);
+      logger.info("Uptime:      " + formatUptime(Date.now() - inst.started_at));
+      logger.info("Restarts:    " + inst.restart_count);
+      logger.info("Script:      " + inst.config.script);
+      logger.info("Log File:    " + inst.config.log_file);
+      logger.info('');
+      logger.info('Environment Variables:');
       for (const [key, value] of Object.entries(inst.env)) {
         if (key.includes('KEY') || key.includes('SECRET')) {
-          console.log('  ' + key + '=***');
+          logger.info('  ' + key + '=***');
         } else {
-          console.log('  ' + key + '=' + value);
+          logger.info('  ' + key + '=' + value);
         }
       }
       break;
@@ -194,12 +197,12 @@ async function main() {
       const numLines = positionalArgs[1] ? parseInt(positionalArgs[1]) : lines;
       
       if (!name) {
-        console.error('Usage: qlab logs <name> [lines]');
+        logger.error('Usage: qlab logs <name> [lines]');
         process.exit(1);
       }
       
       const logContent = await manager.logs(name, numLines);
-      console.log(logContent);
+      logger.info(logContent);
       break;
     }
     
@@ -211,19 +214,19 @@ async function main() {
     case 'set': {
       const [name, key, value] = positionalArgs;
       if (!name || !key || !value) {
-        console.error('Usage: qlab set <name> <key> <value>');
+        logger.error('Usage: qlab set <name> <key> <value>');
         process.exit(1);
       }
       
       await manager.setEnv(name, key, value);
-      console.log('Set ' + name + ' environment: ' + key + '=' + value);
-      console.log('Note: Changes will take effect on next restart');
+      logger.info('Set ' + name + ' environment: ' + key + '=' + value);
+      logger.info('Note: Changes will take effect on next restart');
       break;
     }
     
     default:
-      console.error('Unknown command: ' + command);
-      console.log(HELP);
+      logger.error('Unknown command: ' + command);
+      logger.info(HELP);
       process.exit(1);
   }
 }
@@ -240,4 +243,4 @@ function formatUptime(ms: number): string {
   return "" + seconds + "s";
 }
 
-main().catch(console.error);
+main().catch((err) => logger.error(err));

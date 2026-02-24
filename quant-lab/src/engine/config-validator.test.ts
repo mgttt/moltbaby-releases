@@ -11,6 +11,9 @@
  * 位置：quant-lab/src/engine/config-validator.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('config-validator.test');
+
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { ConfigValidator, validateBeforeStart } from "./config-validator";
 import { writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "fs";
@@ -242,7 +245,7 @@ describe("回测←→实盘参数一致性校验 - 验收测试", () => {
       validator.setEvents({
         onDiffFound: (diff) => {
           diffFound = true;
-          console.log(`差异发现: ${diff.key}`);
+          logger.info(`差异发现: ${diff.key}`);
         },
       });
 
@@ -307,14 +310,14 @@ describe("回测←→实盘参数一致性校验 - 验收测试", () => {
       writeFileSync(BACKTEST_CONFIG_PATH, JSON.stringify(backtestConfig, null, 2));
       writeFileSync(LIVE_CONFIG_PATH, JSON.stringify(liveConfig, null, 2));
 
-      console.log("1. 创建配置文件");
-      console.log("2. 执行校验");
+      logger.info("1. 创建配置文件");
+      logger.info("2. 执行校验");
 
       const validator = new ConfigValidator({ reportPath: REPORT_PATH });
       const result = validator.validate(BACKTEST_CONFIG_PATH, LIVE_CONFIG_PATH);
 
-      console.log(`3. 校验完成: ${result.isValid ? "通过" : "失败"}`);
-      console.log(`4. 差异项: ${result.diffs.length} 个`);
+      logger.info(`3. 校验完成: ${result.isValid ? "通过" : "失败"}`);
+      logger.info(`4. 差异项: ${result.diffs.length} 个`);
 
       // 验证：差异发现
       expect(result.isValid).toBe(false);
@@ -322,7 +325,7 @@ describe("回测←→实盘参数一致性校验 - 验收测试", () => {
 
       // 验证：报告生成
       expect(existsSync(REPORT_PATH)).toBe(true);
-      console.log("5. 报告已生成");
+      logger.info("5. 报告已生成");
     });
   });
 });

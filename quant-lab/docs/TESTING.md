@@ -50,7 +50,7 @@ export SIM_MODE=true
   "gridSpacing": 0.01,
   "orderSize": 100,
   "maxPosition": 1000,
-  "direction": "neutral",
+  "lean": "neutral",
   
   "enableMarketRegime": true,
   "adxPeriod": 14,

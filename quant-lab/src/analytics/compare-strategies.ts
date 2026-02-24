@@ -4,6 +4,9 @@
  * 用法: bun run compare-strategies.ts [strategyId]
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('compare-strategies');
+
 import { aggregateStrategyMetrics, StrategyMetrics } from './performance-metrics';
 import { resolve } from 'path';
 
@@ -27,11 +30,11 @@ function formatU(n: number): string {
 
 function printTable(comparisons: StrategyComparison[]) {
   // 表头
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════════════════');
-  console.log('📊 多策略对比报告');
-  console.log('═══════════════════════════════════════════════════════════════════════════════');
-  console.log('');
+  logger.info('');
+  logger.info('═══════════════════════════════════════════════════════════════════════════════');
+  logger.info('📊 多策略对比报告');
+  logger.info('═══════════════════════════════════════════════════════════════════════════════');
+  logger.info('');
   
   // 列标题
   const header = [
@@ -44,8 +47,8 @@ function printTable(comparisons: StrategyComparison[]) {
     'Gap'.padEnd(8)
   ].join(' | ');
   
-  console.log(header);
-  console.log('─'.repeat(90));
+  logger.info(header);
+  logger.info('─'.repeat(90));
   
   // 数据行
   for (const comp of comparisons) {
@@ -71,17 +74,17 @@ function printTable(comparisons: StrategyComparison[]) {
       formatNumber(Math.abs(metrics.positionSize - metrics.maxPositionReached)).padEnd(8)
     ].join(' | ');
     
-    console.log(row);
+    logger.info(row);
   }
   
   // 汇总
-  console.log('─'.repeat(90));
+  logger.info('─'.repeat(90));
   const totalPnl = comparisons.reduce((sum, c) => sum + c.metrics.totalPnl, 0);
   const avgRunH = comparisons.reduce((sum, c) => sum + c.metrics.runningHours, 0) / comparisons.length;
   
-  console.log(`总盈亏: ${formatU(totalPnl)} | 平均运行: ${formatNumber(avgRunH)}h`);
-  console.log('═══════════════════════════════════════════════════════════════════════════════');
-  console.log('');
+  logger.info(`总盈亏: ${formatU(totalPnl)} | 平均运行: ${formatNumber(avgRunH)}h`);
+  logger.info('═══════════════════════════════════════════════════════════════════════════════');
+  logger.info('');
 }
 
 function main() {
@@ -92,8 +95,8 @@ function main() {
     const stateFile = resolve(STATE_DIR, `${strategyId}.json`);
     const metrics = aggregateStrategyMetrics(stateFile);
     
-    console.log(`[CompareStrategies] 策略: ${strategyId}`);
-    console.log(JSON.stringify(metrics, null, 2));
+    logger.info(`[CompareStrategies] 策略: ${strategyId}`);
+    logger.info(JSON.stringify(metrics, null, 2));
   } else {
     // 全部策略对比模式
     const comparisons: StrategyComparison[] = [];

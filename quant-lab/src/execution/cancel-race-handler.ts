@@ -13,6 +13,9 @@
  * 时间：6h
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('cancel-race-handler');
+
 import { RetryPolicy, ErrorClassifier } from "./retry-policy";
 import { join } from "path";
 import { homedir } from "os";
@@ -70,7 +73,7 @@ export class CancelRaceHandler {
   private errorClassifier: ErrorClassifier;
 
   constructor() {
-    console.log("[CancelRaceHandler] 初始化撤单竞态处理器");
+    logger.info("[CancelRaceHandler] 初始化撤单竞态处理器");
     
     this.errorClassifier = new ErrorClassifier();
     this.retryPolicy = new RetryPolicy(undefined, join(homedir(), ".quant-lab", "cancel-retry-queue.jsonl"));
@@ -110,11 +113,11 @@ export class CancelRaceHandler {
   async cancelOrder(request: CancelRequest): Promise<CancelResult> {
     const { orderId, orderLinkId, symbol } = request;
 
-    console.log(`[CancelRaceHandler] 尝试撤销订单: ${orderId}, orderLinkId: ${orderLinkId}`);
+    logger.info(`[CancelRaceHandler] 尝试撤销订单: ${orderId}, orderLinkId: ${orderLinkId}`);
 
     // 1. 幂等检查：是否已撤销
     if (this.cancelledOrders.has(orderLinkId)) {
-      console.warn(`[CancelRaceHandler] 重复撤单（幂等保护）: ${orderLinkId}`);
+      logger.warn(`[CancelRaceHandler] 重复撤单（幂等保护）: ${orderLinkId}`);
       this.events.onDuplicateCancel?.(orderId);
       
       return {
@@ -128,7 +131,7 @@ export class CancelRaceHandler {
     const orderState = this.orderStates.get(orderId);
     if (orderState) {
       if (orderState.localStatus === "Filled" || orderState.localStatus === "Cancelled") {
-        console.warn(
+        logger.warn(
           `[CancelRaceHandler] 订单已${orderState.localStatus}，跳过撤单: ${orderId}`
         );
         
@@ -150,7 +153,7 @@ export class CancelRaceHandler {
       // 5. 更新本地状态
       this.updateLocalStatus(orderId, "Cancelled");
 
-      console.log(`[CancelRaceHandler] 撤单成功: ${orderId}`);
+      logger.info(`[CancelRaceHandler] 撤单成功: ${orderId}`);
 
       return {
         success: true,
@@ -284,7 +287,7 @@ export class CancelRaceHandler {
       orderState.localStatus = status;
       orderState.lastUpdated = Date.now();
       this.orderStates.set(orderId, orderState);
-      console.log(`[CancelRaceHandler] 更新本地状态: ${orderId} -> ${status}`);
+      logger.info(`[CancelRaceHandler] 更新本地状态: ${orderId} -> ${status}`);
     }
   }
 
@@ -292,7 +295,7 @@ export class CancelRaceHandler {
    * 同步交易所状态
    */
   async syncExchangeStatus(orderId: string): Promise<OrderStatus> {
-    console.log(`[CancelRaceHandler] 同步交易所状态: ${orderId}`);
+    logger.info(`[CancelRaceHandler] 同步交易所状态: ${orderId}`);
 
     // 模拟从交易所获取状态
     const exchangeStatus = await this.fetchExchangeStatus(orderId);
@@ -338,7 +341,7 @@ export class CancelRaceHandler {
     };
     
     this.orderStates.set(orderId, orderState);
-    console.log(`[CancelRaceHandler] 添加订单状态: ${orderId}`);
+    logger.info(`[CancelRaceHandler] 添加订单状态: ${orderId}`);
   }
 
   /**
@@ -386,7 +389,7 @@ export class CancelRaceHandler {
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 
   /**

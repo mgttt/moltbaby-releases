@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/execution/order-recovery.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('order-recovery');
+
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -462,7 +465,7 @@ export class OrderRecoveryManager {
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 }
 

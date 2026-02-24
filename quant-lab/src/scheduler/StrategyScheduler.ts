@@ -56,9 +56,9 @@ export class StrategyScheduler {
     const store = new FileStore(this.config.poolDir);
     this.pool = new Pool(store);
 
-    console.log(`[StrategyScheduler] 初始化完成`);
-    console.log(`  最大 Workers: ${this.config.maxWorkers}`);
-    console.log(`  工作池目录: ${this.config.poolDir}`);
+    logger.info(`[StrategyScheduler] 初始化完成`);
+    logger.info(`  最大 Workers: ${this.config.maxWorkers}`);
+    logger.info(`  工作池目录: ${this.config.poolDir}`);
   }
 
   /**
@@ -66,11 +66,11 @@ export class StrategyScheduler {
    */
   async start(): Promise<void> {
     if (this.running) {
-      console.log('[StrategyScheduler] 已经启动');
+      logger.info('[StrategyScheduler] 已经启动');
       return;
     }
 
-    console.log(`[StrategyScheduler] 启动中...`);
+    logger.info(`[StrategyScheduler] 启动中...`);
 
     // 注册 Workers 到 Pool
     for (let i = 0; i < this.config.maxWorkers; i++) {
@@ -91,11 +91,11 @@ export class StrategyScheduler {
       });
 
       this.pool.registerWorker(poolWorker);
-      console.log(`  注册 Worker: ${workerId}`);
+      logger.info(`  注册 Worker: ${workerId}`);
     }
 
     this.running = true;
-    console.log(`[StrategyScheduler] 启动完成，${this.workers.size} 个 Worker 就绪`);
+    logger.info(`[StrategyScheduler] 启动完成，${this.workers.size} 个 Worker 就绪`);
   }
 
   /**
@@ -123,7 +123,7 @@ export class StrategyScheduler {
       status: 'pending',
     });
 
-    console.log(`[StrategyScheduler] 提交任务: ${taskId}`);
+    logger.info(`[StrategyScheduler] 提交任务: ${taskId}`);
     return taskId;
   }
 
@@ -181,13 +181,13 @@ export class StrategyScheduler {
    * 等待所有任务完成
    */
   async awaitAllResults(taskIds: string[]): Promise<BacktestResult[]> {
-    console.log(`[StrategyScheduler] 等待 ${taskIds.length} 个任务完成...`);
+    logger.info(`[StrategyScheduler] 等待 ${taskIds.length} 个任务完成...`);
 
     const results = await Promise.all(
       taskIds.map(id => this.awaitResult(id))
     );
 
-    console.log(`[StrategyScheduler] 所有任务完成`);
+    logger.info(`[StrategyScheduler] 所有任务完成`);
     return results;
   }
 
@@ -322,18 +322,18 @@ export class StrategyScheduler {
    * 停止调度器
    */
   async shutdown(): Promise<void> {
-    console.log('[StrategyScheduler] 正在关闭...');
+    logger.info('[StrategyScheduler] 正在关闭...');
     this.running = false;
 
     // 停止所有 Worker
     for (const [workerId, worker] of this.workers) {
-      console.log(`  停止 Worker: ${workerId}`);
+      logger.info(`  停止 Worker: ${workerId}`);
     }
 
     this.workers.clear();
     this.taskStates.clear();
 
-    console.log('[StrategyScheduler] 已关闭');
+    logger.info('[StrategyScheduler] 已关闭');
   }
 }
 

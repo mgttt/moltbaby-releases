@@ -10,11 +10,64 @@
 #include <float.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <dirent.h>
 #include <time.h>
 #include "ndtsdb.h"
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#include <direct.h>
+#define mkdir(path, mode) _mkdir(path)
+// Windows 简易目录遍历结构
+typedef struct DIR {
+    HANDLE handle;
+    WIN32_FIND_DATA data;
+    struct dirent *entry;
+    int first;
+} DIR;
+
+typedef struct dirent {
+    char d_name[MAX_PATH];
+} dirent;
+
+static DIR* opendir(const char *path) {
+    DIR *dir = malloc(sizeof(DIR));
+    if (!dir) return NULL;
+    char pattern[MAX_PATH];
+    snprintf(pattern, MAX_PATH, "%s/*", path);
+    dir->handle = FindFirstFile(pattern, &dir->data);
+    if (dir->handle == INVALID_HANDLE_VALUE) {
+        free(dir);
+        return NULL;
+    }
+    dir->first = 1;
+    dir->entry = malloc(sizeof(struct dirent));
+    return dir;
+}
+
+static struct dirent* readdir(DIR *dir) {
+    if (!dir || !dir->entry) return NULL;
+    if (!dir->first) {
+        if (!FindNextFile(dir->handle, &dir->data)) return NULL;
+    }
+    dir->first = 0;
+    strncpy(dir->entry->d_name, dir->data.cFileName, MAX_PATH);
+    return dir->entry;
+}
+
+static void closedir(DIR *dir) {
+    if (dir) {
+        FindClose(dir->handle);
+        free(dir->entry);
+        free(dir);
+    }
+}
+#else
+#include <sys/types.h>
+#include <dirent.h>
+#endif
 
 // ─── 类型转换 ─────────────────────────────────────────────
 
@@ -1566,6 +1619,34 @@ int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const Kl
     if (db) db->dirty = 1;  // 标记有写入
     SymbolData* sd = find_or_create_symbol(symbol, interval);
     if (!sd) return -1;
+    
+    // 查找是否已存在相同timestamp的记录
+    int existing_idx = -1;
+    for (uint32_t i = 0; i < sd->count; i++) {
+        if (sd->klines[i].timestamp == row->timestamp) {
+            existing_idx = (int)i;
+            break;
+        }
+    }
+    
+    // 如果是tombstone（volume < 0），删除已有记录
+    if (row->volume < 0) {
+        if (existing_idx >= 0) {
+            // 删除该记录：将后面的记录前移
+            for (uint32_t i = (uint32_t)existing_idx; i < sd->count - 1; i++) {
+                sd->klines[i] = sd->klines[i + 1];
+            }
+            sd->count--;
+        }
+        // 不存储tombstone本身
+        return 0;
+    }
+    
+    // 如果记录已存在，更新它（UPSERT）
+    if (existing_idx >= 0) {
+        sd->klines[existing_idx] = *row;
+        return 0;
+    }
     
     // 动态扩容：count >= capacity 时 realloc
     if (sd->count >= sd->capacity) {

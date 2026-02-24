@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/strategies/market-regime-detector.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('market-regime-detector');
+
 import type { Kline } from '../../../quant-lib/src';
 
 // ============ 类型定义 ============
@@ -238,7 +241,7 @@ export class MarketRegimeDetector {
       
       if (this.config.enableSuspend) {
         this.events.onSuspendSuggestion?.(adx);
-        console.log(
+        logger.info(
           `[MarketRegimeDetector] ⚠️ 极强趋势检测，建议暂停策略！ADX=${adx.toFixed(2)}`
         );
       }
@@ -250,7 +253,7 @@ export class MarketRegimeDetector {
       
       if (this.config.enableWarning) {
         this.events.onTrendWarning?.(adx);
-        console.log(
+        logger.info(
           `[MarketRegimeDetector] ⚡ 强趋势检测，注意风险！ADX=${adx.toFixed(2)}`
         );
       }
@@ -324,7 +327,7 @@ export class MarketRegimeDetector {
    */
   private log(message: string, ...args: any[]): void {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${message}`, ...args);
+    logger.info(`[${timestamp}] ${message}`, ...args);
   }
 }
 

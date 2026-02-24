@@ -1,3 +1,8 @@
+import { createLogger } from '../utils/logger';
+const logger = createLogger('index');
+
+import { env } from '../config/env';
+
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -15,10 +20,7 @@ export class StateManager {
    */
   constructor(stateDir?: string) {
     // 默认：~/.quant-lab/state/ （支持环境变量 QUANT_STATE_DIR 覆盖）
-    const defaultStateDir = process.env.QUANT_STATE_DIR || 
-                           `${process.env.HOME || process.env.USERPROFILE || '.'}/.quant-lab/state`;
-    
-    this.stateDir = (stateDir || defaultStateDir).replace(/\/$/, ''); // 去除尾部斜杠
+    this.stateDir = (stateDir || env.QUANT_STATE_DIR).replace(/\/$/, ''); // 去除尾部斜杠
   }
 
   /**
@@ -43,7 +45,7 @@ export class StateManager {
       const data = JSON.parse(content);
       
       if (typeof data !== 'object' || data === null) {
-        console.warn(`[StateManager] Invalid state format for ${strategyId}, using empty state`);
+        logger.warn(`[StateManager] Invalid state format for ${strategyId}, using empty state`);
         return {};
       }
       
@@ -54,7 +56,7 @@ export class StateManager {
         return {};
       }
       
-      console.error(`[StateManager] Failed to load state for ${strategyId}: ${error.message}`);
+      logger.error(`[StateManager] Failed to load state for ${strategyId}: ${error.message}`);
       return {};
     }
   }
@@ -76,7 +78,7 @@ export class StateManager {
       await writeFile(tmpPath, JSON.stringify(state, null, 2), 'utf-8');
       await rename(tmpPath, statePath);
     } catch (error: any) {
-      console.error(`[StateManager] Failed to save state for ${strategyId}: ${error.message}`);
+      logger.error(`[StateManager] Failed to save state for ${strategyId}: ${error.message}`);
       throw new Error(`State save failed: ${error.message}`);
     }
   }

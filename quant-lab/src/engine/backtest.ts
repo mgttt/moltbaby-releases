@@ -73,8 +73,8 @@ export class BacktestEngine {
     logger.info(`[BacktestEngine] 开始回测: ${this.strategy.name}`);
     logger.info(`  品种: ${this.config.symbols.join(', ')}`);
     logger.info(`  周期: ${this.config.interval}`);
-    console.log(`  时间: ${new Date(this.config.startTime * 1000).toISOString()} ~ ${new Date(this.config.endTime * 1000).toISOString()}`);
-    console.log(`  初始资金: $${this.config.initialBalance.toLocaleString()}`);
+    logger.info(`  时间: ${new Date(this.config.startTime * 1000).toISOString()} ~ ${new Date(this.config.endTime * 1000).toISOString()}`);
+    logger.info(`  初始资金: $${this.config.initialBalance.toLocaleString()}`);
     
     // 初始化策略
     const ctx = this.createContext();
@@ -82,7 +82,7 @@ export class BacktestEngine {
     
     // 加载历史数据
     const allBars = await this.loadHistoryBars();
-    console.log(`  总 K线数: ${allBars.length}`);
+    logger.info(`  总 K线数: ${allBars.length}`);
     
     // 按时间排序
     allBars.sort((a, b) => a.timestamp - b.timestamp);
@@ -126,8 +126,8 @@ export class BacktestEngine {
     logger.info(`  最终权益: $${result.finalBalance.toLocaleString()}`);
     logger.info(`  总回报: ${(result.totalReturn * 100).toFixed(2)}%`);
     logger.info(`  最大回撤: ${(result.maxDrawdown * 100).toFixed(2)}%`);
-    console.log(`  胜率: ${(result.winRate * 100).toFixed(2)}%`);
-    console.log(`  总交易: ${result.totalTrades}`);
+    logger.info(`  胜率: ${(result.winRate * 100).toFixed(2)}%`);
+    logger.info(`  总交易: ${result.totalTrades}`);
     
     return result;
   }
@@ -214,7 +214,16 @@ export class BacktestEngine {
       },
       log: (message: string, level: 'info' | 'warn' | 'error' = 'info') => {
         const timestamp = new Date().toISOString();
-        console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
+        logger.info(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
+      },
+      logInfo: (message: string) => {
+        logger.info(message);
+      },
+      logWarn: (message: string) => {
+        logger.warn(message);
+      },
+      logError: (message: string) => {
+        logger.error(message);
       },
     };
   }

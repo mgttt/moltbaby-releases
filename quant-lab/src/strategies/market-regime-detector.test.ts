@@ -11,6 +11,9 @@
  * 位置：quant-lab/src/strategies/market-regime-detector.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('market-regime-detector.test');
+
 import { describe, test, expect, beforeEach } from "bun:test";
 import { MarketRegimeDetector } from "./market-regime-detector";
 import type { Kline } from '../../../quant-lib/src';
@@ -56,7 +59,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const adx = detector.getCurrentADX();
-      console.log(`[测试] 横盘市场 ADX=${adx.toFixed(2)}`);
+      logger.info(`[测试] 横盘市场 ADX=${adx.toFixed(2)}`);
 
       // 横盘市场ADX应该较低（<25）
       expect(adx).toBeLessThan(25);
@@ -71,7 +74,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const adx = detector.getCurrentADX();
-      console.log(`[测试] 强趋势市场 ADX=${adx.toFixed(2)}`);
+      logger.info(`[测试] 强趋势市场 ADX=${adx.toFixed(2)}`);
 
       // 强趋势市场ADX应该较高（>25）
       expect(adx).toBeGreaterThan(25);
@@ -86,7 +89,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const adx = detector.getCurrentADX();
-      console.log(`[测试] 极强趋势市场 ADX=${adx.toFixed(2)}`);
+      logger.info(`[测试] 极强趋势市场 ADX=${adx.toFixed(2)}`);
 
       // 极强趋势ADX应该很高（>40）
       expect(adx).toBeGreaterThan(40);
@@ -100,7 +103,7 @@ describe("市场状态检测器 - 验收测试", () => {
       detector.setEvents({
         onTrendWarning: (adx: number) => {
           warningTriggered = true;
-          console.log(`[测试] 趋势警告触发 ADX=${adx.toFixed(2)}`);
+          logger.info(`[测试] 趋势警告触发 ADX=${adx.toFixed(2)}`);
         },
       });
 
@@ -112,7 +115,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const adx = detector.getCurrentADX();
-      console.log(`[测试] 最终ADX=${adx.toFixed(2)}, 警告=${warningTriggered}, shouldWarn=${detector.shouldWarn()}`);
+      logger.info(`[测试] 最终ADX=${adx.toFixed(2)}, 警告=${warningTriggered}, shouldWarn=${detector.shouldWarn()}`);
 
       // 验证警告触发
       expect(adx).toBeGreaterThan(25);
@@ -127,7 +130,7 @@ describe("市场状态检测器 - 验收测试", () => {
       detector.setEvents({
         onSuspendSuggestion: (adx: number) => {
           suspendTriggered = true;
-          console.log(`[测试] 暂停建议触发 ADX=${adx.toFixed(2)}`);
+          logger.info(`[测试] 暂停建议触发 ADX=${adx.toFixed(2)}`);
         },
       });
 
@@ -139,7 +142,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const adx = detector.getCurrentADX();
-      console.log(`[测试] 最终ADX=${adx.toFixed(2)}, 暂停=${suspendTriggered}, shouldSuspend=${detector.shouldSuspend()}`);
+      logger.info(`[测试] 最终ADX=${adx.toFixed(2)}, 暂停=${suspendTriggered}, shouldSuspend=${detector.shouldSuspend()}`);
 
       // 验证暂停建议
       expect(adx).toBeGreaterThan(40);
@@ -157,7 +160,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const regime = detector.getCurrentRegime();
-      console.log(`[测试] 横盘市场状态=${regime}, ADX=${detector.getCurrentADX().toFixed(2)}`);
+      logger.info(`[测试] 横盘市场状态=${regime}, ADX=${detector.getCurrentADX().toFixed(2)}`);
 
       expect(regime).toBe('RANGING');
     });
@@ -171,7 +174,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const regime = detector.getCurrentRegime();
-      console.log(`[测试] 强趋势状态=${regime}, ADX=${detector.getCurrentADX().toFixed(2)}`);
+      logger.info(`[测试] 强趋势状态=${regime}, ADX=${detector.getCurrentADX().toFixed(2)}`);
 
       expect(regime).toBe('TRENDING');
     });
@@ -185,7 +188,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const regime = detector.getCurrentRegime();
-      console.log(`[测试] 极强趋势状态=${regime}, ADX=${detector.getCurrentADX().toFixed(2)}`);
+      logger.info(`[测试] 极强趋势状态=${regime}, ADX=${detector.getCurrentADX().toFixed(2)}`);
 
       expect(regime).toBe('STRONG_TREND');
     });
@@ -198,7 +201,7 @@ describe("市场状态检测器 - 验收测试", () => {
       detector.setEvents({
         onRegimeChange: (regime, adx) => {
           regimeChanges.push({ regime, adx });
-          console.log(`[测试] 状态变化=${regime}, ADX=${adx.toFixed(2)}`);
+          logger.info(`[测试] 状态变化=${regime}, ADX=${adx.toFixed(2)}`);
         },
       });
 
@@ -209,7 +212,7 @@ describe("市场状态检测器 - 验收测试", () => {
         detector.update(createMockKline(price));
       }
 
-      console.log(`[测试] 状态变化次数=${regimeChanges.length}`);
+      logger.info(`[测试] 状态变化次数=${regimeChanges.length}`);
       expect(regimeChanges.length).toBeGreaterThan(0);
     });
   });
@@ -228,7 +231,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const adx = customDetector.getCurrentADX();
-      console.log(`[测试] 自定义周期(7) ADX=${adx.toFixed(2)}`);
+      logger.info(`[测试] 自定义周期(7) ADX=${adx.toFixed(2)}`);
 
       expect(adx).toBeGreaterThan(0);
     });
@@ -247,7 +250,7 @@ describe("市场状态检测器 - 验收测试", () => {
       }
 
       const regime = customDetector.getCurrentRegime();
-      console.log(`[测试] 自定义阈值 状态=${regime}, ADX=${customDetector.getCurrentADX().toFixed(2)}`);
+      logger.info(`[测试] 自定义阈值 状态=${regime}, ADX=${customDetector.getCurrentADX().toFixed(2)}`);
 
       // 更低的阈值应该更容易触发趋势状态
     });
@@ -266,7 +269,7 @@ describe("市场状态检测器 - 边界测试", () => {
     detector.update(createMockKline(102));
 
     const adx = detector.getCurrentADX();
-    console.log(`[测试] 数据不足 ADX=${adx}`);
+    logger.info(`[测试] 数据不足 ADX=${adx}`);
 
     expect(adx).toBe(0);
     expect(detector.getCurrentRegime()).toBe('RANGING');
@@ -286,7 +289,7 @@ describe("市场状态检测器 - 边界测试", () => {
     detector.reset();
 
     const state = detector.getState();
-    console.log(`[测试] 重置后状态=`, state);
+    logger.info(`[测试] 重置后状态=`, state);
 
     expect(state.currentADX).toBe(0);
     expect(state.currentRegime).toBe('RANGING');

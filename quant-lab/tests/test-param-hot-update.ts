@@ -3,7 +3,7 @@
  * 测试参数热更新功能
  */
 
-import { QuickJSStrategy } from '../src/sandbox/QuickJSStrategy';
+import { QuickJSStrategy } from '../legacy/QuickJSStrategy';
 import type { StrategyContext, Kline } from '../src/engine/types';
 
 // Mock StrategyContext
@@ -26,7 +26,7 @@ async function main() {
   console.log('[1] 创建策略（初始参数）...');
   const strategy = new QuickJSStrategy({
     strategyId: 'gales-test',
-    strategyFile: './strategies/gales-simple.js',
+    strategyFile: './strategies/grid/gales-simple.js',
     params: {
       symbol: 'BTCUSDT',
       gridCount: 5,

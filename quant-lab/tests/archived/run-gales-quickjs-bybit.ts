@@ -632,7 +632,7 @@ async function main() {
   // 创建策略引擎（传递 dryRun 参数）
   const engine = new QuickJSStrategyEngine(
     client,
-    './strategies/gales-simple.js',
+    './strategies/grid/gales-simple.js',
     dryRun
   );
 

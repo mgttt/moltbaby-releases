@@ -10,6 +10,9 @@
  * 位置：quant-lab/src/reporting/daily-report.test.ts
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('daily-report.test');
+
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { DailyReportGenerator, scheduleDailyReport } from "./daily-report";
 import { existsSync, rmSync, mkdirSync, readFileSync } from "fs";
@@ -250,7 +253,7 @@ describe("策略日报生成器 - 验收测试", () => {
         onAlertTriggered: (alert) => {
           if (alert.type === "MAX_DRAWDOWN") {
             alertTriggered = true;
-            console.log(`告警触发: ${alert.message}`);
+            logger.info(`告警触发: ${alert.message}`);
           }
         },
       });
@@ -284,7 +287,7 @@ describe("策略日报生成器 - 验收测试", () => {
         onAlertTriggered: (alert) => {
           if (alert.type === "ERROR_COUNT") {
             alertTriggered = true;
-            console.log(`告警触发: ${alert.message}`);
+            logger.info(`告警触发: ${alert.message}`);
           }
         },
       });
@@ -308,7 +311,7 @@ describe("策略日报生成器 - 验收测试", () => {
         },
       });
 
-      console.log("1. 采集订单数据");
+      logger.info("1. 采集订单数据");
       // 模拟一天的交易
       for (let i = 0; i < 10; i++) {
         generator.recordOrderEvent("2026-02-21", "GalesStrategy", "BTCUSDT", {
@@ -327,28 +330,28 @@ describe("策略日报生成器 - 验收测试", () => {
         });
       }
 
-      console.log("2. 更新盈亏数据");
+      logger.info("2. 更新盈亏数据");
       generator.updatePnlData("2026-02-21", "GalesStrategy", "BTCUSDT", {
         realizedPnl: 500,
         unrealizedPnl: 200,
       });
 
-      console.log("3. 生成日报");
+      logger.info("3. 生成日报");
       const report = generator.generateReport("2026-02-21", "GalesStrategy", "BTCUSDT");
 
-      console.log("4. 验证报告内容");
+      logger.info("4. 验证报告内容");
       expect(report).toBeDefined();
       expect(report?.totalOrders).toBe(10); // 只计算创建的订单，不重复计数
       expect(report?.filledOrders).toBe(10);
       expect(report?.totalPnl).toBe(700);
 
-      console.log("5. 验证文件生成");
+      logger.info("5. 验证文件生成");
       const jsonPath = join(OUTPUT_DIR, "daily-report-2026-02-21-GalesStrategy-BTCUSDT.json");
       const txtPath = join(OUTPUT_DIR, "daily-report-2026-02-21-GalesStrategy-BTCUSDT.txt");
       expect(existsSync(jsonPath)).toBe(true);
       expect(existsSync(txtPath)).toBe(true);
 
-      console.log("✅ 完整流程测试通过");
+      logger.info("✅ 完整流程测试通过");
     });
   });
 });

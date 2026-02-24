@@ -188,7 +188,7 @@ export class BybitStrategyContext implements StrategyContext {
   
   log(message: string, level: 'info' | 'warn' | 'error' = 'info'): void {
     const prefix = level === 'error' ? '❌' : level === 'warn' ? '⚠️' : 'ℹ️';
-    console.log(`${prefix} ${message}`);
+    logger.info(`${prefix} ${message}`);
   }
   
   // ============================================================

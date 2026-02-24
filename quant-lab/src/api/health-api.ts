@@ -11,6 +11,9 @@
  *   - 审计日志记录所有请求
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('health-api');
+
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { existsSync, readFileSync, mkdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
@@ -112,7 +115,7 @@ function writeAuditLog(log: AuditLog) {
     const line = JSON.stringify(log) + '\n';
     appendFileSync(logFile, line);
   } catch (error) {
-    console.error('[HealthAPI] 审计日志写入失败:', error);
+    logger.error('[HealthAPI] 审计日志写入失败:', error);
   }
 }
 
@@ -192,8 +195,8 @@ export class HealthAPI {
       });
 
       this.server.listen(port, '127.0.0.1', () => {
-        console.log(`[HealthAPI] HTTP服务启动: http://127.0.0.1:${port}`);
-        console.log(`[HealthAPI] 仅本机可访问 (127.0.0.1)`);
+        logger.info(`[HealthAPI] HTTP服务启动: http://127.0.0.1:${port}`);
+        logger.info(`[HealthAPI] 仅本机可访问 (127.0.0.1)`);
         resolve();
       });
     });
@@ -388,7 +391,7 @@ export class HealthAPI {
     return new Promise((resolve) => {
       if (this.server) {
         this.server.close(() => {
-          console.log('[HealthAPI] HTTP服务已停止');
+          logger.info('[HealthAPI] HTTP服务已停止');
           resolve();
         });
       } else {

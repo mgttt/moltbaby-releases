@@ -4,6 +4,9 @@
  * 提供从交易所API获取品种精度、最小变动单位等信息
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('symbol-info');
+
 import type { TradingProvider } from '../providers/paper-trading';
 
 /**

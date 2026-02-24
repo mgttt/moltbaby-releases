@@ -17,6 +17,9 @@
  * 7. 告警必达
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('HotReloadManager');
+
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { AlertManager } from './AlertManager';
@@ -174,7 +177,7 @@ export class HotReloadManager {
             return failedResult;
           }
 
-          console.warn(`[HotReload] 强制模式：跳过门闸检查`);
+          logger.warn(`[HotReload] 强制模式：跳过门闸检查`);
         }
 
         // 4. 状态快照
@@ -182,7 +185,7 @@ export class HotReloadManager {
 
         // 5. 干跑模式：不实际更新
         if (options.dryRun) {
-          console.log(`[HotReload] 干跑模式：门闸检查通过，未实际更新`);
+          logger.info(`[HotReload] 干跑模式：门闸检查通过，未实际更新`);
           return {
             success: true,
             strategyId,
@@ -221,15 +224,15 @@ export class HotReloadManager {
         await this.releaseLock(strategyId, lock);
       }
     } catch (error: any) {
-      console.error(`[HotReload] 热更新失败:`, error);
+      logger.error(`[HotReload] 热更新失败:`, error);
 
       // 9. 回滚
       if (snapshot && !options.dryRun) {
         try {
           await this.rollback(strategyId, snapshot);
-          console.log(`[HotReload] 回滚成功`);
+          logger.info(`[HotReload] 回滚成功`);
         } catch (rollbackError: any) {
-          console.error(`[HotReload] 回滚失败:`, rollbackError);
+          logger.error(`[HotReload] 回滚失败:`, rollbackError);
         }
       }
 
@@ -276,7 +279,7 @@ export class HotReloadManager {
         state = data.state || data;
       }
     } catch (error) {
-      console.warn(`[HotReload] 无法读取状态文件: ${stateFile}`);
+      logger.warn(`[HotReload] 无法读取状态文件: ${stateFile}`);
     }
 
     // 1. 无进行中订单（检查gridLevels中的PENDING/PLACING状态）
@@ -357,7 +360,8 @@ export class HotReloadManager {
     }
 
     // 5. 新代码语法检查（策略JS）
-    // TODO: 如果是strategy target，可以检查策略文件语法
+    // 未来增强：如果是strategy target，可以检查策略文件语法
+    // 目前由QuickJSStrategy.reload()内部处理语法错误
     checks.push({
       name: 'NewCodeSyntax',
       passed: true, // 暂时通过，语法检查较复杂
@@ -391,7 +395,7 @@ export class HotReloadManager {
       if (!pidAlive) {
         // PID已死亡，删除锁
         unlinkSync(lockFile);
-        console.log(`[HotReload] 锁文件PID ${lock.pid} 已死亡，删除锁`);
+        logger.info(`[HotReload] 锁文件PID ${lock.pid} 已死亡，删除锁`);
         return { name: 'NoLockConflict', passed: true };
       }
 
@@ -402,7 +406,7 @@ export class HotReloadManager {
       if (now - lock.startTime > timeout) {
         // 超时，删除锁
         unlinkSync(lockFile);
-        console.log(`[HotReload] 锁超时，删除锁`);
+        logger.info(`[HotReload] 锁超时，删除锁`);
         return { name: 'NoLockConflict', passed: true };
       }
 
@@ -487,14 +491,15 @@ export class HotReloadManager {
         const raw = readFileSync(stateFile, 'utf-8');
         const data = JSON.parse(raw);
         state = data.state || data;
-        console.log(`[HotReload] 快照：从状态文件加载 ${Object.keys(state).length} 个键`);
+        logger.info(`[HotReload] 快照：从状态文件加载 ${Object.keys(state).length} 个键`);
       }
     } catch (error: any) {
-      console.warn(`[HotReload] 快照：无法读取状态文件: ${error.message}`);
+      logger.warn(`[HotReload] 快照：无法读取状态文件: ${error.message}`);
     }
 
-    // TODO: 从exchange拉取openOrders和position
-    // 这需要Provider实例，暂时使用空数组
+    // 从exchange拉取openOrders和position（可选增强）
+    // 目前StateMigrationEngine.serialize()支持通过provider参数获取
+    // 如需实时数据，可传入Provider实例
     const openOrders: any[] = [];
     const position: any = null;
 
@@ -510,7 +515,7 @@ export class HotReloadManager {
     // 保存快照到磁盘
     const snapshotFile = join(this.snapshotDir, `${strategyId}-${snapshot.timestamp}.json`);
     writeFileSync(snapshotFile, JSON.stringify(snapshot, null, 2));
-    console.log(`[HotReload] 快照已保存: ${snapshotFile}`);
+    logger.info(`[HotReload] 快照已保存: ${snapshotFile}`);
 
     return snapshot;
   }
@@ -535,7 +540,7 @@ export class HotReloadManager {
    * 回滚（B项修复 - 鲶鱼建议：恢复策略state）
    */
   async rollback(strategyId: string, snapshot: StateSnapshot): Promise<void> {
-    console.log(`[HotReload] 回滚到快照: ${new Date(snapshot.timestamp).toISOString()}`);
+    logger.info(`[HotReload] 回滚到快照: ${new Date(snapshot.timestamp).toISOString()}`);
 
     // B项修复：恢复状态文件
     const stateFile = join(getHomeDir(), '.quant-lab/state', `${strategyId}.json`);
@@ -547,16 +552,16 @@ export class HotReloadManager {
         const tmpStateFile = stateFile + '.tmp';
         writeFileSync(tmpStateFile, JSON.stringify(data, null, 2));
         renameSync(tmpStateFile, stateFile);
-        console.log(`[HotReload] 回滚：状态文件已恢复 (${Object.keys(snapshot.state).length} 个键)`);
+        logger.info(`[HotReload] 回滚：状态文件已恢复 (${Object.keys(snapshot.state).length} 个键)`);
       }
 
       // 验证hash
       const restoredHash = this.hashState(snapshot.state);
       if (restoredHash !== snapshot.hash) {
-        console.warn(`[HotReload] 回滚：hash不匹配 (expected: ${snapshot.hash}, got: ${restoredHash})`);
+        logger.warn(`[HotReload] 回滚：hash不匹配 (expected: ${snapshot.hash}, got: ${restoredHash})`);
       }
     } catch (error: any) {
-      console.error(`[HotReload] 回滚失败: ${error.message}`);
+      logger.error(`[HotReload] 回滚失败: ${error.message}`);
       throw error;
     }
 
@@ -578,46 +583,46 @@ export class HotReloadManager {
     options: ReloadOptions,
     snapshot: StateSnapshot
   ): Promise<void> {
-    console.log(`[HotReload] 执行热更新: target=${options.target}`);
+    logger.info(`[HotReload] 执行热更新: target=${options.target}`);
 
     switch (options.target) {
       case 'strategy':
-        // 策略JS热更新（Day 2实现）
-        console.log(`[HotReload] 执行策略JS热更新`);
+        // 策略JS热更新 - 使用StrategyRegistry查找策略实例
+        logger.info(`[HotReload] 执行策略JS热更新`);
         
-        // Day 2实现：调用QuickJSStrategy.reload() ✅
-        // 
-        // 集成点：需要策略实例注册机制
-        // 方案A：全局策略注册表（推荐）
-        //   - StrategyRegistry.register(strategyId, instance)
-        //   - StrategyRegistry.get(strategyId) → QuickJSStrategy
-        // 方案B：IPC通信（适用于独立进程）
-        //   - HTTP API: POST /reload/{strategyId}
-        //   - Unix Socket: {strategyId}.sock
-        // 
-        // 当前实现：假设已有StrategyRegistry
-        // 实际使用需要在策略初始化时注册实例
+        // 从全局注册表获取策略实例
+        const { StrategyRegistry } = await import('./StrategyRegistry');
+        const strategy = StrategyRegistry.get(strategyId);
         
-        throw new Error(
-          '策略JS热更新需要StrategyRegistry集成。\n' +
-          '请在策略初始化时注册实例：\n' +
-          '  StrategyRegistry.register(strategyId, strategyInstance)\n' +
-          '然后可使用HotReloadManager.reload()触发热更新。\n\n' +
-          'QuickJSStrategy.reload() API已实现 ✅\n' +
-          '待集成到运行时环境。'
+        if (!strategy) {
+          throw new Error(
+            `策略未找到: ${strategyId}\n` +
+            `请确保策略已在StrategyRegistry中注册。\n` +
+            `QuickJSStrategy会在onInit时自动注册（如未禁用）。`
+          );
+        }
+
+        // 使用StrategyReloader执行热重载
+        const reloadResult = await this.strategyReloader.reloadStrategy(
+          strategy,
+          strategy as any, // QuickJSStrategy实现了StrategyContext接口
+          {
+            preserveRunId: true,
+            preserveOrderSeq: true,
+            skipValidation: options.dryRun,
+          }
         );
-        
-        // TODO Day 2集成示例代码：
-        // const strategy = StrategyRegistry.get(strategyId);
-        // if (!strategy) {
-        //   throw new Error(`Strategy not found: ${strategyId}`);
-        // }
-        // await strategy.reload();
+
+        if (!reloadResult.success) {
+          throw new Error(`策略热更新失败: ${reloadResult.error}`);
+        }
+
+        logger.info(`[HotReload] 策略JS热更新成功 (${reloadResult.duration}ms)`);
         break;
 
       case 'module':
         // TS模块热更新
-        console.log(`[HotReload] 执行TS模块热更新`);
+        logger.info(`[HotReload] 执行TS模块热更新`);
         
         // 示例：热更新QuickJSStrategy模块
         const result = await this.moduleReloader.reloadModule({
@@ -629,12 +634,12 @@ export class HotReloadManager {
           throw new Error(`模块热更新失败: ${result.error}`);
         }
 
-        console.log(`[HotReload] TS模块热更新成功`);
+        logger.info(`[HotReload] TS模块热更新成功`);
         break;
 
       case 'provider':
         // Provider热更新
-        console.log(`[HotReload] Provider热更新`);
+        logger.info(`[HotReload] Provider热更新`);
         
         // 鲶鱼验收修复：未接入真实API前，抛出错误避免假成功
         throw new Error(
@@ -646,7 +651,7 @@ export class HotReloadManager {
 
       case 'all':
         // 全部热更新
-        console.log(`[HotReload] 执行全部热更新`);
+        logger.info(`[HotReload] 执行全部热更新`);
         await this.performReload(strategyId, { ...options, target: 'strategy' }, snapshot);
         await this.performReload(strategyId, { ...options, target: 'module' }, snapshot);
         await this.performReload(strategyId, { ...options, target: 'provider' }, snapshot);
@@ -678,10 +683,10 @@ export class HotReloadManager {
 
       writeFileSync(auditFile, lines.join('\n') + '\n');
     } catch (error) {
-      console.error(`[HotReload] 审计日志写入失败:`, error);
+      logger.error(`[HotReload] 审计日志写入失败:`, error);
     }
 
     // 控制台输出
-    console.log(`[Audit] ${event.event}: ${event.strategyId}`);
+    logger.info(`[Audit] ${event.event}: ${event.strategyId}`);
   }
 }

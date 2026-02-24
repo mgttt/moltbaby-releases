@@ -11,6 +11,9 @@
  * 5. 与健康检查端点集成
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('strategy-health');
+
 import { EventEmitter } from 'events';
 
 // ==================== 类型定义 ====================
@@ -99,10 +102,10 @@ export class StrategyHealthStateMachine extends EventEmitter {
       consecutiveSlowResponses: 0,
     };
 
-    console.log(`[StrategyHealth] 初始化 [${config.strategyId}]`);
-    console.log(`  自动恢复: ${config.autoRecovery}`);
-    console.log(`  错误率阈值: ${(config.thresholds.maxErrorRate * 100).toFixed(1)}%`);
-    console.log(`  延迟阈值: ${config.thresholds.maxLatency}ms`);
+    logger.info(`[StrategyHealth] 初始化 [${config.strategyId}]`);
+    logger.info(`  自动恢复: ${config.autoRecovery}`);
+    logger.info(`  错误率阈值: ${(config.thresholds.maxErrorRate * 100).toFixed(1)}%`);
+    logger.info(`  延迟阈值: ${config.thresholds.maxLatency}ms`);
   }
 
   /**
@@ -113,7 +116,7 @@ export class StrategyHealthStateMachine extends EventEmitter {
       return;
     }
 
-    console.log(`[StrategyHealth] 🟢 启动健康检查`);
+    logger.info(`[StrategyHealth] 🟢 启动健康检查`);
     
     // 进入PREFLIGHT状态
     this.transitionTo(StrategyHealthState.PREFLIGHT, '启动前置检查');
@@ -136,7 +139,7 @@ export class StrategyHealthStateMachine extends EventEmitter {
     }
 
     this.transitionTo(StrategyHealthState.STOPPED, '健康检查停止');
-    console.log(`[StrategyHealth] 🛑 停止健康检查`);
+    logger.info(`[StrategyHealth] 🛑 停止健康检查`);
     
     this.emit('health:stopped');
   }
@@ -171,7 +174,7 @@ export class StrategyHealthStateMachine extends EventEmitter {
     this.metrics.consecutiveErrors++;
     this.metrics.lastHeartbeat = Date.now();
     
-    console.warn(`[StrategyHealth] ⚠️ 记录错误 #${this.metrics.consecutiveErrors}: ${error?.message || 'Unknown'}`);
+    logger.warn(`[StrategyHealth] ⚠️ 记录错误 #${this.metrics.consecutiveErrors}: ${error?.message || 'Unknown'}`);
 
     // 检查是否需要降级
     if (this.metrics.consecutiveErrors >= this.config.thresholds.maxConsecutiveErrors) {
@@ -188,7 +191,7 @@ export class StrategyHealthStateMachine extends EventEmitter {
     }
 
     if (error && this.config.alertConfig?.onError) {
-      this.config.alertConfig.onError(error).catch(console.error);
+      this.config.alertConfig.onError(error).catch((err) => logger.error(err));
     }
   }
 
@@ -201,7 +204,7 @@ export class StrategyHealthStateMachine extends EventEmitter {
 
     if (latency > this.config.thresholds.maxLatency) {
       this.metrics.consecutiveSlowResponses++;
-      console.warn(`[StrategyHealth] ⚠️ 慢响应 #${this.metrics.consecutiveSlowResponses}: ${latency}ms`);
+      logger.warn(`[StrategyHealth] ⚠️ 慢响应 #${this.metrics.consecutiveSlowResponses}: ${latency}ms`);
 
       if (this.metrics.consecutiveSlowResponses >= this.config.thresholds.maxConsecutiveSlowResponses) {
         if (this.state === StrategyHealthState.RUNNING) {
@@ -363,16 +366,16 @@ export class StrategyHealthStateMachine extends EventEmitter {
     this.transitions.push(transition);
 
     const icon = this.getStateIcon(newState);
-    console.log(`[StrategyHealth] ${icon} 状态转换: ${oldState} → ${newState} | ${reason}`);
+    logger.info(`[StrategyHealth] ${icon} 状态转换: ${oldState} → ${newState} | ${reason}`);
 
     // 发送告警
     if (this.config.alertConfig?.enabled) {
       if (this.config.alertConfig.onStateChange) {
-        this.config.alertConfig.onStateChange(oldState, newState, reason).catch(console.error);
+        this.config.alertConfig.onStateChange(oldState, newState, reason).catch((err) => logger.error(err));
       }
       
       if (newState === StrategyHealthState.DEGRADED && this.config.alertConfig.onDegraded) {
-        this.config.alertConfig.onDegraded(this.metrics).catch(console.error);
+        this.config.alertConfig.onDegraded(this.metrics).catch((err) => logger.error(err));
       }
     }
 
@@ -411,7 +414,7 @@ export class StrategyHealthStateMachine extends EventEmitter {
     }
 
     if (this.recoveryAttempts >= this.config.maxRecoveryAttempts) {
-      console.error(`[StrategyHealth] ❌ 恢复尝试次数超限: ${this.recoveryAttempts}`);
+      logger.error(`[StrategyHealth] ❌ 恢复尝试次数超限: ${this.recoveryAttempts}`);
       this.transitionTo(StrategyHealthState.ERROR, '自动恢复失败次数超限');
       return;
     }
@@ -427,7 +430,7 @@ export class StrategyHealthStateMachine extends EventEmitter {
       if (healthyDuration >= recoveryThreshold.minHealthyDuration) {
         this.recoveryAttempts++;
         this.transitionTo(StrategyHealthState.RUNNING, `自动恢复成功 (尝试${this.recoveryAttempts})`);
-        console.log(`[StrategyHealth] ✅ 从DEGRADED恢复至RUNNING`);
+        logger.info(`[StrategyHealth] ✅ 从DEGRADED恢复至RUNNING`);
       }
     }
   }

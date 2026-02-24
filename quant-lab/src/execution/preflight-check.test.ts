@@ -7,6 +7,9 @@
  * - 边界条件: 超限、缺失、异常
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('preflight-check.test');
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   PreflightChecker,

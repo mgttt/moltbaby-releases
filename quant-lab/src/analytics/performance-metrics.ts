@@ -3,6 +3,9 @@
  * 用途：系统性比较多策略（A/B/C/D参数组），为策略决策提供数据基础
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('performance-metrics');
+
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
@@ -93,7 +96,7 @@ export function aggregateStrategyMetrics(stateFilePath: string): StrategyMetrics
       healthStatus,
     };
   } catch (error: any) {
-    console.error(`[PerformanceMetrics] 加载失败 ${stateFilePath}:`, error.message);
+    logger.error(`[PerformanceMetrics] 加载失败 ${stateFilePath}:`, error.message);
     // 返回零值指标
     return {
       totalPnl: 0,
@@ -114,7 +117,7 @@ if (require.main === module) {
   const stateDir = process.env.QUANT_LAB_STATE_DIR || '/home/devali/.quant-lab/state';
   const stateFile = `${stateDir}/${strategyId}.json`;
 
-  console.log(`[PerformanceMetrics] 分析策略: ${strategyId}`);
+  logger.info(`[PerformanceMetrics] 分析策略: ${strategyId}`);
   const metrics = aggregateStrategyMetrics(stateFile);
-  console.log(JSON.stringify(metrics, null, 2));
+  logger.info(JSON.stringify(metrics, null, 2));
 }

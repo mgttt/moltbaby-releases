@@ -107,7 +107,7 @@
 ### 4.2 变更点
 
 #### 新增
-- ✅ 方向模式 (`direction`: long/short/neutral)
+- ✅ 方向模式 (`lean`: positive/negative/neutral)
 - ✅ autoRecenter 自动重心
 - ✅ 部分成交处理 (30% 阈值)
 - ✅ 残余风险对冲
@@ -125,7 +125,7 @@
 ```json
 {
   "symbol": "BTCUSDT",
-  "direction": "neutral",
+  "lean": "neutral",
   "gridCount": 5,
   "gridSpacing": 0.02,
   "orderSize": 5,
@@ -151,7 +151,7 @@
 ```json
 {
   "symbol": "MYXUSDT",
-  "direction": "long",
+  "lean": "positive",
   "gridCount": 10,
   "gridSpacing": 0.01,
   "maxPosition": 200,
@@ -195,7 +195,7 @@ bun tools/strategy-cli.ts stop gales-live
 # 2. 以新参数重启 (降低仓位或切换方向)
 bun tools/strategy-cli.ts start ./strategies/gales-simple.js \
   --session gales-live \
-  --params '{"direction": "long", "maxPosition": 50}'
+  --params '{"lean": "positive", "maxPosition": 50}'
 ```
 
 **方案 B: 热更新**

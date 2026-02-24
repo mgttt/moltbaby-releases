@@ -32,7 +32,7 @@ bun tests/run-strategy-generic.ts ./strategies/gales-simple.js \
 
 # 带方向参数
 bun tests/run-strategy-generic.ts ./strategies/gales-simple.js \
-  '{"symbol":"MYXUSDT","direction":"short","gridCount":5}' \
+  '{"symbol":"MYXUSDT","lean":"negative","gridCount":5}' \
   bybit wjcgm@bbt-sub1
 ```
 
@@ -109,7 +109,7 @@ bun tests/run-strategy-generic.ts ...
 | `symbol` | 交易对 | `"MYXUSDT"`, `"BTCUSDT"` |
 | `gridCount` | 网格数量 | `5`, `10` |
 | `gridSpacing` | 网格间距 | `0.02` (2%) |
-| `direction` | 策略方向 | `"long"`, `"short"`, `"neutral"` |
+| `lean | 仓位倾向 | `"positive"`, `"negative"`, `"neutral"`` |
 | `maxPosition` | 最大仓位(USDT) | `800`, `1000` |
 | `magnetDistance` | 磁铁距离 | `0.015` (1.5%) |
 | `cancelDistance` | 取消距离 | `0.01` (1%) |

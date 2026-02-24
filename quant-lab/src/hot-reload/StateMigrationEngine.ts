@@ -11,6 +11,9 @@
  * - 对账/幂等（runId/orderLinkId一致性）
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('StateMigrationEngine');
+
 import type { StrategyContext } from '../types/strategy';
 import type { Account, Position, Order } from '../types/market';
 
@@ -39,6 +42,7 @@ export interface SerializedState {
   // 元数据
   snapshotTime: number;
   snapshotHash: string;       // 用于验证完整性
+  strategyId?: string;        // 策略标识
 }
 
 export interface PendingOrder {
@@ -65,65 +69,196 @@ export class StateMigrationEngine {
   /**
    * 序列化状态
    * 
-   * 注意：完整实现需要访问StrategyContext，当前基于state文件
+   * 从StrategyContext提取完整状态用于热重载。
+   * 支持两种模式：
+   * 1. QuickJSStrategy实例（有getRunId等API）- 直接读取
+   * 2. 普通StrategyContext - 通过state文件回退读取
+   * 
+   * @param context 策略上下文或QuickJSStrategy实例
+   * @param strategyId 策略ID（用于state文件回退）
+   * @param provider 数据提供者（用于拉取openOrders，可选）
    */
-  async serialize(context: StrategyContext): Promise<SerializedState> {
-    // 注意：context参数目前未使用，因为HotReloadManager是独立的
-    // 实际使用时需要从context提取状态
+  async serialize(
+    context: StrategyContext,
+    strategyId?: string,
+    provider?: { getOpenOrders: () => Promise<Order[]> }
+  ): Promise<SerializedState> {
     
-    const state: SerializedState = {
-      runId: 0, // TODO: 从策略状态读取（需要context API）
-      orderSeq: 0, // TODO: 从策略状态读取（需要context API）
-      positionNotional: 0, // TODO: 从策略状态读取（需要context API）
-      exchangePosition: 0, // TODO: 从缓存读取（需要context API）
+    // 检查是否是QuickJSStrategy（通过检测新API存在性）
+    const isQuickJSStrategy = typeof (context as any).getRunId === 'function';
+    
+    let state: SerializedState;
+
+    if (isQuickJSStrategy) {
+      // 使用QuickJSStrategy API直接读取状态
+      const qs = context as any;
       
-      pendingOrders: [], // TODO: 从策略读取（需要context API）
-      openOrders: [], // TODO: 从exchange拉取（需要Provider）
+      state = {
+        runId: qs.getRunId() || 0,
+        orderSeq: qs.getOrderSeq() || 0,
+        positionNotional: qs.getStrategyState?.('positionNotional') || 0,
+        exchangePosition: qs.getStrategyState?.('exchangePosition') || 0,
+        
+        pendingOrders: qs.getStrategyState?.('pendingOrders') || [],
+        openOrders: provider ? await provider.getOpenOrders() : [],
+        
+        strategyState: qs.getAllStrategyState ? qs.getAllStrategyState() : {},
+        
+        cachedAccount: qs.getCachedAccount?.(),
+        cachedPositions: qs.getCachedPositions ? Array.from(qs.getCachedPositions().values()) : [],
+        
+        snapshotTime: Date.now(),
+        snapshotHash: '', // 将在下面计算
+        strategyId: strategyId,
+      };
       
-      strategyState: {}, // TODO: 从策略读取（需要context API）
-      
-      cachedAccount: undefined, // TODO: 从缓存读取（需要context API）
-      cachedPositions: [], // TODO: 从缓存读取（需要context API）
-      
-      snapshotTime: Date.now(),
-      snapshotHash: '', // 将在下面计算
-    };
+      logger.info(`[StateMigration] 使用QuickJSStrategy API序列化完成`);
+    } else {
+      // 回退：从state文件读取
+      state = await this.serializeFromStateFile(strategyId || 'unknown');
+    }
 
     // 计算hash（用于验证完整性）
     state.snapshotHash = this.hashState(state);
 
-    console.log(`[StateMigration] 序列化完成（基础实现，完整实现需要context API）`);
+    logger.info(`[StateMigration] 序列化完成:`);
+    logger.info(`  runId: ${state.runId}`);
+    logger.info(`  orderSeq: ${state.orderSeq}`);
+    logger.info(`  pendingOrders: ${state.pendingOrders.length}`);
+    logger.info(`  openOrders: ${state.openOrders.length}`);
+    logger.info(`  strategyState keys: ${Object.keys(state.strategyState).length}`);
+    
     return state;
+  }
+
+  /**
+   * 从state文件序列化（回退方案）
+   */
+  private async serializeFromStateFile(strategyId: string): Promise<SerializedState> {
+    const { existsSync, readFileSync } = await import('fs');
+    const { join } = await import('path');
+    
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
+    const stateFile = join(homeDir, '.quant-lab/state', `${strategyId}.json`);
+    
+    let fileState: Record<string, any> = {};
+    
+    try {
+      if (existsSync(stateFile)) {
+        const raw = readFileSync(stateFile, 'utf-8');
+        const data = JSON.parse(raw);
+        fileState = data.state || data;
+      }
+    } catch (error) {
+      logger.warn(`[StateMigration] 无法读取state文件: ${stateFile}`);
+    }
+
+    return {
+      runId: fileState.runId || 0,
+      orderSeq: fileState.orderSeq || 0,
+      positionNotional: fileState.positionNotional || 0,
+      exchangePosition: fileState.exchangePosition || 0,
+      pendingOrders: fileState.pendingOrders || [],
+      openOrders: [],
+      strategyState: fileState,
+      cachedAccount: undefined,
+      cachedPositions: [],
+      snapshotTime: Date.now(),
+      snapshotHash: '',
+      strategyId,
+    };
   }
 
   /**
    * 反序列化状态
    * 
-   * 注意：完整实现需要访问StrategyContext API
+   * 将序列化的状态恢复到新策略实例。
+   * 支持QuickJSStrategy实例直接恢复，普通StrategyContext回退到state文件。
+   * 
+   * @param state 序列化的状态
+   * @param newContext 新策略上下文或QuickJSStrategy实例
    */
   async deserialize(state: SerializedState, newContext: StrategyContext): Promise<void> {
     // 验证hash
     const expectedHash = this.hashState(state);
     if (state.snapshotHash !== expectedHash) {
-      throw new Error('状态hash不匹配，可能已损坏');
+      throw new Error(`状态hash不匹配，可能已损坏 (expected: ${expectedHash}, got: ${state.snapshotHash})`);
     }
 
-    console.log(`[StateMigration] 恢复状态:`);
-    console.log(`  runId: ${state.runId} ✅（保留）`);
-    console.log(`  orderSeq: ${state.orderSeq} ✅（保留）`);
-    console.log(`  positionNotional: ${state.positionNotional} ✅（保留）`);
-    console.log(`  exchangePosition: ${state.exchangePosition} ✅（保留）`);
-    console.log(`  pendingOrders: ${state.pendingOrders.length}`);
-    console.log(`  openOrders: ${state.openOrders.length}`);
-    console.log(`  cachedPositions: ${state.cachedPositions.length}`);
+    logger.info(`[StateMigration] 开始恢复状态:`);
+    logger.info(`  runId: ${state.runId} ✅（保留）`);
+    logger.info(`  orderSeq: ${state.orderSeq} ✅（保留）`);
+    logger.info(`  positionNotional: ${state.positionNotional} ✅（保留）`);
+    logger.info(`  exchangePosition: ${state.exchangePosition} ✅（保留）`);
+    logger.info(`  pendingOrders: ${state.pendingOrders.length}`);
+    logger.info(`  openOrders: ${state.openOrders.length}`);
+    logger.info(`  cachedPositions: ${state.cachedPositions.length}`);
 
-    // TODO: 恢复状态到newContext（需要context API）
-    // 例如：
-    // newContext.setState(state.strategyState);
-    // newContext.setRunId(state.runId);
-    // newContext.setOrderSeq(state.orderSeq);
+    // 检查是否是QuickJSStrategy
+    const isQuickJSStrategy = typeof (newContext as any).setRunId === 'function';
+
+    if (isQuickJSStrategy) {
+      const qs = newContext as any;
+      
+      // 恢复runId和orderSeq（幂等性关键）
+      if (state.runId > 0) {
+        qs.setRunId(state.runId);
+      }
+      if (state.orderSeq > 0) {
+        qs.setOrderSeq(state.orderSeq);
+      }
+
+      // 恢复策略状态
+      if (state.strategyState && Object.keys(state.strategyState).length > 0) {
+        for (const [key, value] of Object.entries(state.strategyState)) {
+          // 跳过已由setRunId/setOrderSeq设置的值，避免重复
+          if (key !== 'runId' && key !== 'orderSeq') {
+            qs.setStrategyState(key, value);
+          }
+        }
+      }
+
+      logger.info(`[StateMigration] 使用QuickJSStrategy API恢复状态完成`);
+    } else {
+      // 回退：写入state文件，策略下次启动时加载
+      await this.saveToStateFile(state);
+    }
+
+    logger.info(`[StateMigration] 反序列化完成 ✅`);
+  }
+
+  /**
+   * 保存状态到state文件（回退方案）
+   */
+  private async saveToStateFile(state: SerializedState): Promise<void> {
+    const { existsSync, mkdirSync, writeFileSync, renameSync } = await import('fs');
+    const { join } = await import('path');
     
-    console.log(`[StateMigration] 反序列化完成（基础实现，完整实现需要context API）`);
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
+    const stateDir = join(homeDir, '.quant-lab/state');
+    const stateFile = join(stateDir, `${state.strategyId || 'unknown'}.json`);
+    
+    if (!existsSync(stateDir)) {
+      mkdirSync(stateDir, { recursive: true });
+    }
+
+    const data = {
+      ...state.strategyState,
+      runId: state.runId,
+      orderSeq: state.orderSeq,
+      positionNotional: state.positionNotional,
+      exchangePosition: state.exchangePosition,
+      pendingOrders: state.pendingOrders,
+      _snapshotTime: state.snapshotTime,
+      _snapshotHash: state.snapshotHash,
+    };
+
+    // 原子写入
+    const tmpPath = stateFile + '.tmp';
+    writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+    renameSync(tmpPath, stateFile);
+
+    logger.info(`[StateMigration] 状态已保存到文件: ${stateFile}`);
   }
 
   /**
@@ -175,10 +310,15 @@ export class StateMigrationEngine {
 
   /**
    * 计算状态hash（用于验证完整性）
+   * 注意：snapshotHash字段本身不参与hash计算
    */
   private hashState(state: any): string {
+    // 创建state的副本，排除snapshotHash字段
+    const stateForHash = { ...state };
+    delete stateForHash.snapshotHash;
+    
     // 简单hash实现（可以改用crypto.createHash）
-    const str = JSON.stringify(state, null, 0);
+    const str = JSON.stringify(stateForHash, null, 0);
     let hash = 0;
     
     for (let i = 0; i < str.length; i++) {
@@ -195,11 +335,11 @@ export class StateMigrationEngine {
    */
   validateRunId(oldRunId: number, newRunId: number): boolean {
     if (oldRunId !== newRunId) {
-      console.error(`[StateMigration] runId不一致: ${oldRunId} → ${newRunId}`);
+      logger.error(`[StateMigration] runId不一致: ${oldRunId} → ${newRunId}`);
       return false;
     }
     
-    console.log(`[StateMigration] runId一致: ${oldRunId} ✅`);
+    logger.info(`[StateMigration] runId一致: ${oldRunId} ✅`);
     return true;
   }
 
@@ -208,11 +348,11 @@ export class StateMigrationEngine {
    */
   validateOrderSeq(oldSeq: number, newSeq: number): boolean {
     if (newSeq < oldSeq) {
-      console.error(`[StateMigration] orderSeq倒退: ${oldSeq} → ${newSeq}`);
+      logger.error(`[StateMigration] orderSeq倒退: ${oldSeq} → ${newSeq}`);
       return false;
     }
     
-    console.log(`[StateMigration] orderSeq正常: ${oldSeq} → ${newSeq} ✅`);
+    logger.info(`[StateMigration] orderSeq正常: ${oldSeq} → ${newSeq} ✅`);
     return true;
   }
 }

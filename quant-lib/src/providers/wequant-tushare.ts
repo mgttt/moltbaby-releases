@@ -157,7 +157,8 @@ export class WeQuantTushareProvider extends RestDataProvider {
   
   // 速率限制控制
   private requestTimestamps: number[] = [];
-  private readonly maxRequestsPerHour = 2;  // Tushare 免费用户限制：每小时 2 次
+  private readonly maxRequestsPerHour = 3600;  // 付费版：每小时3600次（每秒1次）
+  private readonly minRequestInterval = 1000;  // 最小间隔1秒
 
   constructor(config: WeQuantTushareConfig) {
     super({
@@ -171,7 +172,7 @@ export class WeQuantTushareProvider extends RestDataProvider {
     this.timeout = config.timeout || 30;
 
     console.log(`  🔌 WeQuant Tushare Provider 初始化`);
-    console.log(`  ⏱️  速率限制: ${this.maxRequestsPerHour} 请求/小时`);
+    console.log(`  ⏱️  速率限制: 付费版 ${this.minRequestInterval}ms 间隔`);
     if (this.proxy) {
       console.log(`  🌐 使用代理: ${this.proxy}`);
     }
@@ -187,7 +188,7 @@ export class WeQuantTushareProvider extends RestDataProvider {
     // 清理超过 1 小时的记录
     this.requestTimestamps = this.requestTimestamps.filter(ts => ts > oneHourAgo);
     
-    // 如果已经达到限制，等待
+    // 如果已经达到每小时限制，等待
     if (this.requestTimestamps.length >= this.maxRequestsPerHour) {
       const oldestRequest = this.requestTimestamps[0];
       const waitTime = oldestRequest + 60 * 60 * 1000 - now + 5000; // +5s buffer
@@ -195,6 +196,17 @@ export class WeQuantTushareProvider extends RestDataProvider {
       console.log(`  ⏳ 速率限制: 等待 ${waitMinutes} 分钟 (${Math.ceil(waitTime / 1000)}s)`);
       await this.delay(waitTime);
       return this.rateLimit(); // 递归检查
+    }
+    
+    // 检查最小间隔（付费版1秒）
+    if (this.requestTimestamps.length > 0) {
+      const lastRequest = this.requestTimestamps[this.requestTimestamps.length - 1];
+      const timeSinceLastRequest = now - lastRequest;
+      if (timeSinceLastRequest < this.minRequestInterval) {
+        const waitTime = this.minRequestInterval - timeSinceLastRequest;
+        await this.delay(waitTime);
+        return this.rateLimit(); // 递归检查
+      }
     }
     
     // 记录本次请求时间

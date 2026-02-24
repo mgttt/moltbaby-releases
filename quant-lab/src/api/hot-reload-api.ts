@@ -14,6 +14,9 @@
  *   - 审计日志记录所有请求
  */
 
+import { createLogger } from '../utils/logger';
+const logger = createLogger('hot-reload-api');
+
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
@@ -75,7 +78,7 @@ function writeAuditLog(log: AuditLog) {
     const existing = existsSync(logFile) ? readFileSync(logFile, 'utf-8') : '';
     writeFileSync(logFile, existing + line);
   } catch (error) {
-    console.error('[HotReloadAPI] 审计日志写入失败:', error);
+    logger.error('[HotReloadAPI] 审计日志写入失败:', error);
   }
 }
 
@@ -97,7 +100,7 @@ class HotReloadAPI {
    */
   registerStrategy(strategyId: string, strategy: any) {
     this.strategyMap.set(strategyId, strategy);
-    console.log(`[HotReloadAPI] 注册策略: ${strategyId}`);
+    logger.info(`[HotReloadAPI] 注册策略: ${strategyId}`);
   }
 
   /**
@@ -111,8 +114,8 @@ class HotReloadAPI {
 
       // 仅监听127.0.0.1
       this.server.listen(port, '127.0.0.1', () => {
-        console.log(`[HotReloadAPI] HTTP服务启动: http://127.0.0.1:${port}`);
-        console.log(`[HotReloadAPI] 仅本机可访问 (127.0.0.1)`);
+        logger.info(`[HotReloadAPI] HTTP服务启动: http://127.0.0.1:${port}`);
+        logger.info(`[HotReloadAPI] 仅本机可访问 (127.0.0.1)`);
         resolve();
       });
     });
@@ -227,7 +230,7 @@ class HotReloadAPI {
   private async handleReload(request: ReloadRequest): Promise<ReloadResult> {
     const { strategyId, target = 'strategy', dryRun = false, force = false } = request;
     
-    console.log(`[HotReloadAPI] 热更新请求: ${strategyId}, target=${target}`);
+    logger.info(`[HotReloadAPI] 热更新请求: ${strategyId}, target=${target}`);
     
     // 获取策略实例
     const strategy = this.strategyMap.get(strategyId);
@@ -292,7 +295,7 @@ class HotReloadAPI {
   private async handleRollback(request: { strategyId: string; toSnapshotId?: string }): Promise<ReloadResult> {
     const { strategyId, toSnapshotId } = request;
     
-    console.log(`[HotReloadAPI] 回滚请求: ${strategyId}, to=${toSnapshotId || 'previous'}`);
+    logger.info(`[HotReloadAPI] 回滚请求: ${strategyId}, to=${toSnapshotId || 'previous'}`);
     
     const strategy = this.strategyMap.get(strategyId);
     if (!strategy) {
@@ -382,7 +385,7 @@ class HotReloadAPI {
         }
       }
     } catch (error) {
-      console.error('[HotReloadAPI] 读取快照失败:', error);
+      logger.error('[HotReloadAPI] 读取快照失败:', error);
     }
     
     return {
@@ -502,7 +505,7 @@ class HotReloadAPI {
     return new Promise((resolve) => {
       if (this.server) {
         this.server.close(() => {
-          console.log('[HotReloadAPI] HTTP服务已停止');
+          logger.info('[HotReloadAPI] HTTP服务已停止');
           resolve();
         });
       } else {

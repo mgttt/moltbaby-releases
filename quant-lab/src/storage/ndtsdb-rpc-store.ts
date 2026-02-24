@@ -353,7 +353,7 @@ export class NdtsdbRpcKlineStore {
         if (this.options.fallbackEnabled) {
           this.fallback = true;
           this.stats.fallbackOps += 1;
-          console.warn(`[NdtsdbRpcKlineStore] fallback to noop after ${label} failed: ${lastErr.message}`);
+          logger.warn(`[NdtsdbRpcKlineStore] fallback to noop after ${label} failed: ${lastErr.message}`);
           return {
             id: 0,
             ok: true,
