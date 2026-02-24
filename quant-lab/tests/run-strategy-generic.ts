@@ -65,6 +65,7 @@ import { BybitProvider } from '../src/providers/bybit.js';
 import { BybitStrategyContext } from '../src/contexts/BybitStrategyContext';
 import { existsSync } from 'fs';
 import { hotReloadAPI } from '../src/api/hot-reload-api';
+import { loadAccountConfigs, type AccountConfig } from '../src/config/accounts';
 
 // ================================
 // 参数解析
@@ -119,25 +120,13 @@ try {
 }
 
 // ================================
-// 交易所配置（从 ~/.config/quant-lab/accounts.json 读取）
+// 交易所配置（统一从 config/accounts.ts 读取）
 // ================================
 
-function loadAccounts(): Record<string, any> {
-  const configPath = `${process.env.HOME}/.config/quant-lab/accounts.json`;
-  try {
-    const accounts = JSON.parse(require('fs').readFileSync(configPath, 'utf-8'));
-    const map: Record<string, any> = {};
-    for (const acc of accounts) {
-      map[acc.id] = acc;
-    }
-    return map;
-  } catch (e) {
-    logger.error(`无法读取账号配置: ${configPath}`);
-    return {};
-  }
+const ACCOUNTS: Record<string, AccountConfig> = {};
+for (const acc of loadAccountConfigs()) {
+  ACCOUNTS[acc.id] = acc;
 }
-
-const ACCOUNTS = loadAccounts();
 
 // ================================
 // 主流程
