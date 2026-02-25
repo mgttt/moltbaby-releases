@@ -15,7 +15,19 @@ bun add github:mgttt/ndtsdb-releases#ndtsdb
 - Tick 8.9M/s, Snapshot 487K/s
 - 8 平台预编译（lnx/osx/win × x86/arm）
 
-### 2. quant-lib
+### 2. ndtsdb-cli
+**NDTS CLI** — C 命令行工具 + 嵌入库
+
+```bash
+# 从 releases 目录获取预编译二进制
+# 或自行编译：make / zig build
+```
+
+- 轻量 C 实现，可嵌入 Python/Node/Rust
+- 支持 embed / facts / indicators 子命令
+- APE 跨平台可执行（Linux/macOS/Windows）
+
+### 3. quant-lib
 **量化工具库** — 数据 + 指标 + 存储
 
 ```bash

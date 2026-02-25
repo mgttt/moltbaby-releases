@@ -1,0 +1,2127 @@
+// ============================================================
+// ndtsdb-cli: CLI 入口 - QuickJS + libndtsdb
+// 支持: ./ndtsdb-cli script.js  或  ./ndtsdb-cli (REPL)
+// ============================================================
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <sys/time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/select.h>
+#include <signal.h>
+#include "quickjs.h"
+
+// 使用完整的 ndtsdb.h（而不是 src/bindings 中的简化版）
+#include "../../ndtsdb/native/ndtsdb.h"
+#include "ndtsdb_lock.h"
+
+// ============================================================
+// 跨平台兼容层
+// ============================================================
+
+// macOS clock_gettime 兼容
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+#include <mach/clock.h>
+#include <mach/mach.h>
+
+// macOS 10.12+ 原生支持 clock_gettime，但为了兼容旧版本提供替代
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+typedef int clockid_t;
+
+static int clock_gettime_compat(clockid_t clk_id, struct timespec *ts) {
+    (void)clk_id;
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    ts->tv_sec = mts.tv_sec;
+    ts->tv_nsec = mts.tv_nsec;
+    return 0;
+}
+#define clock_gettime clock_gettime_compat
+#endif
+#endif
+
+// macOS getline 兼容（GNU 扩展，macOS 原生不支持）
+#ifdef __APPLE__
+static ssize_t portable_getline(char **lineptr, size_t *n, FILE *stream) {
+    if (!lineptr || !stream) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    // 初始分配
+    if (*lineptr == NULL || *n == 0) {
+        *n = 256;
+        *lineptr = (char *)malloc(*n);
+        if (!*lineptr) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    
+    size_t len = 0;
+    int c;
+    
+    while ((c = fgetc(stream)) != EOF) {
+        // 需要扩展缓冲区
+        if (len + 2 >= *n) {
+            *n = (*n) * 2;
+            char *new_buf = (char *)realloc(*lineptr, *n);
+            if (!new_buf) {
+                errno = ENOMEM;
+                return -1;
+            }
+            *lineptr = new_buf;
+        }
+        
+        (*lineptr)[len++] = (char)c;
+        
+        if (c == '\n') {
+            break;
+        }
+    }
+    
+    // EOF 且没有读到数据
+    if (len == 0 && c == EOF) {
+        return -1;
+    }
+    
+    (*lineptr)[len] = '\0';
+    return (ssize_t)len;
+}
+#define getline portable_getline
+#endif
+
+// Readline 支持（可选）
+#ifdef HAVE_READLINE
+#include <readline/readline.h>
+#include <readline/history.h>
+#endif
+
+// ==================== WebSocket 支持 ====================
+#define MAX_WS_CLIENTS 100
+#define WS_HEARTBEAT_INTERVAL 1
+#define WS_PORT 8080
+#define WS_BUFFER_SIZE 32768
+
+typedef struct {
+    int fd;
+    char symbol[64];
+    char interval[16];
+    int64_t last_timestamp;
+    time_t last_heartbeat;
+    time_t last_data_push;
+    bool active;
+    bool is_websocket;
+    bool handshake_complete;
+} ws_client_t;
+
+static ws_client_t ws_clients[MAX_WS_CLIENTS];
+static int server_fd_global = -1;
+static volatile bool server_running = true;
+
+// SHA1实现
+static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+typedef struct {
+    uint32_t state[5];
+    uint32_t count[2];
+    unsigned char buffer[64];
+} SHA1_CTX;
+
+#define SHA1_ROL(v, b) (((v) << (b)) | ((v) >> (32 - (b))))
+
+static void SHA1_Transform(SHA1_CTX *ctx, const unsigned char data[64]) {
+    uint32_t a = ctx->state[0], b = ctx->state[1], c = ctx->state[2], d = ctx->state[3], e = ctx->state[4];
+    uint32_t w[80], t, i;
+    
+    for (i = 0; i < 16; i++) {
+        w[i] = (data[i * 4] << 24) | (data[i * 4 + 1] << 16) | (data[i * 4 + 2] << 8) | data[i * 4 + 3];
+    }
+    for (i = 16; i < 80; i++) {
+        w[i] = SHA1_ROL(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    }
+    
+    for (i = 0; i < 20; i++) {
+        t = SHA1_ROL(a, 5) + ((b & c) | (~b & d)) + e + w[i] + 0x5a827999;
+        e = d; d = c; c = SHA1_ROL(b, 30); b = a; a = t;
+    }
+    for (i = 20; i < 40; i++) {
+        t = SHA1_ROL(a, 5) + (b ^ c ^ d) + e + w[i] + 0x6ed9eba1;
+        e = d; d = c; c = SHA1_ROL(b, 30); b = a; a = t;
+    }
+    for (i = 40; i < 60; i++) {
+        t = SHA1_ROL(a, 5) + ((b & c) | (b & d) | (c & d)) + e + w[i] + 0x8f1bbcdc;
+        e = d; d = c; c = SHA1_ROL(b, 30); b = a; a = t;
+    }
+    for (i = 60; i < 80; i++) {
+        t = SHA1_ROL(a, 5) + (b ^ c ^ d) + e + w[i] + 0xca62c1d6;
+        e = d; d = c; c = SHA1_ROL(b, 30); b = a; a = t;
+    }
+    
+    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d; ctx->state[4] += e;
+}
+
+static void SHA1_Init(SHA1_CTX *ctx) {
+    ctx->state[0] = 0x67452301;
+    ctx->state[1] = 0xefcdab89;
+    ctx->state[2] = 0x98badcfe;
+    ctx->state[3] = 0x10325476;
+    ctx->state[4] = 0xc3d2e1f0;
+    ctx->count[0] = ctx->count[1] = 0;
+}
+
+static void SHA1_Update(SHA1_CTX *ctx, const unsigned char *data, size_t len) {
+    size_t i, j;
+    j = (ctx->count[0] >> 3) & 63;
+    if ((ctx->count[0] += (uint32_t)(len << 3)) < (len << 3)) ctx->count[1]++;
+    ctx->count[1] += (uint32_t)(len >> 29);
+    if ((j + len) > 63) {
+        memcpy(&ctx->buffer[j], data, i = 64 - j);
+        SHA1_Transform(ctx, ctx->buffer);
+        for (; i + 63 < len; i += 64) SHA1_Transform(ctx, &data[i]);
+        j = 0;
+    } else i = 0;
+    memcpy(&ctx->buffer[j], &data[i], len - i);
+}
+
+static void SHA1_Final(unsigned char digest[20], SHA1_CTX *ctx) {
+    unsigned char finalcount[8];
+    unsigned char c;
+    int i;
+    for (i = 0; i < 8; i++) {
+        finalcount[i] = (unsigned char)((ctx->count[(i >= 4) ? 0 : 1] >> ((3 - (i & 3)) * 8)) & 255);
+    }
+    c = 0x80;
+    SHA1_Update(ctx, &c, 1);
+    while ((ctx->count[0] & 504) != 448) {
+        c = 0;
+        SHA1_Update(ctx, &c, 1);
+    }
+    SHA1_Update(ctx, finalcount, 8);
+    for (i = 0; i < 20; i++) {
+        digest[i] = (unsigned char)((ctx->state[i >> 2] >> ((3 - (i & 3)) * 8)) & 255);
+    }
+}
+
+static char *base64_encode(const unsigned char *data, size_t len) {
+    char *result = malloc((len + 2) / 3 * 4 + 1);
+    if (!result) return NULL;
+    size_t i, j;
+    for (i = 0, j = 0; i < len; i += 3, j += 4) {
+        unsigned char b1 = data[i];
+        unsigned char b2 = (i + 1 < len) ? data[i + 1] : 0;
+        unsigned char b3 = (i + 2 < len) ? data[i + 2] : 0;
+        result[j] = b64_table[b1 >> 2];
+        result[j + 1] = b64_table[((b1 & 3) << 4) | (b2 >> 4)];
+        result[j + 2] = (i + 1 < len) ? b64_table[((b2 & 15) << 2) | (b3 >> 6)] : '=';
+        result[j + 3] = (i + 2 < len) ? b64_table[b3 & 63] : '=';
+    }
+    result[j] = '\0';
+    return result;
+}
+
+// 计算WebSocket Accept Key
+static void compute_ws_accept(const char *key, char *result) {
+    const char *magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    char concat[128];
+    snprintf(concat, sizeof(concat), "%s%s", key, magic);
+    
+    unsigned char digest[20];
+    SHA1_CTX ctx;
+    SHA1_Init(&ctx);
+    SHA1_Update(&ctx, (unsigned char *)concat, strlen(concat));
+    SHA1_Final(digest, &ctx);
+    
+    char *encoded = base64_encode(digest, 20);
+    strcpy(result, encoded);
+    free(encoded);
+}
+
+// 发送WebSocket文本帧
+static void send_ws_text(int fd, const char *text) {
+    size_t len = strlen(text);
+    unsigned char frame[WS_BUFFER_SIZE];
+    size_t frame_len = 0;
+    
+    frame[frame_len++] = 0x81; // FIN=1, opcode=text(0x1)
+    
+    if (len < 126) {
+        frame[frame_len++] = (unsigned char)len;
+    } else if (len < 65536) {
+        frame[frame_len++] = 126;
+        frame[frame_len++] = (unsigned char)((len >> 8) & 0xFF);
+        frame[frame_len++] = (unsigned char)(len & 0xFF);
+    } else {
+        frame[frame_len++] = 127;
+        frame[frame_len++] = 0;
+        frame[frame_len++] = 0;
+        frame[frame_len++] = 0;
+        frame[frame_len++] = 0;
+        frame[frame_len++] = (unsigned char)((len >> 24) & 0xFF);
+        frame[frame_len++] = (unsigned char)((len >> 16) & 0xFF);
+        frame[frame_len++] = (unsigned char)((len >> 8) & 0xFF);
+        frame[frame_len++] = (unsigned char)(len & 0xFF);
+    }
+    
+    memcpy(frame + frame_len, text, len);
+    frame_len += len;
+    
+    send(fd, frame, frame_len, 0);
+}
+
+// 发送WebSocket ping帧
+static void send_ws_ping(int fd) {
+    unsigned char ping[2] = {0x89, 0x00}; // FIN=1, opcode=ping(0x9), length=0
+    send(fd, ping, 2, 0);
+}
+
+// 发送WebSocket pong帧
+static void send_ws_pong(int fd) {
+    unsigned char pong[2] = {0x8A, 0x00}; // FIN=1, opcode=pong(0xA), length=0
+    send(fd, pong, 2, 0);
+}
+
+// 解析WebSocket帧
+static int parse_ws_frame(const unsigned char *data, size_t len, unsigned char *opcode, unsigned char **payload, size_t *payload_len) {
+    if (len < 2) return -1;
+    
+    *opcode = data[0] & 0x0F;
+    bool masked = (data[1] & 0x80) != 0;
+    size_t payload_length = data[1] & 0x7F;
+    size_t header_len = 2;
+    
+    if (payload_length == 126) {
+        if (len < 4) return -1;
+        payload_length = ((size_t)data[2] << 8) | data[3];
+        header_len = 4;
+    } else if (payload_length == 127) {
+        if (len < 10) return -1;
+        payload_length = 0;
+        for (int i = 0; i < 8; i++) {
+            payload_length = (payload_length << 8) | data[2 + i];
+        }
+        header_len = 10;
+    }
+    
+    if (masked) {
+        header_len += 4;
+    }
+    
+    if (len < header_len + payload_length) return -1;
+    
+    *payload = (unsigned char *)malloc(payload_length + 1);
+    if (!*payload) return -1;
+    
+    memcpy(*payload, data + header_len, payload_length);
+    (*payload)[payload_length] = '\0';
+    
+    if (masked) {
+        unsigned char mask[4];
+        memcpy(mask, data + header_len - 4, 4);
+        for (size_t i = 0; i < payload_length; i++) {
+            (*payload)[i] ^= mask[i % 4];
+        }
+    }
+    
+    *payload_len = payload_length;
+    return header_len + payload_length;
+}
+
+// 外部模块初始化函数（来自 qjs_ndtsdb.c）
+JSModuleDef *js_init_module_ndtsdb(JSContext *ctx, const char *module_name);
+
+// 辅助：从文件读取脚本内容
+static char *read_file(const char *filename, size_t *out_len) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) return NULL;
+    
+    fseek(f, 0, SEEK_END);
+    size_t len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    char *buf = malloc(len + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    
+    if (fread(buf, 1, len, f) != len) {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    buf[len] = '\0';
+    fclose(f);
+    
+    if (out_len) *out_len = len;
+    return buf;
+}
+
+// 辅助：打印异常信息
+static void print_exception(JSContext *ctx) {
+    JSValue exception = JS_GetException(ctx);
+    const char *str = JS_ToCString(ctx, exception);
+    fprintf(stderr, "Error: %s\n", str ? str : "unknown error");
+    JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, exception);
+}
+
+// 辅助：转义字符串用于JS代码
+static char *quote_string(const char *str) {
+    if (!str) return strdup("null");
+    size_t len = strlen(str);
+    size_t escaped_len = 2; // 开头和结尾的引号
+    for (size_t i = 0; i < len; i++) {
+        if (str[i] == '\'' || str[i] == '"' || str[i] == '\\' || str[i] == '\n' || str[i] == '\r' || str[i] == '\t') {
+            escaped_len += 2;
+        } else {
+            escaped_len += 1;
+        }
+    }
+    char *result = malloc(escaped_len + 1);
+    if (!result) return strdup("null");
+    result[0] = '\'';
+    size_t j = 1;
+    for (size_t i = 0; i < len; i++) {
+        switch (str[i]) {
+            case '\'': result[j++] = '\\'; result[j++] = '\''; break;
+            case '"': result[j++] = '\\'; result[j++] = '"'; break;
+            case '\\': result[j++] = '\\'; result[j++] = '\\'; break;
+            case '\n': result[j++] = '\\'; result[j++] = 'n'; break;
+            case '\r': result[j++] = '\\'; result[j++] = 'r'; break;
+            case '\t': result[j++] = '\\'; result[j++] = 't'; break;
+            default: result[j++] = str[i];
+        }
+    }
+    result[j++] = '\'';
+    result[j] = '\0';
+    return result;
+}
+
+// 执行 JS 脚本文件
+static int run_script(JSContext *ctx, const char *filename) {
+    size_t len;
+    char *script = read_file(filename, &len);
+    if (!script) {
+        fprintf(stderr, "Failed to read file: %s\n", filename);
+        return 1;
+    }
+    
+    bool is_module = (strstr(script, "import ") != NULL || strstr(script, "import\t") != NULL);
+    int eval_flags = is_module ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL;
+
+    JSValue result = JS_Eval(ctx, script, len, filename, eval_flags);
+    free(script);
+    
+    if (JS_IsException(result)) {
+        print_exception(ctx);
+        JS_FreeValue(ctx, result);
+        return 1;
+    }
+    JS_FreeValue(ctx, result);
+    
+    if (is_module) {
+        JSContext *ctx2;
+        JSRuntime *rt = JS_GetRuntime(ctx);
+        int r;
+        while ((r = JS_ExecutePendingJob(rt, &ctx2)) > 0) {}
+        if (r < 0) {
+            print_exception(ctx);
+            return 1;
+        }
+    }
+    
+    return 0;
+}
+
+// 执行单条 JS 表达式（REPL 用）
+static int eval_line(JSContext *ctx, const char *line) {
+    JSValue result = JS_Eval(ctx, line, strlen(line), "<repl>", 
+                              JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+    
+    if (JS_IsException(result)) {
+        JS_FreeValue(ctx, result);
+        result = JS_Eval(ctx, line, strlen(line), "<repl>", JS_EVAL_TYPE_GLOBAL);
+    }
+    
+    if (JS_IsException(result)) {
+        print_exception(ctx);
+        JS_FreeValue(ctx, result);
+        return -1;
+    }
+    
+    if (!JS_IsUndefined(result)) {
+        const char *str = JS_ToCString(ctx, result);
+        if (str) {
+            printf("%s\n", str);
+            JS_FreeCString(ctx, str);
+        }
+    }
+    
+    JS_FreeValue(ctx, result);
+    return 0;
+}
+
+// REPL 主循环
+static void repl(JSContext *ctx) {
+    printf("ndtsdb-cli REPL (QuickJS)\n");
+    printf("Type .exit or press Ctrl+D to exit\n\n");
+    
+#ifdef HAVE_READLINE
+    char *line;
+    while ((line = readline("> ")) != NULL) {
+        if (strlen(line) == 0) {
+            free(line);
+            continue;
+        }
+        add_history(line);
+        if (strcmp(line, ".exit") == 0 || strcmp(line, ".quit") == 0) {
+            free(line);
+            break;
+        }
+        if (strcmp(line, ".help") == 0) {
+            printf("Commands:\n  .exit  - Exit REPL\n  .help  - Show this help\n\n");
+            free(line);
+            continue;
+        }
+        eval_line(ctx, line);
+        free(line);
+    }
+#else
+    char line[4096];
+    while (true) {
+        printf("> ");
+        fflush(stdout);
+        if (!fgets(line, sizeof(line), stdin)) {
+            printf("\n");
+            break;
+        }
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
+        if (strlen(line) == 0) continue;
+        if (strcmp(line, ".exit") == 0 || strcmp(line, ".quit") == 0) break;
+        if (strcmp(line, ".help") == 0) {
+            printf("Commands:\n  .exit  - Exit REPL\n  .help  - Show this help\n\n");
+            continue;
+        }
+        eval_line(ctx, line);
+    }
+#endif
+}
+
+// ==================== C 层 stdlib 函数 ====================
+static JSValue js_readFile(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "readFile requires path argument");
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_ThrowTypeError(ctx, "path must be a string");
+    size_t len;
+    char *content = read_file(path, &len);
+    JS_FreeCString(ctx, path);
+    if (!content) return JS_ThrowInternalError(ctx, "failed to read file");
+    JSValue result = JS_NewStringLen(ctx, content, len);
+    free(content);
+    return result;
+}
+
+static JSValue js_writeFile(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "writeFile requires path and data arguments");
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_ThrowTypeError(ctx, "path must be a string");
+    size_t len;
+    const char *data = JS_ToCStringLen(ctx, &len, argv[1]);
+    if (!data) { JS_FreeCString(ctx, path); return JS_ThrowTypeError(ctx, "data must be a string"); }
+    FILE *f = fopen(path, "wb");
+    if (!f) { JS_FreeCString(ctx, path); JS_FreeCString(ctx, data); return JS_ThrowInternalError(ctx, "failed to open file for writing"); }
+    size_t written = fwrite(data, 1, len, f);
+    fclose(f);
+    JS_FreeCString(ctx, path);
+    JS_FreeCString(ctx, data);
+    if (written != len) return JS_ThrowInternalError(ctx, "failed to write all data");
+    return JS_UNDEFINED;
+}
+
+static JSValue js_fileExists(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "fileExists requires path argument");
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_ThrowTypeError(ctx, "path must be a string");
+    struct stat st;
+    int exists = (stat(path, &st) == 0);
+    JS_FreeCString(ctx, path);
+    return JS_NewBool(ctx, exists);
+}
+
+static JSValue js_removeFile(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "removeFile requires path argument");
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_ThrowTypeError(ctx, "path must be a string");
+    int result = remove(path);
+    JS_FreeCString(ctx, path);
+    if (result != 0) return JS_ThrowInternalError(ctx, "failed to remove file");
+    return JS_UNDEFINED;
+}
+
+static JSValue js_getTimeMs(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return JS_NewInt64(ctx, ms);
+}
+
+static JSValue js_readStdinLine(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    static char *line_buffer = NULL;
+    static size_t buffer_size = 0;
+    ssize_t len = getline(&line_buffer, &buffer_size, stdin);
+    if (len == -1) {
+        free(line_buffer);
+        line_buffer = NULL;
+        buffer_size = 0;
+        return JS_NULL;
+    }
+    if (len > 0 && line_buffer[len - 1] == '\n') line_buffer[len - 1] = '\0';
+    if (len > 1 && line_buffer[len - 2] == '\r') line_buffer[len - 2] = '\0';
+    JSValue result = JS_NewString(ctx, line_buffer);
+    return result;
+}
+
+static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    for (int i = 0; i < argc; i++) {
+        if (i > 0) fputs(" ", stdout);
+        const char *str = JS_ToCString(ctx, argv[i]);
+        if (str) { fputs(str, stdout); JS_FreeCString(ctx, str); }
+    }
+    fputs("\n", stdout);
+    fflush(stdout);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_console_error(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    for (int i = 0; i < argc; i++) {
+        if (i > 0) fputs(" ", stderr);
+        const char *str = JS_ToCString(ctx, argv[i]);
+        if (str) { fputs(str, stderr); JS_FreeCString(ctx, str); }
+    }
+    fputs("\n", stderr);
+    fflush(stderr);
+    return JS_UNDEFINED;
+}
+
+static void register_stdlib(JSContext *ctx) {
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__readFile", JS_NewCFunction(ctx, js_readFile, "__readFile", 2));
+    JS_SetPropertyStr(ctx, global, "__writeFile", JS_NewCFunction(ctx, js_writeFile, "__writeFile", 3));
+    JS_SetPropertyStr(ctx, global, "__fileExists", JS_NewCFunction(ctx, js_fileExists, "__fileExists", 1));
+    JS_SetPropertyStr(ctx, global, "__removeFile", JS_NewCFunction(ctx, js_removeFile, "__removeFile", 1));
+    JS_SetPropertyStr(ctx, global, "__getTimeMs", JS_NewCFunction(ctx, js_getTimeMs, "__getTimeMs", 0));
+    JS_SetPropertyStr(ctx, global, "__readStdinLine", JS_NewCFunction(ctx, js_readStdinLine, "__readStdinLine", 0));
+    JS_SetPropertyStr(ctx, global, "__print", JS_NewCFunction(ctx, js_console_log, "__print", 1));
+    JS_SetPropertyStr(ctx, global, "__printerr", JS_NewCFunction(ctx, js_console_error, "__printerr", 1));
+    JS_FreeValue(ctx, global);
+
+    const char *console_js = "globalThis.console = {log: function() { __print.apply(null, Array.from(arguments)); },warn: function() { __print.apply(null, Array.from(arguments)); },error: function() { __printerr.apply(null, Array.from(arguments)); },info: function() { __print.apply(null, Array.from(arguments)); }};";
+    JSValue r = JS_Eval(ctx, console_js, strlen(console_js), "<stdlib>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(ctx, r);
+}
+
+// 信号处理
+static void signal_handler(int sig) {
+    server_running = false;
+    if (server_fd_global >= 0) {
+        close(server_fd_global);
+        server_fd_global = -1;
+    }
+}
+
+// 获取symbol的最新数据
+static void get_latest_for_symbol(JSContext *ctx, const char *symbol, const char *interval, char *result, size_t result_size) {
+    char js_code[4096];
+    snprintf(js_code, sizeof(js_code),
+        "(() => { try { const db = ndtsdb.open(globalThis.__db_path); const data = ndtsdb.queryFiltered(db, ['%s']); ndtsdb.close(db); if (data.length === 0) return null; const latest = data.reduce((max, row) => row.timestamp > max.timestamp ? row : max, data[0]); return JSON.stringify(latest); } catch (e) { return null; } })();",
+        symbol
+    );
+    
+    JSValue js_result = JS_Eval(ctx, js_code, strlen(js_code), "<ws>", JS_EVAL_TYPE_GLOBAL);
+    if (!JS_IsException(js_result) && !JS_IsNull(js_result) && !JS_IsUndefined(js_result)) {
+        const char *str = JS_ToCString(ctx, js_result);
+        if (str) {
+            strncpy(result, str, result_size - 1);
+            result[result_size - 1] = '\0';
+            JS_FreeCString(ctx, str);
+        }
+    }
+    JS_FreeValue(ctx, js_result);
+}
+
+// 查找空闲客户端槽
+static int find_free_client_slot() {
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (!ws_clients[i].active) return i;
+    }
+    return -1;
+}
+
+// 关闭客户端连接
+static void close_client(int idx) {
+    if (ws_clients[idx].active && ws_clients[idx].fd >= 0) {
+        close(ws_clients[idx].fd);
+    }
+    ws_clients[idx].active = false;
+    ws_clients[idx].fd = -1;
+    ws_clients[idx].is_websocket = false;
+    ws_clients[idx].handshake_complete = false;
+    ws_clients[idx].symbol[0] = '\0';
+}
+
+// 处理WebSocket握手
+static bool handle_websocket_handshake(int client_fd, const char *request, const char *symbol) {
+    char *key_start = strstr(request, "Sec-WebSocket-Key: ");
+    if (!key_start) key_start = strstr(request, "sec-websocket-key: ");
+    if (!key_start) return false;
+    
+    key_start += 19;
+    char key[64] = {0};
+    sscanf(key_start, "%63s", key);
+    if (strlen(key) == 0) return false;
+    
+    char accept[64] = {0};
+    compute_ws_accept(key, accept);
+    
+    char response[512];
+    snprintf(response, sizeof(response),
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: %s\r\n"
+        "\r\n",
+        accept
+    );
+    
+    if (send(client_fd, response, strlen(response), 0) < 0) return false;
+    return true;
+}
+
+// 处理HTTP请求
+static void handle_http_request(int client_fd, const char *request, const char *database, JSContext *ctx) {
+    char method[16] = {0};
+    char path[256] = {0};
+    sscanf(request, "%15s %255s", method, path);
+    
+    char response_body[32768] = {0};
+    int status = 200;
+    const char *content_type = "application/json";
+    
+    char *body = strstr(request, "\r\n\r\n");
+    if (body) body += 4;
+    else {
+        body = strstr(request, "\n\n");
+        if (body) body += 2;
+        else body = "";
+    }
+    
+    char escaped_body[16384] = {0};
+    int j = 0;
+    for (int i = 0; body[i] && j < sizeof(escaped_body) - 2; i++) {
+        if (body[i] == '\\' || body[i] == '"') escaped_body[j++] = '\\';
+        else if (body[i] == '\n') { escaped_body[j++] = '\\'; escaped_body[j++] = 'n'; continue; }
+        else if (body[i] == '\r') continue;
+        escaped_body[j++] = body[i];
+    }
+    escaped_body[j] = '\0';
+    
+    char js_code[16384];
+    snprintf(js_code, sizeof(js_code),
+        "(() => { const db = ndtsdb.open('%s/'); let result; try { if ('%s' === '/health') { result = JSON.stringify({ status: 'ok', version: 'ndtsdb-cli v0.2.1' }); } else if ('%s' === '/symbols') { const allData = ndtsdb.queryAll(db); const stats = {}; allData.forEach(row => { const key = row.symbol + '@' + row.interval; if (!stats[key]) stats[key] = { symbol: row.symbol, interval: row.interval, count: 0 }; stats[key].count++; }); result = JSON.stringify(Object.values(stats)); } else if ('%s'.startsWith('/query')) { const path = '%s'; const queryStart = path.indexOf('?'); let symbol = null, since = null, until = null, limit = null; if (queryStart > -1) { const params = path.substring(queryStart + 1).split('&'); for (const p of params) { const [k, v] = p.split('='); if (k === 'symbol') symbol = decodeURIComponent(v); if (k === 'since') since = BigInt(v); if (k === 'until') until = BigInt(v); if (k === 'limit') limit = parseInt(v); } } let data; if (symbol && since !== null && until !== null) data = ndtsdb.queryFilteredTime(db, [symbol], since, until); else if (symbol) data = ndtsdb.queryFiltered(db, [symbol]); else if (since !== null && until !== null) data = ndtsdb.queryTimeRange(db, since, until); else data = ndtsdb.queryAll(db); if (limit) data = data.slice(0, limit); result = data.map(r => JSON.stringify(r)).join('\\n'); } else if ('%s' === '/write-json' && '%s' === 'POST') { const body = '%s'; const lines = body.split('\\n').filter(l => l.trim()); let inserted = 0, errors = 0; for (const line of lines) { try { const row = JSON.parse(line); if (!row.symbol || !row.interval || !row.timestamp) { errors++; continue; } ndtsdb.insert(db, row.symbol, row.interval, { timestamp: BigInt(row.timestamp), open: row.open || 0, high: row.high || 0, low: row.low || 0, close: row.close || 0, volume: row.volume || 0 }); inserted++; } catch (e) { errors++; } } result = JSON.stringify({ inserted, errors }); } else { result = JSON.stringify({ error: 'Not found' }); globalThis.__http_status = 404; } } catch (e) { result = JSON.stringify({ error: e.message }); globalThis.__http_status = 500; } ndtsdb.close(db); return result; })();",
+        database, path, path, path, path, path, method, escaped_body
+    );
+    
+    JSValue result = JS_Eval(ctx, js_code, strlen(js_code), "<serve>", JS_EVAL_TYPE_GLOBAL);
+    
+    if (JS_IsException(result)) {
+        print_exception(ctx);
+        status = 500;
+        snprintf(response_body, sizeof(response_body), "{\"error\":\"Internal server error\"}");
+    } else {
+        const char *str = JS_ToCString(ctx, result);
+        if (str) {
+            strncpy(response_body, str, sizeof(response_body) - 1);
+            JS_FreeCString(ctx, str);
+        }
+        JS_FreeValue(ctx, result);
+    }
+    
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue status_val = JS_GetPropertyStr(ctx, global, "__http_status");
+    if (!JS_IsUndefined(status_val)) {
+        int32_t s;
+        if (JS_ToInt32(ctx, &s, status_val) == 0) status = s;
+        JS_DeleteProperty(ctx, global, JS_NewAtom(ctx, "__http_status"), 0);
+    }
+    JS_FreeValue(ctx, status_val);
+    JS_FreeValue(ctx, global);
+    
+    char http_response[65536];
+    const char *status_text = (status == 200) ? "OK" : (status == 404 ? "Not Found" : "Error");
+    snprintf(http_response, sizeof(http_response),
+        "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+        status, status_text, content_type, strlen(response_body), response_body
+    );
+    
+    send(client_fd, http_response, strlen(http_response), 0);
+    close(client_fd);
+}
+
+// 从路径解析symbol参数
+static bool parse_subscribe_params(const char *path, char *symbol, size_t symbol_size, char *interval, size_t interval_size) {
+    const char *query = strchr(path, '?');
+    if (!query) return false;
+    query++;
+    
+    symbol[0] = '\0';
+    interval[0] = '\0';
+    
+    char query_copy[256];
+    strncpy(query_copy, query, sizeof(query_copy) - 1);
+    query_copy[sizeof(query_copy) - 1] = '\0';
+    
+    char *token = strtok(query_copy, "&");
+    while (token) {
+        if (strncmp(token, "symbol=", 7) == 0) {
+            strncpy(symbol, token + 7, symbol_size - 1);
+            symbol[symbol_size - 1] = '\0';
+        } else if (strncmp(token, "interval=", 9) == 0) {
+            strncpy(interval, token + 9, interval_size - 1);
+            interval[interval_size - 1] = '\0';
+        }
+        token = strtok(NULL, "&");
+    }
+    
+    if (strlen(symbol) == 0) strcpy(symbol, "BTCUSDT");
+    if (strlen(interval) == 0) strcpy(interval, "1m");
+    
+    return true;
+}
+
+int main(int argc, char **argv) {
+    JSRuntime *rt = JS_NewRuntime();
+    if (!rt) { fprintf(stderr, "Failed to create QuickJS runtime\n"); return 1; }
+    JS_SetMemoryLimit(rt, 128 * 1024 * 1024);
+    
+    JSContext *ctx = JS_NewContext(rt);
+    if (!ctx) { fprintf(stderr, "Failed to create QuickJS context\n"); JS_FreeRuntime(rt); return 1; }
+    
+    js_init_module_ndtsdb(ctx, "ndtsdb");
+    register_stdlib(ctx);
+    
+    // 注入 process.env
+    {
+        extern char **environ;
+        JSValue global = JS_GetGlobalObject(ctx);
+        JSValue proc = JS_NewObject(ctx);
+        JSValue env_obj = JS_NewObject(ctx);
+        for (int i = 0; environ && environ[i]; i++) {
+            const char *kv = environ[i];
+            const char *eq = strchr(kv, '=');
+            if (!eq) continue;
+            char key[256];
+            size_t klen = eq - kv;
+            if (klen >= sizeof(key)) continue;
+            memcpy(key, kv, klen);
+            key[klen] = '\0';
+            JS_SetPropertyStr(ctx, env_obj, key, JS_NewString(ctx, eq + 1));
+        }
+        JS_SetPropertyStr(ctx, proc, "env", env_obj);
+        JS_SetPropertyStr(ctx, global, "process", proc);
+        JS_FreeValue(ctx, global);
+    }
+
+    int exit_code = 0;
+    
+    if (argc > 1 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0)) {
+        printf("ndtsdb-cli v0.2.1 (QuickJS + libndtsdb)\n");
+        fflush(stdout);
+        _exit(0);
+    }
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        printf("Usage: ndtsdb-cli [script.js]           - run script\n");
+        printf("       ndtsdb-cli --plugin <file.js> [script.js]  - load plugin then run script\n");
+        printf("       ndtsdb-cli query [options]       - query data\n");
+        printf("       ndtsdb-cli list [options]        - list symbols\n");
+        printf("       ndtsdb-cli write-json [options]  - write JSON Lines from stdin\n");
+        printf("       ndtsdb-cli write-csv [options]   - write CSV from stdin\n");
+        printf("       ndtsdb-cli sql [options]         - execute SQL query\n");
+        printf("       ndtsdb-cli serve [options]       - start HTTP/WebSocket server\n");
+        printf("         --database <path>              - database directory (required)\n");
+        printf("         --port <port>                  - server port (default: 8080)\n");
+        printf("         WebSocket: GET /subscribe?symbol=SYMBOL&interval=INTERVAL\n");
+        printf("       ndtsdb-cli                       - REPL mode\n");
+        fflush(stdout);
+        _exit(0);
+    }
+
+    // ==================== serve 子命令 ====================
+    if (argc > 1 && strcmp(argv[1], "serve") == 0) {
+        const char *database = NULL;
+        int port = 8080;
+        
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--database") == 0 || strcmp(argv[i], "-d") == 0) {
+                if (i + 1 < argc) database = argv[++i];
+            } else if (strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) {
+                if (i + 1 < argc) port = atoi(argv[++i]);
+            }
+        }
+        
+        if (!database) {
+            fprintf(stderr, "Error: --database is required\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 导入ndtsdb模块到全局
+        JSValue import_result = JS_Eval(ctx, 
+            "import * as ndtsdb from 'ndtsdb'; globalThis.ndtsdb = ndtsdb; globalThis.__db_path = ''; 'ok';", 
+            strlen("import * as ndtsdb from 'ndtsdb'; globalThis.ndtsdb = ndtsdb; globalThis.__db_path = ''; 'ok';"), 
+            "<import>", JS_EVAL_TYPE_MODULE);
+        JS_FreeValue(ctx, import_result);
+        JSContext *ctx_temp;
+        while (JS_ExecutePendingJob(rt, &ctx_temp) > 0) {}
+        
+        // 设置数据库路径
+        char set_db_js[512];
+        snprintf(set_db_js, sizeof(set_db_js), "globalThis.__db_path = '%s/';", database);
+        JSValue set_result = JS_Eval(ctx, set_db_js, strlen(set_db_js), "<db>", JS_EVAL_TYPE_GLOBAL);
+        JS_FreeValue(ctx, set_result);
+        
+        printf("Starting ndtsdb-cli HTTP/WebSocket server...\n");
+        printf("Database: %s\n", database);
+        printf("Port: %d\n", port);
+        printf("Endpoints:\n");
+        printf("  GET  /health          - Health check\n");
+        printf("  GET  /symbols         - List all symbols\n");
+        printf("  GET  /query           - Query data\n");
+        printf("  POST /write-json      - Write JSON data\n");
+        printf("  WS   /subscribe       - WebSocket subscription (params: symbol, interval)\n");
+        printf("\nPress Ctrl+C to stop\n\n");
+        fflush(stdout);
+        
+        // 创建socket
+        int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (server_fd < 0) {
+            fprintf(stderr, "Error: Failed to create socket\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        int opt = 1;
+        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(port);
+        
+        if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            fprintf(stderr, "Error: Failed to bind to port %d\n", port);
+            close(server_fd);
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        if (listen(server_fd, 5) < 0) {
+            fprintf(stderr, "Error: Failed to listen\n");
+            close(server_fd);
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        server_fd_global = server_fd;
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        
+        // 初始化客户端数组
+        for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+            ws_clients[i].active = false;
+            ws_clients[i].fd = -1;
+        }
+        
+        // 主select循环
+        while (server_running) {
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(server_fd, &readfds);
+            int max_fd = server_fd;
+            
+            // 添加WebSocket客户端到select集合
+            for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+                if (ws_clients[i].active && ws_clients[i].fd >= 0) {
+                    FD_SET(ws_clients[i].fd, &readfds);
+                    if (ws_clients[i].fd > max_fd) max_fd = ws_clients[i].fd;
+                }
+            }
+            
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 100000; // 100ms
+            
+            int ready = select(max_fd + 1, &readfds, NULL, NULL, &tv);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            
+            // 处理新连接
+            if (FD_ISSET(server_fd, &readfds)) {
+                struct sockaddr_in client_addr;
+                socklen_t client_len = sizeof(client_addr);
+                int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+                
+                if (client_fd >= 0) {
+                    // 读取HTTP请求（阻塞模式）
+                    char request[4096] = {0};
+                    int recv_len = recv(client_fd, request, sizeof(request) - 1, 0);
+                    
+                    if (recv_len > 0) {
+                        request[recv_len] = '\0';
+                        
+                        // 检查是否是WebSocket升级请求
+                        bool is_ws = (strstr(request, "Upgrade: websocket") || strstr(request, "upgrade: websocket"));
+                        bool is_subscribe = (strstr(request, "/subscribe") != NULL);
+                        
+                        if (is_ws && is_subscribe) {
+                            // 解析symbol参数
+                            char symbol[64] = {0};
+                            char interval[16] = {0};
+                            parse_subscribe_params(strchr(request, ' ') + 1, symbol, sizeof(symbol), interval, sizeof(interval));
+                            
+                            // 执行WebSocket握手
+                            if (handle_websocket_handshake(client_fd, request, symbol)) {
+                                int slot = find_free_client_slot();
+                                if (slot >= 0) {
+                                    // WebSocket客户端设置非阻塞
+                                    int flags = fcntl(client_fd, F_GETFL, 0);
+                                    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+                                    
+                                    ws_clients[slot].active = true;
+                                    ws_clients[slot].fd = client_fd;
+                                    ws_clients[slot].is_websocket = true;
+                                    ws_clients[slot].handshake_complete = true;
+                                    strncpy(ws_clients[slot].symbol, symbol, sizeof(ws_clients[slot].symbol) - 1);
+                                    strncpy(ws_clients[slot].interval, interval, sizeof(ws_clients[slot].interval) - 1);
+                                    ws_clients[slot].last_timestamp = 0;
+                                    ws_clients[slot].last_heartbeat = time(NULL);
+                                    ws_clients[slot].last_data_push = time(NULL);
+                                    
+                                    // 发送连接成功消息
+                                    send_ws_text(client_fd, "{\"type\":\"connected\",\"symbol\":\"");
+                                    send_ws_text(client_fd, symbol);
+                                    send_ws_text(client_fd, "\"}");
+                                } else {
+                                    close(client_fd);
+                                }
+                            } else {
+                                close(client_fd);
+                            }
+                        } else if (is_ws) {
+                            // 其他WebSocket请求，拒绝
+                            const char *response = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 21\r\nConnection: close\r\n\r\nUse /subscribe path";
+                            send(client_fd, response, strlen(response), 0);
+                            close(client_fd);
+                        } else {
+                            // 普通HTTP请求
+                            handle_http_request(client_fd, request, database, ctx);
+                        }
+                    } else {
+                        close(client_fd);
+                    }
+                }
+            }
+            
+            // 处理WebSocket客户端数据
+            for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+                if (!ws_clients[i].active || ws_clients[i].fd < 0) continue;
+                
+                if (FD_ISSET(ws_clients[i].fd, &readfds)) {
+                    unsigned char buffer[1024];
+                    int recv_len = recv(ws_clients[i].fd, buffer, sizeof(buffer), 0);
+                    
+                    if (recv_len <= 0) {
+                        close_client(i);
+                        continue;
+                    }
+                    
+                    unsigned char opcode;
+                    unsigned char *payload = NULL;
+                    size_t payload_len;
+                    int frame_len = parse_ws_frame(buffer, recv_len, &opcode, &payload, &payload_len);
+                    
+                    if (frame_len > 0) {
+                        switch (opcode) {
+                            case 0x08: // Close
+                                close_client(i);
+                                break;
+                            case 0x09: // Ping
+                                send_ws_pong(ws_clients[i].fd);
+                                break;
+                            case 0x0A: // Pong
+                                // 更新心跳时间
+                                ws_clients[i].last_heartbeat = time(NULL);
+                                break;
+                            case 0x01: // Text
+                            case 0x02: // Binary
+                                // 可选：处理客户端消息
+                                break;
+                        }
+                        if (payload) free(payload);
+                    }
+                }
+            }
+            
+            // 每1秒推送数据
+            time_t now = time(NULL);
+            for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+                if (!ws_clients[i].active || !ws_clients[i].is_websocket) continue;
+                
+                // 检查是否需要推送（每秒一次）
+                if (now - ws_clients[i].last_data_push >= 1) {
+                    char data[4096] = {0};
+                    get_latest_for_symbol(ctx, ws_clients[i].symbol, ws_clients[i].interval, data, sizeof(data));
+                    
+                    if (strlen(data) > 0) {
+                        // 解析timestamp
+                        int64_t new_timestamp = 0;
+                        char *ts_start = strstr(data, "\"timestamp\":");
+                        if (ts_start) {
+                            sscanf(ts_start, "\"timestamp\":%lld", (long long *)&new_timestamp);
+                        }
+                        
+                        // 有新数据才推送
+                        if (new_timestamp > ws_clients[i].last_timestamp) {
+                            ws_clients[i].last_timestamp = new_timestamp;
+                            send_ws_text(ws_clients[i].fd, data);
+                            ws_clients[i].last_data_push = now;
+                        } else {
+                            // 无新数据，发送心跳
+                            send_ws_text(ws_clients[i].fd, "{\"type\":\"heartbeat\"}");
+                            ws_clients[i].last_data_push = now;
+                        }
+                    } else {
+                        // 无数据，发送心跳
+                        send_ws_text(ws_clients[i].fd, "{\"type\":\"heartbeat\"}");
+                        ws_clients[i].last_data_push = now;
+                    }
+                }
+                
+                // 检查心跳超时（30秒）
+                if (now - ws_clients[i].last_heartbeat > 30) {
+                    close_client(i);
+                }
+            }
+        }
+        
+        // 清理所有客户端
+        for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+            if (ws_clients[i].active) {
+                close_client(i);
+            }
+        }
+        
+        close(server_fd);
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+        return 0;
+    }
+
+    // ==================== query 子命令 (纯C优化版) ====================
+    if (argc > 1 && strcmp(argv[1], "query") == 0) {
+        const char *database = NULL;
+        const char *symbols_filter = NULL;
+        int64_t since_ms = -1;
+        int64_t until_ms = -1;
+        int limit = -1;
+        int offset = 0;
+        const char *format = "json";
+        
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--database") == 0 || strcmp(argv[i], "-d") == 0) {
+                if (i + 1 < argc) database = argv[++i];
+            } else if (strcmp(argv[i], "--symbols") == 0 || strcmp(argv[i], "-s") == 0) {
+                if (i + 1 < argc) symbols_filter = argv[++i];
+            } else if (strcmp(argv[i], "--since") == 0) {
+                if (i + 1 < argc) since_ms = atoll(argv[++i]);
+            } else if (strcmp(argv[i], "--until") == 0) {
+                if (i + 1 < argc) until_ms = atoll(argv[++i]);
+            } else if (strcmp(argv[i], "--limit") == 0 || strcmp(argv[i], "-l") == 0) {
+                if (i + 1 < argc) limit = atoi(argv[++i]);
+            } else if (strcmp(argv[i], "--offset") == 0 || strcmp(argv[i], "-o") == 0) {
+                if (i + 1 < argc) offset = atoi(argv[++i]);
+            } else if (strcmp(argv[i], "--format") == 0 || strcmp(argv[i], "-f") == 0) {
+                if (i + 1 < argc) format = argv[++i];
+            }
+        }
+        
+        if (!database) {
+            fprintf(stderr, "Error: --database is required\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        if (strlen(database) == 0) {
+            fprintf(stderr, "Error: --database path cannot be empty\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 纯C实现查询（无锁，append-only 格式天然安全）
+        // 写者只追加不修改已有数据，读者要么看到完整行，要么看不到
+        NDTSDB *db = ndtsdb_open(database);
+        if (!db) {
+            fprintf(stderr, "Error: Failed to open database: %s\n", database);
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        QueryResult *result = NULL;
+        
+        if (symbols_filter && since_ms >= 0 && until_ms >= 0) {
+            // symbol + time 联合查询
+            const char *symbols[1] = { symbols_filter };
+            result = ndtsdb_query_filtered_time(db, symbols, 1, since_ms, until_ms);
+        } else if (symbols_filter) {
+            // symbol 查询 (需要实现 ndtsdb_query_filtered)
+            // 暂时用 query_all 后过滤
+            result = ndtsdb_query_all(db);
+        } else if (since_ms >= 0 && until_ms >= 0) {
+            // time 范围查询
+            result = ndtsdb_query_time_range(db, since_ms, until_ms);
+        } else {
+            // 全部查询
+            result = ndtsdb_query_all(db);
+        }
+        
+        if (!result) {
+            fprintf(stderr, "Error: Query failed\n");
+            ndtsdb_close(db);
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 应用 offset 和 limit
+        int start_idx = offset;
+        int end_idx = result->count;
+        if (limit >= 0 && start_idx + limit < end_idx) {
+            end_idx = start_idx + limit;
+        }
+        if (start_idx > (int)result->count) start_idx = result->count;
+        if (end_idx > (int)result->count) end_idx = result->count;
+        
+        // 输出结果 - ResultRow 结构: KlineRow row; char symbol[32]; char interval[16];
+        typedef struct { KlineRow row; char symbol[32]; char interval[16]; } ResultRow;
+        ResultRow* rows = (ResultRow*)result->rows;
+        
+        if (strcmp(format, "csv") == 0) {
+            printf("timestamp,symbol,interval,open,high,low,close,volume\n");
+            for (int i = start_idx; i < end_idx; i++) {
+                ResultRow *rr = &rows[i];
+                printf("%lld,%s,%s,%.2f,%.2f,%.2f,%.2f,%.4f\n",
+                    (long long)rr->row.timestamp, rr->symbol, rr->interval,
+                    rr->row.open, rr->row.high, rr->row.low, rr->row.close, rr->row.volume);
+            }
+        } else if (strcmp(format, "table") == 0) {
+            printf("timestamp      symbol   interval  open        high        low         close       volume\n");
+            printf("────────────────────────────────────────────────────────────────────────────────────────────────────\n");
+            for (int i = start_idx; i < end_idx; i++) {
+                ResultRow *rr = &rows[i];
+                printf("%-15lld%-9s%-10s%-12.2f%-12.2f%-12.2f%-12.2f%.4f\n",
+                    (long long)rr->row.timestamp, rr->symbol, rr->interval,
+                    rr->row.open, rr->row.high, rr->row.low, rr->row.close, rr->row.volume);
+            }
+        } else {
+            // JSON 格式
+            for (int i = start_idx; i < end_idx; i++) {
+                ResultRow *rr = &rows[i];
+                printf("{\"symbol\":\"%s\",\"interval\":\"%s\",\"timestamp\":%lld,\"open\":%.2f,\"high\":%.2f,\"low\":%.2f,\"close\":%.2f,\"volume\":%.4f}\n",
+                    rr->symbol, rr->interval, (long long)rr->row.timestamp,
+                    rr->row.open, rr->row.high, rr->row.low, rr->row.close, rr->row.volume);
+            }
+        }
+        
+        ndtsdb_free_result(result);
+        ndtsdb_close(db);
+        // 注意：query 使用无锁 snapshot 模式，不需要释放锁
+        
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+        return 0;
+    }
+
+    // ==================== list 子命令 ====================
+    if (argc > 1 && strcmp(argv[1], "list") == 0) {
+        const char *database = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--database") == 0 || strcmp(argv[i], "-d") == 0) {
+                if (i + 1 < argc) database = argv[++i];
+            }
+        }
+        if (!database) {
+            fprintf(stderr, "Error: --database is required\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 验证路径不为空
+        if (strlen(database) == 0) {
+            fprintf(stderr, "Error: --database path cannot be empty\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        char list_script[4096];
+        snprintf(list_script, sizeof(list_script),
+            "import * as ndtsdb from 'ndtsdb';\n"
+            "const db = ndtsdb.open('%s/');\n"
+            "const all_data = ndtsdb.queryAll(db);\n"
+            "const stats = {};\n"
+            "all_data.forEach(row => {\n"
+            "    const key = row.symbol + ':' + row.interval;\n"
+            "    if (!stats[key]) stats[key] = { symbol: row.symbol, interval: row.interval, count: 0 };\n"
+            "    stats[key].count++;\n"
+            "});\n"
+            "console.log(JSON.stringify(Object.values(stats).sort((a,b) => a.symbol.localeCompare(b.symbol))));\n"
+            "ndtsdb.close(db);\n",
+            database
+        );
+        
+        JSValue result = JS_Eval(ctx, list_script, strlen(list_script), "<list>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(result)) { print_exception(ctx); exit_code = 1; }
+        JS_FreeValue(ctx, result);
+        
+        JSContext *ctx2;
+        while (JS_ExecutePendingJob(rt, &ctx2) > 0) {}
+        
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+        return exit_code;
+    }
+
+    // ==================== write-csv 子命令 ====================
+    if (argc > 1 && strcmp(argv[1], "write-csv") == 0) {
+        const char *database = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--database") == 0 || strcmp(argv[i], "-d") == 0) {
+                if (i + 1 < argc) database = argv[++i];
+            }
+        }
+        if (!database) {
+            fprintf(stderr, "Error: --database is required\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 验证路径不为空
+        if (strlen(database) == 0) {
+            fprintf(stderr, "Error: --database path cannot be empty\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 获取独占写锁（跨进程保护）
+        int lock_fd = ndtsdb_lock_acquire(database, true);
+        if (lock_fd < 0) {
+            fprintf(stderr, "Error: Failed to acquire write lock on database: %s\n", database);
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        char write_csv_script[8192];
+        snprintf(write_csv_script, sizeof(write_csv_script),
+            "import * as ndtsdb from 'ndtsdb';\n"
+            "const db = ndtsdb.open('%s/');\n"
+            "let successCount = 0, errorCount = 0, lineNum = 0;\n"
+            "while (true) {\n"
+            "    const line = __readStdinLine();\n"
+            "    if (line === null) break;\n"
+            "    lineNum++;\n"
+            "    if (line.trim() === '') continue;\n"
+            "    if (lineNum === 1 && (line.includes('symbol') || line.includes('timestamp'))) continue;\n"
+            "    const cols = line.split(',');\n"
+            "    if (cols.length < 8) { console.error(`Skip line ${lineNum}: insufficient columns`); errorCount++; continue; }\n"
+            "    try {\n"
+            "        const symbol = cols[0].trim();\n"
+            "        const interval = cols[1].trim();\n"
+            "        const timestamp = BigInt(cols[2].trim());\n"
+            "        const open = parseFloat(cols[3].trim());\n"
+            "        const high = parseFloat(cols[4].trim());\n"
+            "        const low = parseFloat(cols[5].trim());\n"
+            "        const close = parseFloat(cols[6].trim());\n"
+            "        const volume = parseFloat(cols[7].trim());\n"
+            "        if (!symbol || !interval || !timestamp) { console.error(`Skip line ${lineNum}: missing fields`); errorCount++; continue; }\n"
+            "        ndtsdb.insert(db, symbol, interval, { timestamp: timestamp, open: open || 0, high: high || 0, low: low || 0, close: close || 0, volume: volume || 0 });\n"
+            "        successCount++;\n"
+            "    } catch (e) { console.error(`Error line ${lineNum}: ${e.message}`); errorCount++; }\n"
+            "}\n"
+            "ndtsdb.close(db);\n"
+            "console.log(`write-csv: ${successCount} rows inserted, ${errorCount} errors`);\n",
+            database
+        );
+        
+        JSValue result = JS_Eval(ctx, write_csv_script, strlen(write_csv_script), "<write-csv>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(result)) { print_exception(ctx); exit_code = 1; }
+        JS_FreeValue(ctx, result);
+        
+        JSContext *ctx2;
+        while (JS_ExecutePendingJob(rt, &ctx2) > 0) {}
+        
+        ndtsdb_lock_release(lock_fd);
+        
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+        return exit_code;
+    }
+
+    // ==================== write-json 子命令 ====================
+    if (argc > 1 && strcmp(argv[1], "write-json") == 0) {
+        const char *database = NULL;
+        bool daemon_mode = false;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--database") == 0 || strcmp(argv[i], "-d") == 0) {
+                if (i + 1 < argc) database = argv[++i];
+            } else if (strcmp(argv[i], "--daemon") == 0) {
+                daemon_mode = true;
+            }
+        }
+        if (!database) {
+            fprintf(stderr, "Error: --database is required\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 验证路径不为空
+        if (strlen(database) == 0) {
+            fprintf(stderr, "Error: --database path cannot be empty\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 获取独占写锁（跨进程保护）
+        int lock_fd = ndtsdb_lock_acquire(database, true);
+        if (lock_fd < 0) {
+            fprintf(stderr, "Error: Failed to acquire write lock on database: %s\n", database);
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 打开数据库（纯C实现）
+        NDTSDB *db = ndtsdb_open(database);
+        if (!db) {
+            fprintf(stderr, "Error: Failed to open database: %s\n", database);
+            ndtsdb_lock_release(lock_fd);
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        // 批量插入配置
+        #define BATCH_SIZE 5000
+        KlineRow batch[BATCH_SIZE];
+        char batch_symbol[64] = {0};
+        char batch_interval[16] = {0};
+        int batch_count = 0;
+        
+        char line[4096];
+        int count = 0;
+        int errors = 0;
+        
+        // Daemon模式：设置100ms flush间隔
+        #define DAEMON_FLUSH_MS 100
+        struct timeval last_flush_time;
+        bool use_daemon_mode = daemon_mode;
+        if (use_daemon_mode) {
+            gettimeofday(&last_flush_time, NULL);
+            fprintf(stderr, "Daemon mode: flush interval %dms, batch size %d\n", DAEMON_FLUSH_MS, BATCH_SIZE);
+            // 设置stdin为非阻塞模式
+            int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+            fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+        }
+        
+        // 辅助宏
+        #define SKIP_COLON(p) while (*p && *p != ':') p++; if (*p == ':') p++
+        
+        // 逐行读取stdin并解析JSON
+        while (1) {
+            // Daemon模式：带超时的读取
+            if (use_daemon_mode) {
+                fd_set fds;
+                FD_ZERO(&fds);
+                FD_SET(STDIN_FILENO, &fds);
+                
+                struct timeval tv;
+                tv.tv_sec = 0;
+                tv.tv_usec = DAEMON_FLUSH_MS * 1000; // 100ms
+                
+                int ret = select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
+                
+                // 检查是否需要flush
+                struct timeval now;
+                gettimeofday(&now, NULL);
+                long elapsed_ms = (now.tv_sec - last_flush_time.tv_sec) * 1000 + 
+                                  (now.tv_usec - last_flush_time.tv_usec) / 1000;
+                
+                if (elapsed_ms >= DAEMON_FLUSH_MS && batch_count > 0) {
+                    int inserted = ndtsdb_insert_batch(db, batch_symbol, batch_interval, batch, batch_count);
+                    if (inserted > 0) count += inserted;
+                    else errors += batch_count;
+                    batch_count = 0;
+                    last_flush_time = now;
+                    fprintf(stderr, "Flushed: total=%d, errors=%d\r", count, errors);
+                }
+                
+                if (ret <= 0) {
+                    // 超时或错误，继续循环
+                    if (ret < 0 && errno != EINTR) break;
+                    continue;
+                }
+                
+                // 有数据可读
+                ssize_t n = read(STDIN_FILENO, line, sizeof(line) - 1);
+                if (n <= 0) {
+                    if (n < 0 && errno == EAGAIN) continue;
+                    break; // EOF或错误
+                }
+                line[n] = '\0';
+                
+                // 处理行（简化版，假设每行一个JSON对象）
+                char *ptr = line;
+                char *end = line + n;
+                while (ptr < end) {
+                    // 找行尾
+                    char *line_end = ptr;
+                    while (line_end < end && *line_end != '\n' && *line_end != '\r') line_end++;
+                    
+                    if (line_end > ptr) {
+                        size_t line_len = line_end - ptr;
+                        if (line_len < sizeof(line)) {
+                            char temp_line[4096];
+                            memcpy(temp_line, ptr, line_len);
+                            temp_line[line_len] = '\0';
+                            
+                            // 解析JSON（使用temp_line）
+                            char symbol[64] = {0};
+                            char interval[16] = {0};
+                            int64_t timestamp = 0;
+                            double open = 0, high = 0, low = 0, close = 0, volume = 0;
+                            
+                            // 简化的JSON解析
+                            char *p = temp_line;
+                            // symbol
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != '"') p++; p++;
+                            int i = 0; while (*p && *p != '"' && i < 63) symbol[i++] = *p++;
+                            symbol[i] = '\0';
+                            // interval
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != '"') p++; p++;
+                            i = 0; while (*p && *p != '"' && i < 15) interval[i++] = *p++;
+                            interval[i] = '\0';
+                            // timestamp
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != ':') p++; p++;
+                            timestamp = 0; while (*p >= '0' && *p <= '9') timestamp = timestamp * 10 + (*p++ - '0');
+                            // open
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != ':') p++; p++;
+                            open = strtod(p, &p);
+                            // high
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != ':') p++; p++;
+                            high = strtod(p, &p);
+                            // low
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != ':') p++; p++;
+                            low = strtod(p, &p);
+                            // close
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != ':') p++; p++;
+                            close = strtod(p, &p);
+                            // volume
+                            while (*p && *p != '"') p++; p++;
+                            while (*p && *p != ':') p++; p++;
+                            volume = strtod(p, &p);
+                            
+                            if (symbol[0] != '\0' && interval[0] != '\0' && timestamp != 0) {
+                                batch[batch_count].timestamp = timestamp;
+                                batch[batch_count].open = open;
+                                batch[batch_count].high = high;
+                                batch[batch_count].low = low;
+                                batch[batch_count].close = close;
+                                batch[batch_count].volume = volume;
+                                batch[batch_count].flags = 0;
+                                
+                                if (batch_count == 0) {
+                                    strncpy(batch_symbol, symbol, 63);
+                                    strncpy(batch_interval, interval, 15);
+                                }
+                                batch_count++;
+                                
+                                if (batch_count >= BATCH_SIZE) {
+                                    int inserted = ndtsdb_insert_batch(db, batch_symbol, batch_interval, batch, batch_count);
+                                    if (inserted > 0) count += inserted;
+                                    else errors += batch_count;
+                                    batch_count = 0;
+                                    gettimeofday(&last_flush_time, NULL);
+                                    fprintf(stderr, "Flushed: total=%d, errors=%d\r", count, errors);
+                                }
+                            } else {
+                                errors++;
+                            }
+                        }
+                    }
+                    ptr = line_end + 1;
+                    if (*line_end == '\r' && ptr < end && *ptr == '\n') ptr++;
+                }
+                continue;
+            }
+            
+            // 普通模式：阻塞读取
+            if (!fgets(line, sizeof(line), stdin)) break;
+            // 去掉末尾换行
+            size_t len = strlen(line);
+            while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+                line[--len] = '\0';
+            }
+            
+            // 跳过空行
+            if (len == 0) continue;
+            
+            char symbol[64] = {0};
+            char interval[16] = {0};
+            int64_t timestamp = 0;
+            double open = 0, high = 0, low = 0, close = 0, volume = 0;
+            
+            // 单次扫描解析（极速版 - 假设字段顺序固定）
+            char *p = line;
+            // 跳过 {"symbol":"
+            while (*p && *p != '"') p++; p++; 
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != '"') p++; p++;
+            int i = 0; while (*p && *p != '"' && i < 63) symbol[i++] = *p++;
+            symbol[i] = '\0'; 
+            
+            // 跳过 ","interval":"
+            while (*p && *p != '"') p++; p++; 
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != '"') p++; p++;
+            i = 0; while (*p && *p != '"' && i < 15) interval[i++] = *p++;
+            interval[i] = '\0';
+            
+            // 跳过 ","timestamp":
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != ':') p++; p++;
+            timestamp = 0; while (*p >= '0' && *p <= '9') timestamp = timestamp * 10 + (*p++ - '0');
+            
+            // 跳过 ","open":
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != ':') p++; p++;
+            open = strtod(p, &p);
+            
+            // 跳过 ","high":
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != ':') p++; p++;
+            high = strtod(p, &p);
+            
+            // 跳过 ","low":
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != ':') p++; p++;
+            low = strtod(p, &p);
+            
+            // 跳过 ","close":
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != ':') p++; p++;
+            close = strtod(p, &p);
+            
+            // 跳过 ","volume":
+            while (*p && *p != '"') p++; p++;
+            while (*p && *p != ':') p++; p++;
+            volume = strtod(p, &p);
+            
+            // 验证必要字段
+            if (symbol[0] == '\0' || interval[0] == '\0' || timestamp == 0) {
+                errors++;
+                continue;
+            }
+            
+            // 如果 symbol 或 interval 变化，先写入当前批次
+            if (batch_count > 0 && (strcmp(batch_symbol, symbol) != 0 || strcmp(batch_interval, interval) != 0)) {
+                int inserted = ndtsdb_insert_batch(db, batch_symbol, batch_interval, batch, batch_count);
+                if (inserted > 0) count += inserted;
+                else errors += batch_count;
+                batch_count = 0;
+            }
+            
+            // 填充 batch
+            batch[batch_count].timestamp = timestamp;
+            batch[batch_count].open = open;
+            batch[batch_count].high = high;
+            batch[batch_count].low = low;
+            batch[batch_count].close = close;
+            batch[batch_count].volume = volume;
+            batch[batch_count].flags = 0;
+            
+            // 保存 symbol/interval
+            if (batch_count == 0) {
+                strncpy(batch_symbol, symbol, 63);
+                strncpy(batch_interval, interval, 15);
+            }
+            batch_count++;
+            
+            // 批量写入
+            if (batch_count >= BATCH_SIZE) {
+                int inserted = ndtsdb_insert_batch(db, batch_symbol, batch_interval, batch, batch_count);
+                if (inserted > 0) count += inserted;
+                else errors += batch_count;
+                batch_count = 0;
+            }
+        }
+        
+        // 写入剩余数据
+        if (batch_count > 0 && batch_symbol[0] != '\0') {
+            int inserted = ndtsdb_insert_batch(db, batch_symbol, batch_interval, batch, batch_count);
+            if (inserted > 0) count += inserted;
+            else errors += batch_count;
+        }
+        
+        ndtsdb_close(db);
+        ndtsdb_lock_release(lock_fd);
+        
+        printf("Inserted %d rows, %d errors\n", count, errors);
+        
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+        return errors > 0 ? 1 : 0;
+    }
+
+    // ==================== sql 子命令 ====================
+    if (argc > 1 && strcmp(argv[1], "sql") == 0) {
+        const char *database = NULL;
+        const char *query = NULL;
+        
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--database") == 0 || strcmp(argv[i], "-d") == 0) {
+                if (i + 1 < argc) database = argv[++i];
+            } else if (strcmp(argv[i], "--query") == 0 || strcmp(argv[i], "-q") == 0) {
+                if (i + 1 < argc) query = argv[++i];
+            }
+        }
+        
+        if (!database) {
+            fprintf(stderr, "Error: --database is required\n");
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        
+        char sql_script[32768];
+        snprintf(sql_script, sizeof(sql_script),
+            "function parseSQL(sql) {\n"
+            "    const result = { fields: [], aggregates: [], table: null, where: { symbol: null, timestampMin: null, timestampMax: null }, groupBy: null, orderBy: null, limit: null };\n"
+            "    const normalizedSQL = sql.trim().replace(/\\s+/g, ' ');\n"
+            "    const upperSQL = normalizedSQL.toUpperCase();\n"
+            "    const selectMatch = upperSQL.match(/^SELECT\\s+(.+?)\\s+FROM\\s/i);\n"
+            "    if (!selectMatch) throw new Error('Invalid SQL: expected SELECT ... FROM');\n"
+            "    const fieldsStr = normalizedSQL.substring(7, 7 + selectMatch[1].length).trim();\n"
+            "    const aggRegex = /^(COUNT|SUM|AVG|MIN|MAX)\\s*\\(\\s*(\\*|\\w+)\\s*\\)$/i;\n"
+            "    const fields = fieldsStr.split(',').map(f => f.trim()).filter(f => f);\n"
+            "    for (const field of fields) {\n"
+            "        const upperField = field.toUpperCase();\n"
+            "        const aggMatch = upperField.match(aggRegex);\n"
+            "        if (aggMatch) {\n"
+            "            result.aggregates.push({ func: aggMatch[1].toUpperCase(), field: aggMatch[2] === '*' ? '*' : aggMatch[2].toLowerCase(), raw: field });\n"
+            "            result.fields.push({ func: aggMatch[1].toUpperCase(), field: aggMatch[2] === '*' ? '*' : aggMatch[2].toLowerCase(), raw: field });\n"
+            "        } else if (field === '*') {\n"
+            "            result.fields.push('*');\n"
+            "        } else {\n"
+            "            result.fields.push(field.toLowerCase());\n"
+            "        }\n"
+            "    }\n"
+            "    const fromMatch = upperSQL.match(/FROM\\s+(\\w+)/i);\n"
+            "    if (!fromMatch) throw new Error('Invalid SQL: expected FROM clause');\n"
+            "    result.table = fromMatch[1];\n"
+            "    let whereEndIndex = upperSQL.length;\n"
+            "    const groupByIndex = upperSQL.indexOf(' GROUP BY ');\n"
+            "    if (groupByIndex !== -1) whereEndIndex = Math.min(whereEndIndex, groupByIndex);\n"
+            "    const orderByIndex = upperSQL.indexOf(' ORDER BY ');\n"
+            "    if (orderByIndex !== -1) whereEndIndex = Math.min(whereEndIndex, orderByIndex);\n"
+            "    const limitIndex = upperSQL.indexOf(' LIMIT ');\n"
+            "    if (limitIndex !== -1) whereEndIndex = Math.min(whereEndIndex, limitIndex);\n"
+            "    const whereClauseIndex = upperSQL.indexOf(' WHERE ');\n"
+            "    if (whereClauseIndex !== -1) {\n"
+            "        const whereClause = normalizedSQL.substring(whereClauseIndex + 7, whereEndIndex).trim();\n"
+            "        const conditions = whereClause.split(/\\s+AND\\s+/i);\n"
+            "        for (const cond of conditions) {\n"
+            "            const symbolMatch = cond.match(/^symbol\\s*=\\s*['\"]([^'\"]+)['\"]/i);\n"
+            "            if (symbolMatch) { result.where.symbol = symbolMatch[1]; continue; }\n"
+            "            const timestampGtMatch = cond.match(/^timestamp\\s*>(=?)\\s*(\\d+)/i);\n"
+            "            if (timestampGtMatch) { result.where.timestampMin = parseInt(timestampGtMatch[2], 10); continue; }\n"
+            "            const timestampLtMatch = cond.match(/^timestamp\\s*<(=?)\\s*(\\d+)/i);\n"
+            "            if (timestampLtMatch) { result.where.timestampMax = parseInt(timestampLtMatch[2], 10); continue; }\n"
+            "        }\n"
+            "    }\n"
+            "    if (groupByIndex !== -1) {\n"
+            "        let groupByEnd = upperSQL.length;\n"
+            "        if (orderByIndex !== -1 && orderByIndex > groupByIndex) groupByEnd = orderByIndex;\n"
+            "        if (limitIndex !== -1 && limitIndex > groupByIndex) groupByEnd = Math.min(groupByEnd, limitIndex);\n"
+            "        const groupByClause = normalizedSQL.substring(groupByIndex + 10, groupByEnd).trim();\n"
+            "        result.groupBy = groupByClause.toLowerCase();\n"
+            "    }\n"
+            "    if (orderByIndex !== -1) {\n"
+            "        let orderByEnd = upperSQL.length;\n"
+            "        if (limitIndex !== -1 && limitIndex > orderByIndex) orderByEnd = limitIndex;\n"
+            "        const orderByClause = normalizedSQL.substring(orderByIndex + 10, orderByEnd).trim();\n"
+            "        const aggMatch = orderByClause.match(/^(COUNT|SUM|AVG|MIN|MAX)\\s*\\(\\s*(\\*|\\w+)\\s*\\)/i);\n"
+            "        if (aggMatch) {\n"
+            "            const func = aggMatch[1].toUpperCase();\n"
+            "            const field = aggMatch[2] === '*' ? '*' : aggMatch[2].toLowerCase();\n"
+            "            const raw = orderByClause.substring(0, aggMatch[0].length);\n"
+            "            const rest = orderByClause.substring(aggMatch[0].length).trim();\n"
+            "            result.orderBy = { \n"
+            "                func: func, \n"
+            "                field: field, \n"
+            "                raw: raw,\n"
+            "                direction: rest.toUpperCase() === 'DESC' ? 'DESC' : 'ASC' \n"
+            "            };\n"
+            "        } else {\n"
+            "            const orderParts = orderByClause.split(/\\s+/);\n"
+            "            result.orderBy = { field: orderParts[0].toLowerCase(), direction: 'ASC' };\n"
+            "            if (orderParts.length > 1 && orderParts[1].toUpperCase() === 'DESC') {\n"
+            "                result.orderBy.direction = 'DESC';\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    const limitMatch = upperSQL.match(/LIMIT\\s+(\\d+)(?:\\s*$|\\s+ORDER\\s+BY|\\s+GROUP\\s+BY)/i) || upperSQL.match(/LIMIT\\s+(\\d+)$/i);\n"
+            "    if (limitMatch) result.limit = parseInt(limitMatch[1], 10);\n"
+            "    return result;\n"
+            "}\n"
+            "function filterFields(data, fields) {\n"
+            "    if (fields.length === 1 && fields[0] === '*') return data;\n"
+            "    return data.map(row => { const filtered = {}; for (const field of fields) if (field in row) filtered[field] = row[field]; return filtered; });\n"
+            "}\n"
+            "function executeAggregation(data, aggregates, groupByField) {\n"
+            "    if (!aggregates || aggregates.length === 0) return null;\n"
+            "    const results = [];\n"
+            "    if (groupByField) {\n"
+            "        const groups = {};\n"
+            "        for (const row of data) {\n"
+            "            const key = row[groupByField];\n"
+            "            if (!groups[key]) groups[key] = [];\n"
+            "            groups[key].push(row);\n"
+            "        }\n"
+            "        for (const key in groups) {\n"
+            "            const groupData = groups[key];\n"
+            "            const result = { [groupByField]: key };\n"
+            "            for (const agg of aggregates) {\n"
+            "                const aggKey = agg.raw || agg.func + '(' + agg.field + ')';\n"
+            "                switch (agg.func) {\n"
+            "                    case 'COUNT': result[aggKey] = groupData.length; break;\n"
+            "                    case 'SUM': result[aggKey] = groupData.reduce((sum, row) => sum + (parseFloat(row[agg.field]) || 0), 0); break;\n"
+            "                    case 'AVG': result[aggKey] = groupData.length === 0 ? null : groupData.reduce((sum, row) => sum + (parseFloat(row[agg.field]) || 0), 0) / groupData.length; break;\n"
+            "                    case 'MIN': result[aggKey] = groupData.length === 0 ? null : Math.min(...groupData.map(row => parseFloat(row[agg.field])).filter(v => !isNaN(v))); break;\n"
+            "                    case 'MAX': result[aggKey] = groupData.length === 0 ? null : Math.max(...groupData.map(row => parseFloat(row[agg.field])).filter(v => !isNaN(v))); break;\n"
+            "                    default: result[aggKey] = null;\n"
+            "                }\n"
+            "            }\n"
+            "            results.push(result);\n"
+            "        }\n"
+            "        return results;\n"
+            "    } else {\n"
+            "        const result = {};\n"
+            "        for (const agg of aggregates) {\n"
+            "            const key = agg.raw || agg.func + '(' + agg.field + ')';\n"
+            "            switch (agg.func) {\n"
+            "                case 'COUNT': result[key] = data.length; break;\n"
+            "                case 'SUM': result[key] = data.reduce((sum, row) => sum + (parseFloat(row[agg.field]) || 0), 0); break;\n"
+            "                case 'AVG': result[key] = data.length === 0 ? null : data.reduce((sum, row) => sum + (parseFloat(row[agg.field]) || 0), 0) / data.length; break;\n"
+            "                case 'MIN': result[key] = data.length === 0 ? null : Math.min(...data.map(row => parseFloat(row[agg.field])).filter(v => !isNaN(v))); break;\n"
+            "                case 'MAX': result[key] = data.length === 0 ? null : Math.max(...data.map(row => parseFloat(row[agg.field])).filter(v => !isNaN(v))); break;\n"
+            "                default: result[key] = null;\n"
+            "            }\n"
+            "        }\n"
+            "        return result;\n"
+            "    }\n"
+            "}\n"
+            "function executeOrderBy(data, orderBy) {\n"
+            "    if (!orderBy || (!orderBy.field && !orderBy.func)) return data;\n"
+            "    const direction = orderBy.direction === 'DESC' ? -1 : 1;\n"
+            "    return data.sort((a, b) => {\n"
+            "        let valA, valB;\n"
+            "        if (orderBy.func) {\n"
+            "            const key = orderBy.raw || orderBy.func + '(' + orderBy.field + ')';\n"
+            "            valA = a[key];\n"
+            "            valB = b[key];\n"
+            "        } else {\n"
+            "            valA = a[orderBy.field];\n"
+            "            valB = b[orderBy.field];\n"
+            "        }\n"
+            "        if (typeof valA === 'string') valA = valA.toLowerCase();\n"
+            "        if (typeof valB === 'string') valB = valB.toLowerCase();\n"
+            "        if (valA === null || valA === undefined) return 1 * direction;\n"
+            "        if (valB === null || valB === undefined) return -1 * direction;\n"
+            "        if (valA < valB) return -1 * direction;\n"
+            "        if (valA > valB) return 1 * direction;\n"
+            "        return 0;\n"
+            "    });\n"
+            "}\n"
+            "import * as ndtsdb from 'ndtsdb';\n"
+            "try {\n"
+            "    const db = ndtsdb.open('%s/');\n"
+            "    let sqlQuery = %s;\n"
+            "    if (!sqlQuery) {\n"
+            "        const lines = [];\n"
+            "        while (true) {\n"
+            "            const line = __readStdinLine();\n"
+            "            if (line === null) break;\n"
+            "            if (line.trim() !== '') lines.push(line);\n"
+            "        }\n"
+            "        sqlQuery = lines.join(' ');\n"
+            "    }\n"
+            "    if (!sqlQuery || sqlQuery.trim() === '') { console.error('Error: No SQL query provided'); ndtsdb.close(db); throw new Error('No SQL query'); }\n"
+            "    const parsed = parseSQL(sqlQuery);\n"
+            "    let result;\n"
+            "    if (parsed.where.symbol && parsed.where.timestampMin !== null && parsed.where.timestampMax !== null) {\n"
+            "        result = ndtsdb.queryFilteredTime(db, [parsed.where.symbol], parsed.where.timestampMin, parsed.where.timestampMax);\n"
+            "    } else if (parsed.where.symbol) {\n"
+            "        result = ndtsdb.queryFiltered(db, [parsed.where.symbol]);\n"
+            "    } else if (parsed.where.timestampMin !== null && parsed.where.timestampMax !== null) {\n"
+            "        result = ndtsdb.queryTimeRange(db, parsed.where.timestampMin, parsed.where.timestampMax);\n"
+            "    } else {\n"
+            "        result = ndtsdb.queryAll(db);\n"
+            "    }\n"
+            "    if (parsed.limit !== null && parsed.limit > 0) result = result.slice(0, parsed.limit);\n"
+            "    if (parsed.aggregates.length > 0) {\n"
+            "        const aggResult = executeAggregation(result, parsed.aggregates, parsed.groupBy);\n"
+            "        if (Array.isArray(aggResult)) {\n"
+            "            result = aggResult;\n"
+            "        } else {\n"
+            "            result = [aggResult];\n"
+            "        }\n"
+            "    } else if (parsed.groupBy) {\n"
+            "        const groups = {};\n"
+            "        for (const row of result) {\n"
+            "            const key = row[parsed.groupBy];\n"
+            "            if (!groups[key]) groups[key] = { [parsed.groupBy]: key, _rows: [] };\n"
+            "            groups[key]._rows.push(row);\n"
+            "        }\n"
+            "        result = Object.values(groups);\n"
+            "    } else {\n"
+            "        result = filterFields(result, parsed.fields);\n"
+            "    }\n"
+            "    if (parsed.orderBy) {\n"
+            "        result = executeOrderBy(result, parsed.orderBy);\n"
+            "    }\n"
+            "    result.forEach(row => console.log(JSON.stringify(row)));\n"
+            "    ndtsdb.close(db);\n"
+            "} catch (e) {\n"
+            "    console.error('SQL Error:', e.message);\n"
+            "    throw e;\n"
+            "}\n",
+            database, query ? quote_string(query) : "null"
+        );
+        
+        JSValue result = JS_Eval(ctx, sql_script, strlen(sql_script), "<sql>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(result)) { print_exception(ctx); exit_code = 1; }
+        JS_FreeValue(ctx, result);
+        
+        JSContext *ctx2;
+        while (JS_ExecutePendingJob(rt, &ctx2) > 0) {}
+        
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+        return exit_code;
+    }
+
+    // ==================== 脚本/REPL 模式（支持 --plugin）====================
+    {
+        const char *plugin_file = NULL;
+        const char *script_file = NULL;
+        int script_argc_start = 1;
+        
+        // 解析 --plugin 参数
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--plugin") == 0 || strcmp(argv[i], "-p") == 0) {
+                if (i + 1 < argc) {
+                    plugin_file = argv[++i];
+                    script_argc_start = i + 1;
+                }
+            } else if (strncmp(argv[i], "--plugin=", 9) == 0) {
+                plugin_file = argv[i] + 9;
+                script_argc_start = i + 1;
+            }
+        }
+        
+        // 如果有剩余参数，第一个是脚本文件
+        if (script_argc_start < argc) {
+            script_file = argv[script_argc_start];
+        }
+        
+        // 导入ndtsdb模块到全局
+        JSValue import_result = JS_Eval(ctx, 
+            "import * as ndtsdb from 'ndtsdb'; globalThis.ndtsdb = ndtsdb; 'ok';", 
+            strlen("import * as ndtsdb from 'ndtsdb'; globalThis.ndtsdb = ndtsdb; 'ok';"), 
+            "<import>", JS_EVAL_TYPE_MODULE);
+        JS_FreeValue(ctx, import_result);
+        JSContext *ctx_temp;
+        while (JS_ExecutePendingJob(rt, &ctx_temp) > 0) {}
+        
+        // 加载插件（如果指定）
+        if (plugin_file) {
+            // 读取并执行plugin-registry.js
+            size_t registry_len;
+            char *registry_content = read_file("stdlib/plugin-registry.js", &registry_len);
+            if (!registry_content) {
+                // 尝试从可执行文件所在目录的相对路径读取
+                char exe_path[512];
+                ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+                if (len > 0) {
+                    exe_path[len] = '\0';
+                    char *last_slash = strrchr(exe_path, '/');
+                    if (last_slash) {
+                        *last_slash = '\0';
+                        char registry_path[1024];
+                        snprintf(registry_path, sizeof(registry_path), "%s/stdlib/plugin-registry.js", exe_path);
+                        registry_content = read_file(registry_path, &registry_len);
+                    }
+                }
+            }
+            
+            if (registry_content) {
+                // 执行plugin-registry.js内容
+                JSValue reg_result = JS_Eval(ctx, registry_content, registry_len, "<plugin-registry>", JS_EVAL_TYPE_MODULE);
+                free(registry_content);
+                if (JS_IsException(reg_result)) {
+                    print_exception(ctx);
+                    fprintf(stderr, "Error: Failed to load plugin registry\n");
+                    JS_FreeValue(ctx, reg_result);
+                    JS_FreeContext(ctx);
+                    JS_FreeRuntime(rt);
+                    return 1;
+                }
+                JS_FreeValue(ctx, reg_result);
+                while (JS_ExecutePendingJob(rt, &ctx_temp) > 0) {}
+                
+                // 设置全局registry
+                JSValue set_reg = JS_Eval(ctx, "globalThis.__pluginRegistry = registry; 'ok';", 
+                    strlen("globalThis.__pluginRegistry = registry; 'ok';"), "<set-reg>", JS_EVAL_TYPE_MODULE);
+                JS_FreeValue(ctx, set_reg);
+                while (JS_ExecutePendingJob(rt, &ctx_temp) > 0) {}
+            } else {
+                fprintf(stderr, "Warning: Could not load plugin registry, plugin may not work correctly\n");
+            }
+            
+            // 加载插件文件
+            size_t plugin_len;
+            char *plugin_content = read_file(plugin_file, &plugin_len);
+            if (!plugin_content) {
+                fprintf(stderr, "Error: Could not read plugin file: %s\n", plugin_file);
+                JS_FreeContext(ctx);
+                JS_FreeRuntime(rt);
+                return 1;
+            }
+            
+            // 执行插件内容（作为模块）
+            JSValue plugin_result = JS_Eval(ctx, plugin_content, plugin_len, plugin_file, JS_EVAL_TYPE_MODULE);
+            free(plugin_content);
+            
+            if (JS_IsException(plugin_result)) {
+                print_exception(ctx);
+                fprintf(stderr, "Error: Failed to load plugin: %s\n", plugin_file);
+                JS_FreeValue(ctx, plugin_result);
+                JS_FreeContext(ctx);
+                JS_FreeRuntime(rt);
+                return 1;
+            }
+            JS_FreeValue(ctx, plugin_result);
+            
+            // 执行pending jobs等待模块执行完成（onLoad会在模块顶层代码中调用）
+            while (JS_ExecutePendingJob(rt, &ctx_temp) > 0) {}
+            
+            // 查找并调用onLoad函数
+            JSValue global_obj = JS_GetGlobalObject(ctx);
+            JSValue onLoad_fn = JS_GetPropertyStr(ctx, global_obj, "onLoad");
+            JS_FreeValue(ctx, global_obj);
+            
+            if (!JS_IsUndefined(onLoad_fn) && JS_IsFunction(ctx, onLoad_fn)) {
+                JSValue global_obj2 = JS_GetGlobalObject(ctx);
+                JSValue registry_obj = JS_GetPropertyStr(ctx, global_obj2, "__pluginRegistry");
+                JS_FreeValue(ctx, global_obj2);
+                JSValue args[1] = { registry_obj };
+                JSValue call_result = JS_Call(ctx, onLoad_fn, JS_UNDEFINED, 1, args);
+                JS_FreeValue(ctx, registry_obj);
+                
+                if (JS_IsException(call_result)) {
+                    print_exception(ctx);
+                    fprintf(stderr, "Error: Plugin onLoad failed\n");
+                    JS_FreeValue(ctx, call_result);
+                    JS_FreeValue(ctx, onLoad_fn);
+                    JS_FreeContext(ctx);
+                    JS_FreeRuntime(rt);
+                    return 1;
+                }
+                JS_FreeValue(ctx, call_result);
+                printf("[Plugin] Loaded: %s\n", plugin_file);
+            } else {
+                printf("[Plugin] Warning: %s has no onLoad function\n", plugin_file);
+            }
+            JS_FreeValue(ctx, onLoad_fn);
+        }
+        
+        // 执行用户脚本或进入REPL
+        if (script_file) {
+            exit_code = run_script(ctx, script_file);
+        } else {
+            repl(ctx);
+        }
+    }
+    
+    JSContext *ctx2;
+    while (JS_ExecutePendingJob(rt, &ctx2) > 0) {}
+    
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    
+    fflush(stdout);
+    fflush(stderr);
+    
+    return exit_code;
+}
