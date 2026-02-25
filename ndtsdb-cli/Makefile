@@ -1,176 +1,288 @@
 # Makefile for ndtsdb-cli
-# Phase 1: 静态链接 QuickJS + libndts.a，产出单二进制
+# 正式构建: make cosmo-docker → ndtsdb-cli.com (APE 跨平台, podman + cosmocc)
+# 归档: gcc/zig 构建已移至文件底部 Legacy 区
 
 VERSION = 0.2.0
 
-CC = gcc
-CFLAGS = -O2 -Wall -I./src/bindings -I./include -I../ndtsdb/native
+# ============================================================================
+# 正式构建: Cosmocc (podman 容器, APE 跨平台二进制)
+# 产物: ndtsdb-cli.com — Linux/macOS/Windows/FreeBSD 通用单文件
+# ============================================================================
 
-# 跨平台链接选项
-# macOS 不支持静态链接，Linux 使用静态链接
+COSMO_IMAGE  = localhost/cosmocc:latest
+COSMO_BINARY = ndtsdb-cli.com
+COSMO_DOCKER_BINARY = ndtsdb-cli-docker.com
+
+# 所有参与编译的源文件（cmd_serve.c 已禁用，不在列表中）
+COSMO_SOURCES = \
+	ndtsdb-cli/src/main.c \
+	ndtsdb-cli/src/common.c \
+	ndtsdb-cli/src/cmd_query.c \
+	ndtsdb-cli/src/cmd_io.c \
+	ndtsdb-cli/src/cmd_indicators.c \
+	ndtsdb-cli/src/cmd_sql.c \
+	ndtsdb-cli/src/cmd_plugin.c \
+	ndtsdb-cli/src/cmd_embed.c \
+	ndtsdb-cli/src/cmd_search.c \
+	ndtsdb-cli/src/cmd_facts.c \
+	ndtsdb-cli/src/ndtsdb_lock.c \
+	ndtsdb-cli/src/bindings/qjs_ndtsdb.c \
+	ndtsdb/native/ndts.c \
+	ndtsdb/native/ndtsdb_vector.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/quickjs.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/libregexp.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/libunicode.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/cutils.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/libbf.c
+
+COSMO_FLAGS = \
+	-O2 \
+	-I./ndtsdb-cli/src/bindings \
+	-I./ndtsdb-cli/include \
+	-I./ndtsdb/native \
+	-I./ndtsdb-cli/vendor/quickjs-2024-01-13 \
+	-DCONFIG_VERSION=\"2024-01-13\" \
+	-D_GNU_SOURCE \
+	-DCONFIG_BIGNUM \
+	-lm
+
+# 默认目标 = cosmo-docker (正式构建)
+all: cosmo-docker
+
+# cosmo-docker: 从 moltbaby 根目录挂载，路径与 COSMO_SOURCES 对齐
+# 产物: ndtsdb-cli/ndtsdb-cli-docker.com，同时复制为 ndtsdb-cli/ndtsdb-cli.com
+cosmo-docker:
+	@echo "=== Cosmocc APE Build (podman, reproducible) ==="
+	@echo "Image : $(COSMO_IMAGE)"
+	@echo "Output: ndtsdb-cli/$(COSMO_DOCKER_BINARY)  →  ndtsdb-cli/$(COSMO_BINARY)"
+	@rm -f $(COSMO_DOCKER_BINARY) $(COSMO_BINARY)
+	@podman run --rm \
+		-v $$(pwd)/..:/workspace \
+		-w /workspace \
+		$(COSMO_IMAGE) \
+		cosmocc -o ndtsdb-cli/$(COSMO_DOCKER_BINARY) \
+			$(COSMO_SOURCES) $(COSMO_FLAGS)
+	@cp $(COSMO_DOCKER_BINARY) $(COSMO_BINARY)
+	@echo ""
+	@echo "✓ APE binary: ndtsdb-cli/$(COSMO_BINARY)"
+	@echo "  Size  : $$(ls -lh $(COSMO_BINARY) | awk '{print $$5}')"
+	@echo "  Format: $$(file $(COSMO_BINARY) | cut -d: -f2)"
+	@echo "  Runs on: Linux / macOS / Windows / FreeBSD (x86-64)"
+
+cosmo-docker-size: $(COSMO_DOCKER_BINARY)
+	@echo "=== APE Binary Info ==="
+	@ls -lh $(COSMO_BINARY) $(COSMO_DOCKER_BINARY) 2>/dev/null
+	@file $(COSMO_BINARY) 2>/dev/null
+	@echo ""
+	@./$(COSMO_BINARY) --help 2>&1 | head -5
+
+# cosmo: 从 ndtsdb-cli 目录内挂载 (备用, 需手动调整路径)
+cosmo:
+	@echo "=== Cosmocc APE Build (local workspace mount) ==="
+	@rm -f $(COSMO_BINARY)
+	@podman run --rm \
+		-v $$(pwd):/workspace \
+		-v $$(pwd)/../ndtsdb:/ndtsdb \
+		$(COSMO_IMAGE) \
+		cosmocc -o $(COSMO_BINARY) \
+			src/main.c src/common.c src/cmd_query.c \
+			src/cmd_io.c src/cmd_indicators.c src/cmd_sql.c \
+			src/cmd_plugin.c src/cmd_embed.c src/cmd_search.c \
+			src/cmd_facts.c src/ndtsdb_lock.c \
+			src/bindings/qjs_ndtsdb.c \
+			/ndtsdb/native/ndts.c /ndtsdb/native/ndtsdb_vector.c \
+			vendor/quickjs-2024-01-13/quickjs.c \
+			vendor/quickjs-2024-01-13/libregexp.c \
+			vendor/quickjs-2024-01-13/libunicode.c \
+			vendor/quickjs-2024-01-13/cutils.c \
+			vendor/quickjs-2024-01-13/libbf.c \
+			-I./src/bindings -I./include -I/ndtsdb/native \
+			-I./vendor/quickjs-2024-01-13 \
+			-DCONFIG_VERSION=\"2024-01-13\" -D_GNU_SOURCE -DCONFIG_BIGNUM -lm
+	@echo "✓ APE binary: $(COSMO_BINARY)  ($$(ls -lh $(COSMO_BINARY) | awk '{print $$5}'))"
+
+# 安装 APE 到 ~/.local/bin（或 PREFIX=/usr/local make install）
+PREFIX ?= $(HOME)/.local
+BINDIR  = $(PREFIX)/bin
+
+install: $(COSMO_BINARY)
+	@mkdir -p $(BINDIR)
+	@cp $(COSMO_BINARY) $(BINDIR)/ndtsdb-cli
+	@chmod +x $(BINDIR)/ndtsdb-cli
+	@echo "✓ Installed: $(BINDIR)/ndtsdb-cli"
+
+uninstall:
+	@rm -f $(BINDIR)/ndtsdb-cli
+	@echo "✓ Removed: $(BINDIR)/ndtsdb-cli"
+
+# 清理（只清 legacy gcc build 产物，不动 APE）
+clean:
+	@rm -rf build/*.o
+	@echo "✓ Cleaned gcc build artifacts (build/*.o)"
+	@echo "  APE binaries (*.com) retained."
+
+# 帮助
+help:
+	@echo "ndtsdb-cli Makefile"
+	@echo ""
+	@echo "正式构建 (podman + cosmocc → APE 跨平台):"
+	@echo "  make                  → make cosmo-docker  (默认)"
+	@echo "  make cosmo-docker     → ndtsdb-cli.com  (Linux/macOS/Windows/FreeBSD)"
+	@echo "  make cosmo-docker-size→ 显示 APE 信息"
+	@echo "  make cosmo            → 备用: 从 ndtsdb-cli 目录挂载编译"
+	@echo "  make install          → 安装 ndtsdb-cli.com 到 ~/.local/bin"
+	@echo "  make install PREFIX=/usr/local → 安装到 /usr/local/bin"
+	@echo "  make clean            → 清理 gcc build 产物"
+	@echo ""
+	@echo "Legacy (归档，见文件底部):"
+	@echo "  make gcc-build        → gcc 静态链接 ELF (仅当前 Linux, 不跨平台)"
+	@echo "  make build-zig        → Zig 构建 (podman)"
+	@echo "  make release          → Zig ReleaseFast + strip"
+	@echo ""
+	@echo "前提: podman image localhost/cosmocc:latest 已就绪"
+	@echo "      如需重建镜像: podman build -f Dockerfile.cosmocc -t cosmocc:latest .."
+
+.PHONY: all cosmo cosmo-docker cosmo-docker-size install uninstall clean help \
+        gcc-build build-zig release release-size plugin-example lib lib-static lib-shared
+
+# ============================================================================
+# Legacy: gcc 静态链接构建（已归档，非正式产物，仅供调试/CI对比）
+# 产物: ndtsdb-cli (ELF x86-64, 仅当前 Linux, 不跨平台)
+# 正式分发请用: make cosmo-docker
+# ============================================================================
+
+CC      = gcc
+CFLAGS  = -O2 -Wall -I./src/bindings -I./include -I../ndtsdb/native
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
-    LDFLAGS = 
+    LDFLAGS =
 else
     LDFLAGS = -static
 endif
 
-# Readline 检测
 HAVE_READLINE := $(shell pkg-config --exists readline && echo 1 || echo 0)
-
 ifeq ($(HAVE_READLINE),1)
-CFLAGS += -DHAVE_READLINE $(shell pkg-config --cflags readline)
-LDLIBS += $(shell pkg-config --libs readline) $(shell pkg-config --libs ncurses)
+CFLAGS  += -DHAVE_READLINE $(shell pkg-config --cflags readline)
+LDLIBS  += $(shell pkg-config --libs readline) $(shell pkg-config --libs ncurses)
 endif
 
-# 目录
-SRC_DIR = src
+SRC_DIR   = src
 BUILD_DIR = build
-LIB_DIR = lib
-INCLUDE_DIR = include
+LIB_DIR   = lib
 
-# 源文件
-SOURCES = $(SRC_DIR)/main.c \
-          $(SRC_DIR)/common.c \
-          $(SRC_DIR)/bindings/qjs_ndtsdb.c \
-          $(SRC_DIR)/ndtsdb_lock.c \
-          $(SRC_DIR)/cmd_query.c \
-          $(SRC_DIR)/cmd_io.c \
-          $(SRC_DIR)/cmd_indicators.c \
-          $(SRC_DIR)/cmd_sql.c \
-          $(SRC_DIR)/cmd_plugin.c \
-          $(SRC_DIR)/cmd_embed.c \
-          $(SRC_DIR)/cmd_search.c \
-          $(SRC_DIR)/cmd_facts.c
+GCC_SOURCES = \
+	$(SRC_DIR)/main.c \
+	$(SRC_DIR)/common.c \
+	$(SRC_DIR)/bindings/qjs_ndtsdb.c \
+	$(SRC_DIR)/ndtsdb_lock.c \
+	$(SRC_DIR)/cmd_query.c \
+	$(SRC_DIR)/cmd_io.c \
+	$(SRC_DIR)/cmd_indicators.c \
+	$(SRC_DIR)/cmd_sql.c \
+	$(SRC_DIR)/cmd_plugin.c \
+	$(SRC_DIR)/cmd_embed.c \
+	$(SRC_DIR)/cmd_search.c \
+	$(SRC_DIR)/cmd_facts.c
 
-OBJECTS = $(BUILD_DIR)/main.o \
-          $(BUILD_DIR)/common.o \
-          $(BUILD_DIR)/qjs_ndtsdb.o \
-          $(BUILD_DIR)/ndtsdb_lock.o \
-          $(BUILD_DIR)/cmd_query.o \
-          $(BUILD_DIR)/cmd_io.o \
-          $(BUILD_DIR)/cmd_indicators.o \
-          $(BUILD_DIR)/cmd_sql.o \
-          $(BUILD_DIR)/cmd_plugin.o \
-          $(BUILD_DIR)/cmd_embed.o \
-          $(BUILD_DIR)/cmd_search.o \
-          $(BUILD_DIR)/cmd_facts.o \
-          $(BUILD_DIR)/quickjs.o \
-          $(BUILD_DIR)/libregexp.o \
-          $(BUILD_DIR)/libunicode.o \
-          $(BUILD_DIR)/cutils.o \
-          $(BUILD_DIR)/libbf.o
+GCC_OBJECTS = \
+	$(BUILD_DIR)/main.o \
+	$(BUILD_DIR)/common.o \
+	$(BUILD_DIR)/qjs_ndtsdb.o \
+	$(BUILD_DIR)/ndtsdb_lock.o \
+	$(BUILD_DIR)/cmd_query.o \
+	$(BUILD_DIR)/cmd_io.o \
+	$(BUILD_DIR)/cmd_indicators.o \
+	$(BUILD_DIR)/cmd_sql.o \
+	$(BUILD_DIR)/cmd_plugin.o \
+	$(BUILD_DIR)/cmd_embed.o \
+	$(BUILD_DIR)/cmd_search.o \
+	$(BUILD_DIR)/cmd_facts.o \
+	$(BUILD_DIR)/quickjs.o \
+	$(BUILD_DIR)/libregexp.o \
+	$(BUILD_DIR)/libunicode.o \
+	$(BUILD_DIR)/cutils.o \
+	$(BUILD_DIR)/libbf.o
 
-# 库文件
 LIBNDTSDB = $(LIB_DIR)/libndtsdb.a
 
-# 目标
-TARGET = ndtsdb-cli
+GCC_TARGET = ndtsdb-cli
 
-# 默认目标
-all: $(TARGET)
+gcc-build: $(GCC_TARGET)
 
-# 创建构建目录
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-# 编译规则
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/common.o: $(SRC_DIR)/common.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/qjs_ndtsdb.o: $(SRC_DIR)/bindings/qjs_ndtsdb.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/ndtsdb_lock.o: $(SRC_DIR)/ndtsdb_lock.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/cmd_query.o: $(SRC_DIR)/cmd_query.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/cmd_io.o: $(SRC_DIR)/cmd_io.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/cmd_indicators.o: $(SRC_DIR)/cmd_indicators.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/cmd_sql.o: $(SRC_DIR)/cmd_sql.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
-# cmd_serve.o removed — serve subcommand disabled
-
 $(BUILD_DIR)/cmd_plugin.o: $(SRC_DIR)/cmd_plugin.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/cmd_embed.o: $(SRC_DIR)/cmd_embed.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/cmd_search.o: $(SRC_DIR)/cmd_search.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/cmd_facts.o: $(SRC_DIR)/cmd_facts.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# QuickJS 源码编译
-QJS_DIR = vendor/quickjs-2024-01-13
+QJS_DIR    = vendor/quickjs-2024-01-13
 QJS_CFLAGS = $(CFLAGS) -D_GNU_SOURCE -DCONFIG_VERSION=\"2024-01-13\" -DCONFIG_BIGNUM
 
 $(BUILD_DIR)/quickjs.o: $(QJS_DIR)/quickjs.c | $(BUILD_DIR)
 	$(CC) $(QJS_CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/libregexp.o: $(QJS_DIR)/libregexp.c | $(BUILD_DIR)
 	$(CC) $(QJS_CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/libunicode.o: $(QJS_DIR)/libunicode.c | $(BUILD_DIR)
 	$(CC) $(QJS_CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/cutils.o: $(QJS_DIR)/cutils.c | $(BUILD_DIR)
 	$(CC) $(QJS_CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/libbf.o: $(QJS_DIR)/libbf.c | $(BUILD_DIR)
 	$(CC) $(QJS_CFLAGS) -c $< -o $@
 
-# 复制 libndts.a 到 lib/ 目录
-$(LIBNDTS):
-	cp ../ndtsdb/native/libndts.a $(LIB_DIR)/
+LIB_SOURCES = ../ndtsdb/native/ndts.c ../ndtsdb/native/ndtsdb_vector.c
+LIB_OBJECTS = $(BUILD_DIR)/ndts_lib.o $(BUILD_DIR)/ndtsdb_vector_lib.o
+LIB_CFLAGS  = -O2 -Wall -fPIC -I./include -I../ndtsdb/native -D_DEFAULT_SOURCE -D_XOPEN_SOURCE=600
 
-# 链接最终二进制（-lm 必须在最后，静态链接顺序敏感）
-# 依赖 libndtsdb.a，确保库先构建
-$(TARGET): $(OBJECTS) $(LIBNDTSDB)
-	$(CC) $(LDFLAGS) $(OBJECTS) $(LIBNDTSDB) -lm $(LDLIBS) -o $@
+lib-static: $(LIBNDTSDB)
+$(BUILD_DIR)/ndts_lib.o: ../ndtsdb/native/ndts.c | $(BUILD_DIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+$(BUILD_DIR)/ndtsdb_vector_lib.o: ../ndtsdb/native/ndtsdb_vector.c | $(BUILD_DIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+$(LIBNDTSDB): $(LIB_OBJECTS) | $(LIB_DIR)/.dir
+	ar rcs $@ $^
+	@echo "Static library: $@"
 
-# 安装目录（支持 PREFIX 覆盖）
-PREFIX ?= $(HOME)/.local
-BINDIR = $(PREFIX)/bin
+lib-shared: $(LIB_DIR)/libndtsdb.so
+$(LIB_DIR)/libndtsdb.so: $(LIB_OBJECTS) | $(LIB_DIR)/.dir
+	$(CC) -shared -Wl,-soname,libndtsdb.so.0 -o $@.0.4.0 $^ -lm
+	ln -sf libndtsdb.so.0.4.0 $@.0
+	ln -sf libndtsdb.so.0 $@
+	@echo "Shared library: $@"
 
-# 安装目标
-install: $(TARGET)
-	@mkdir -p $(BINDIR)
-	@cp $(TARGET) $(BINDIR)/
-	@echo "Installed $(TARGET) to $(BINDIR)/"
-	@echo "Make sure $(BINDIR) is in your PATH"
+lib: lib-static lib-shared
+	@echo "Built both static and shared libraries"
 
-# 卸载目标
-uninstall:
-	@rm -f $(BINDIR)/$(TARGET)
-	@echo "Removed $(TARGET) from $(BINDIR)/"
+$(GCC_TARGET): $(GCC_OBJECTS) $(LIBNDTSDB)
+	$(CC) $(LDFLAGS) $(GCC_OBJECTS) $(LIBNDTSDB) -lm $(LDLIBS) -o $@
+	@echo "⚠  gcc ELF binary: $@ (NOT cross-platform, use make cosmo-docker for distribution)"
 
-# 清理
-clean:
-	rm -rf $(BUILD_DIR)/*.o $(TARGET)
+$(LIB_DIR)/.dir:
+	mkdir -p $(LIB_DIR)
+	touch $@
 
-# 运行测试
-test: $(TARGET)
-	./$(TARGET) scripts/test.js
-
-# 互操作性测试
-interop: $(TARGET)
-	@echo '=== 运行互操作性测试 ==='
-	@cd tests/interop && bash run-interop-tests.sh
-
-# Zig Build（本地或容器）
+# Legacy: Zig Build
 ZIG_IMAGE ?= localhost/ndts-zig-builder
 
 build-zig:
@@ -180,214 +292,27 @@ build-zig:
 		-w /work/ndtsdb-cli \
 		$(ZIG_IMAGE) zig build $(ZIG_FLAGS)
 
-# Release 构建（zig build + strip）
-DIST_DIR = dist
+DIST_DIR       = dist
 RELEASE_BINARY = $(DIST_DIR)/ndtsdb-cli
 
 release: clean
-	@echo "=== Release Build (Zig) ==="
-	@echo "1. Running zig build -Doptimize=ReleaseFast..."
+	@echo "=== Legacy Release Build (Zig) ==="
 	@zig build -Doptimize=ReleaseFast
-	@echo "2. Creating dist directory..."
 	@mkdir -p $(DIST_DIR)
-	@echo "3. Copying binary..."
 	@cp zig-out/bin/ndtsdb-cli $(RELEASE_BINARY)
-	@echo "4. Stripping binary..."
 	@strip -s $(RELEASE_BINARY)
-	@echo "5. Done!"
-	@echo ""
-	@echo "Release binary: $(RELEASE_BINARY)"
-	@echo "Size: $$(ls -lh $(RELEASE_BINARY) | awk '{print $$5}')"
+	@echo "Release binary: $(RELEASE_BINARY)  ($$(ls -lh $(RELEASE_BINARY) | awk '{print $$5}'))"
 
 release-size: $(RELEASE_BINARY)
-	@echo "=== Release Binary Size ==="
-	@echo "File: $(RELEASE_BINARY)"
-	@echo "Size: $$(ls -lh $(RELEASE_BINARY) | awk '{print $$5}')"
-	@echo "Full: $$(ls -lh $(RELEASE_BINARY))"
+	@ls -lh $(RELEASE_BINARY)
 
-# Cosmocc 构建（APE 跨平台二进制）
-COSMO_IMAGE = localhost/cosmocc:latest
-COSMO_BINARY = ndtsdb-cli.com
-
-COSMO_SOURCES = src/main.c \
-                src/common.c \
-                src/cmd_query.c \
-                src/cmd_io.c \
-                src/cmd_indicators.c \
-                src/cmd_sql.c \
-                src/cmd_serve.c \
-                src/cmd_plugin.c \
-                src/cmd_embed.c \
-                src/cmd_search.c \
-                src/cmd_facts.c \
-                src/ndtsdb_lock.c \
-                src/bindings/qjs_ndtsdb.c \
-                ../ndtsdb/native/ndts.c \
-                ../ndtsdb/native/ndtsdb_vector.c \
-                vendor/quickjs-2024-01-13/quickjs.c \
-                vendor/quickjs-2024-01-13/libregexp.c \
-                vendor/quickjs-2024-01-13/libunicode.c \
-                vendor/quickjs-2024-01-13/cutils.c \
-                vendor/quickjs-2024-01-13/libbf.c
-
-COSMO_FLAGS = -O2 \
-              -I./src/bindings \
-              -I./include \
-              -I../ndtsdb/native \
-              -I./vendor/quickjs-2024-01-13 \
-              -DCONFIG_VERSION=\"2024-01-13\" \
-              -D_GNU_SOURCE \
-              -DCONFIG_BIGNUM \
-              -lm
-
-cosmo: clean
-	@echo "=== Cosmocc Build (APE) ==="
-	@echo "Building portable binary for Linux/macOS/Windows/FreeBSD..."
-	@podman run --rm \
-		-v $$(pwd):/workspace \
-		-v $$(pwd)/../ndtsdb:/ndtsdb \
-		$(COSMO_IMAGE) \
-		cosmocc -o $(COSMO_BINARY) $(COSMO_SOURCES) $(COSMO_FLAGS)
-	@echo "Done!"
-	@echo ""
-	@echo "APE binary: $(COSMO_BINARY)"
-	@echo "Size: $$(ls -lh $(COSMO_BINARY) | awk '{print $$5}')"
-	@echo "Format: $$(file $(COSMO_BINARY) | cut -d: -f2)"
-
-cosmo-size: $(COSMO_BINARY)
-	@echo "=== APE Binary Info ==="
-	@echo "File: $(COSMO_BINARY)"
-	@echo "Size: $$(ls -lh $(COSMO_BINARY) | awk '{print $$5}')"
-	@echo "Type: $$(file $(COSMO_BINARY))"
-	@echo ""
-	@echo "Runs on: Linux x86_64, Windows x86_64, macOS x86_64/arm64, FreeBSD x86_64"
-
-# Cosmocc Docker 构建（可复现构建，使用现有 cosmocc 镜像）
-COSMO_DOCKER_BINARY = ndtsdb-cli-docker.com
-
-cosmo-docker:
-	@echo "=== Cosmocc Docker Build (Reproducible) ==="
-	@echo "Using existing cosmocc image..."
-	@rm -f $(COSMO_DOCKER_BINARY)
-	@podman run --rm \
-		-v $$(pwd)/..:/workspace \
-		-w /workspace \
-		$(COSMO_IMAGE) \
-		cosmocc -o ndtsdb-cli/ndtsdb-cli-docker.com \
-			ndtsdb-cli/src/main.c ndtsdb-cli/src/common.c ndtsdb-cli/src/cmd_query.c \
-			ndtsdb-cli/src/cmd_io.c ndtsdb-cli/src/cmd_indicators.c ndtsdb-cli/src/cmd_sql.c \
-			ndtsdb-cli/src/cmd_serve.c ndtsdb-cli/src/cmd_plugin.c \
-			ndtsdb-cli/src/cmd_embed.c ndtsdb-cli/src/cmd_search.c \
-			ndtsdb-cli/src/cmd_facts.c ndtsdb-cli/src/ndtsdb_lock.c \
-			ndtsdb-cli/src/bindings/qjs_ndtsdb.c \
-			ndtsdb/native/ndts.c ndtsdb/native/ndtsdb_vector.c \
-			ndtsdb-cli/vendor/quickjs-2024-01-13/quickjs.c \
-			ndtsdb-cli/vendor/quickjs-2024-01-13/libregexp.c \
-			ndtsdb-cli/vendor/quickjs-2024-01-13/libunicode.c \
-			ndtsdb-cli/vendor/quickjs-2024-01-13/cutils.c \
-			ndtsdb-cli/vendor/quickjs-2024-01-13/libbf.c \
-			-I./ndtsdb-cli/src/bindings -I./ndtsdb-cli/include \
-			-I./ndtsdb/native -I./ndtsdb-cli/vendor/quickjs-2024-01-13 \
-			-DCONFIG_VERSION=\"2024-01-13\" -D_GNU_SOURCE -DCONFIG_BIGNUM -lm
-	@echo "Done!"
-	@echo ""
-	@echo "APE binary: $(COSMO_DOCKER_BINARY)"
-	@echo "Size: $$(ls -lh $(COSMO_DOCKER_BINARY) | awk '{print $$5}')"
-	@echo "Format: $$(file $(COSMO_DOCKER_BINARY) | cut -d: -f2)"
-
-cosmo-docker-size: $(COSMO_DOCKER_BINARY)
-	@echo "=== Docker-built APE Binary Info ==="
-	@echo "File: $(COSMO_DOCKER_BINARY)"
-	@echo "Size: $$(ls -lh $(COSMO_DOCKER_BINARY) | awk '{print $$5}')"
-	@echo "Type: $$(file $(COSMO_DOCKER_BINARY))"
-	@echo ""
-	@echo "Verification:"
-	@echo "  ./$(COSMO_DOCKER_BINARY) --help | head -5"
-	@./$(COSMO_DOCKER_BINARY) --help 2>&1 | head -5 || echo "  (help output truncated)"
-
-# 显示帮助
-help:
-	@echo "ndtsdb-cli Makefile"
-	@echo ""
-	@echo "Targets:"
-	@echo "  all           - 构建完整二进制（gcc）"
-	@echo "  install       - 安装到 ~/.local/bin（支持 PREFIX=）"
-	@echo "  uninstall     - 从安装目录移除"
-	@echo "  build-zig     - 使用 Zig 构建（Podman 容器）"
-	@echo "  release       - Zig build + strip，输出到 dist/ndtsdb-cli"
-	@echo "  release-size  - 显示 release 二进制大小"
-	@echo "  cosmo         - Cosmocc 构建 APE 跨平台二进制"
-	@echo "  cosmo-docker  - Cosmocc Docker 构建（可复现）"
-	@echo "  cosmo-docker-size - 显示 Docker 构建的 APE 信息"
-	@echo "  clean         - 清理构建文件"
-	@echo "  test          - 运行测试脚本"
-	@echo "  interop       - 运行互操作性测试（CLI ↔ Bun）"
-	@echo "  help          - 显示此帮助信息"
-	@echo ""
-	@echo "用法示例:"
-	@echo "  make install              # 安装到 ~/.local/bin"
-	@echo "  make install PREFIX=/usr  # 安装到 /usr/bin"
-	@echo "  make build-zig"
-	@echo "  make build-zig ZIG_FLAGS='-Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast'"
-	@echo "  make release              # 构建 release 版本 (~1.2MB)"
-	@echo "  make cosmo                # 构建 APE 跨平台版本 (~3MB)"
-
-# ============================================================================
-# Plugin Example
-# ============================================================================
-
+# Legacy: Plugin Example
 PLUGIN_EXAMPLE = examples/my-plugin.so
-
 plugin-example:
-	@echo "=== Building Plugin Example ==="
-	@echo "Compiling my-plugin.c..."
 	@gcc -shared -fPIC -o $(PLUGIN_EXAMPLE) \
 		examples/my-plugin.c \
 		-I./include \
 		-I./vendor/quickjs-2024-01-13 \
 		-I../ndtsdb/native \
 		-DNDTSDB_PLUGIN_API_VERSION=1
-	@echo "Done!"
-	@echo ""
 	@echo "Plugin: $(PLUGIN_EXAMPLE)"
-	@echo "Usage: ./ndtsdb-cli script --plugin $(PLUGIN_EXAMPLE)"
-
-# ============================================================================
-# Library Targets (libndtsdb)
-# ============================================================================
-
-LIB_SOURCES = ../ndtsdb/native/ndts.c ../ndtsdb/native/ndtsdb_vector.c
-LIB_OBJECTS = $(BUILD_DIR)/ndts_lib.o $(BUILD_DIR)/ndtsdb_vector_lib.o
-LIB_CFLAGS = -O2 -Wall -fPIC -I./include -I../ndtsdb/native -D_DEFAULT_SOURCE -D_XOPEN_SOURCE=600
-
-# 静态库
-lib-static: $(LIB_DIR)/libndtsdb.a
-
-$(BUILD_DIR)/ndts_lib.o: ../ndtsdb/native/ndts.c | $(BUILD_DIR)
-	$(CC) $(LIB_CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/ndtsdb_vector_lib.o: ../ndtsdb/native/ndtsdb_vector.c | $(BUILD_DIR)
-	$(CC) $(LIB_CFLAGS) -c $< -o $@
-
-$(LIB_DIR)/libndtsdb.a: $(LIB_OBJECTS) | $(LIB_DIR)/.dir
-	ar rcs $@ $^
-	@echo "Static library: $@"
-
-# 动态库
-lib-shared: $(LIB_DIR)/libndtsdb.so
-
-$(LIB_DIR)/libndtsdb.so: $(LIB_OBJECTS) | $(LIB_DIR)/.dir
-	$(CC) -shared -Wl,-soname,libndtsdb.so.0 -o $@.0.4.0 $^ -lm
-	ln -sf libndtsdb.so.0.4.0 $@.0
-	ln -sf libndtsdb.so.0 $@
-	@echo "Shared library: $@"
-
-# 同时构建两种库
-lib: lib-static lib-shared
-	@echo "Built both static and shared libraries"
-
-$(LIB_DIR)/.dir:
-	mkdir -p $(LIB_DIR)
-	touch $@
-
-.PHONY: all clean test interop help build-zig install uninstall release release-size cosmo cosmo-size cosmo-docker cosmo-docker-size plugin-example lib lib-static lib-shared
