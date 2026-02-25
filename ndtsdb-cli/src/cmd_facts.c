@@ -146,6 +146,7 @@ static int cmd_facts_write(int argc, char **argv) {
     const char *validity = "mutable";
     const char *scope = "shared";
     const char *key = "";
+    const char *embed_vector_str = NULL;  // pre-computed vector "[f1,f2,...]"
     int dim = DEFAULT_DIM;
     int help_flag = 0;
 
@@ -168,6 +169,8 @@ static int cmd_facts_write(int argc, char **argv) {
             key = argv[++i];
         } else if (strcmp(argv[i], "--dim") == 0 && i + 1 < argc) {
             dim = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--embed-vector") == 0 && i + 1 < argc) {
+            embed_vector_str = argv[++i];
         }
     }
 
@@ -175,6 +178,7 @@ static int cmd_facts_write(int argc, char **argv) {
         printf("Usage: ndtsdb-cli facts write --database <path> --text <text> --agent-id <id>\n");
         printf("       [--type semantic|episodic|procedural] [--validity permanent|mutable|transient]\n");
         printf("       [--scope shared|bot-xxx|...] [--key <dedup-key>] [--dim N (default 64)]\n");
+        printf("       [--embed-vector '[f1,f2,...]'  pre-computed embedding (skips local TF-IDF)]\n");
         printf("\n  Writes text + embedding to knowledge database.\n");
         printf("  Vector stored in ndtsdb (.ndtv), text stored in facts-text.jsonl sidecar.\n");
         return 0;
@@ -189,16 +193,39 @@ static int cmd_facts_write(int argc, char **argv) {
         return 1;
     }
 
-    // 生成 embedding
+    // 生成或解析 embedding
     float *embedding = (float *)malloc(dim * sizeof(float));
     if (!embedding) {
         fprintf(stderr, "Error: out of memory\n");
         return 1;
     }
-    if (embed_generate(text, embedding, dim) != 0) {
-        fprintf(stderr, "Error: embedding generation failed\n");
-        free(embedding);
-        return 1;
+
+    if (embed_vector_str) {
+        // 解析预计算向量 "[f1,f2,...]"
+        const char *p = strchr(embed_vector_str, '[');
+        if (!p) { fprintf(stderr, "Error: --embed-vector must be '[f1,f2,...]'\n"); free(embedding); return 1; }
+        p++;
+        int parsed_dim = 0;
+        while (*p && *p != ']' && parsed_dim < dim) {
+            char *end;
+            float v = strtof(p, &end);
+            if (end == p) { p++; continue; }
+            embedding[parsed_dim++] = v;
+            p = end;
+            while (*p == ' ' || *p == ',') p++;
+        }
+        if (parsed_dim != dim) {
+            fprintf(stderr, "Error: --embed-vector has %d values, expected --dim=%d\n", parsed_dim, dim);
+            free(embedding);
+            return 1;
+        }
+    } else {
+        // 本地 TF-IDF 生成（fallback）
+        if (embed_generate(text, embedding, dim) != 0) {
+            fprintf(stderr, "Error: embedding generation failed\n");
+            free(embedding);
+            return 1;
+        }
     }
 
     long long ts = now_ms();
