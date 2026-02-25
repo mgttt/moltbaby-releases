@@ -38,7 +38,6 @@ SOURCES = $(SRC_DIR)/main.c \
           $(SRC_DIR)/cmd_io.c \
           $(SRC_DIR)/cmd_indicators.c \
           $(SRC_DIR)/cmd_sql.c \
-          $(SRC_DIR)/cmd_serve.c \
           $(SRC_DIR)/cmd_plugin.c \
           $(SRC_DIR)/cmd_embed.c \
           $(SRC_DIR)/cmd_search.c \
@@ -52,7 +51,6 @@ OBJECTS = $(BUILD_DIR)/main.o \
           $(BUILD_DIR)/cmd_io.o \
           $(BUILD_DIR)/cmd_indicators.o \
           $(BUILD_DIR)/cmd_sql.o \
-          $(BUILD_DIR)/cmd_serve.o \
           $(BUILD_DIR)/cmd_plugin.o \
           $(BUILD_DIR)/cmd_embed.o \
           $(BUILD_DIR)/cmd_search.o \
@@ -101,8 +99,7 @@ $(BUILD_DIR)/cmd_indicators.o: $(SRC_DIR)/cmd_indicators.c | $(BUILD_DIR)
 $(BUILD_DIR)/cmd_sql.o: $(SRC_DIR)/cmd_sql.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/cmd_serve.o: $(SRC_DIR)/cmd_serve.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+# cmd_serve.o removed — serve subcommand disabled
 
 $(BUILD_DIR)/cmd_plugin.o: $(SRC_DIR)/cmd_plugin.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@

@@ -46,7 +46,7 @@
 #include "common.h"
 #include "cmd_query.h"
 #include "cmd_sql.h"
-#include "cmd_serve.h"
+// #include "cmd_serve.h"  /* serve 已禁用：ndtsdb-cli 为纯CLI工具，不暴露HTTP服务 */
 #include "cmd_plugin.h"
 #include "cmd_search.h"
 #include "cmd_facts.h"
@@ -431,7 +431,9 @@ int main(int argc, char **argv) {
         printf("\nKnowledge Engine:\n");
         printf("  embed       --text <text> --dim <n>    Generate embedding vector (pure C, TF-IDF hash)\n");
         printf("  search      --database --query-vector '[...]' [--top-k N] [--threshold F]\n");
-        printf("  facts       import/list/search          Knowledge base management\n");
+        printf("  facts       write/import/list/search   Knowledge base management\n");
+        printf("    write     --database --text <t> --agent-id <id> [--type T] [--validity V] [--scope S] [--key K]\n");
+        printf("    search    --database --query <text> [--top-k N] [--threshold F] [--agent-id ID] [--json]\n");
         printf("\nScripting:\n");
         printf("  script      <file.js> --database <path> [--repeat N]\n");
         printf("  repl        --database <path>\n");
@@ -447,25 +449,11 @@ int main(int argc, char **argv) {
         return cmd_embed(argc, argv);
     }
 
-    // ==================== serve 子命令 ====================
+    // ==================== serve 子命令（已禁用）====================
     if (argc > 1 && strcmp(argv[1], "serve") == 0) {
-        // 测试 ctx 是否正常
-        const char *test_js = "1+1;";
-        JSValue test_result = JS_Eval(ctx, test_js, strlen(test_js), "<test>", JS_EVAL_TYPE_GLOBAL);
-        if (!JS_IsException(test_result)) {
-            int32_t val;
-            if (JS_ToInt32(ctx, &val, test_result) == 0) {
-                fprintf(stderr, "[MAIN] JS test (1+1): %d\n", val);
-            }
-        } else {
-            fprintf(stderr, "[MAIN] JS test failed in main.c\n");
-        }
-        JS_FreeValue(ctx, test_result);
-        
-        int ret = cmd_serve(argc, argv, ctx, rt);
-        JS_FreeContext(ctx);
-        JS_FreeRuntime(rt);
-        return ret;
+        fprintf(stderr, "Error: 'serve' subcommand is disabled. ndtsdb-cli is a pure CLI tool.\n");
+        fprintf(stderr, "Use 'facts write/search' for knowledge base operations.\n");
+        return 1;
     }
 
     // ==================== query 子命令 (纯C优化版) ====================
