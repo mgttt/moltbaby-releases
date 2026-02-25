@@ -176,6 +176,7 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
   if (p.recenterMinIdleTicks) CONFIG.recenterMinIdleTicks = p.recenterMinIdleTicks;
 
   if (p.simMode !== undefined) CONFIG.simMode = p.simMode;
+  if (p.enableMarketRegime !== undefined) CONFIG.enableMarketRegime = p.enableMarketRegime;
   // 【修复】支持lean参数，同时保持direction兼容（含值映射）
   const rawLean = p.lean || p.direction;
   var leanMap = { 'long': 'positive', 'short': 'negative', 'neutral': 'neutral', 'positive': 'positive', 'negative': 'negative' };

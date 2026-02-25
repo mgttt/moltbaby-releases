@@ -3,7 +3,8 @@
 // 先用标准文件读取验证框架，再引入 mmap 优化
 // ============================================================
 
-import { readFileSync, openSync, closeSync, fstatSync } from 'fs';
+import { readFileSync, openSync, closeSync, fstatSync, existsSync } from 'fs';
+import { CompressionCache } from '../compression-cache.js';
 
 // madvise 常量
 export const MADV_NORMAL = 0;
@@ -32,11 +33,16 @@ export class MmappedColumnarTable {
 
   /**
    * 打开文件并建立内存映射
+   * 支持透明解压：如果 .ndts 不存在但 .ndts.zst 存在，
+   * 自动解压到缓存目录后 mmap 缓存文件，上层完全无感知。
    */
   open(): void {
+    // 透明解压：resolve 会返回可直接 mmap 的路径
+    const resolvedPath = CompressionCache.getInstance().resolve(this.path);
+
     // 使用 Bun.mmap 建立内存映射
     if (typeof Bun !== 'undefined' && 'mmap' in Bun) {
-      const mapped = (Bun as any).mmap(this.path);
+      const mapped = (Bun as any).mmap(resolvedPath);
       // 保持原始 ArrayBuffer 引用，避免 slice() 复制导致 zero-copy 丢失
       this.buffer = mapped.buffer;
       this.byteOffset = mapped.byteOffset;
@@ -46,8 +52,8 @@ export class MmappedColumnarTable {
     } else {
       // 回退：标准文件读取（Node.js）
       // 注意：Node 的 Buffer 可能来自 slab 池，nodeBuffer.buffer 可能比文件大。
-      // 为避免后续（header/rowCount 异常等）导致越界 view 读到 slab 其它内容，这里复制为“刚好大小”的 ArrayBuffer。
-      const nodeBuffer = readFileSync(this.path);
+      // 为避免后续（header/rowCount 异常等）导致越界 view 读到 slab 其它内容，这里复制为"刚好大小"的 ArrayBuffer。
+      const nodeBuffer = readFileSync(resolvedPath);
       const ab = nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
       this.buffer = ab;
       this.byteOffset = 0;
@@ -206,16 +212,26 @@ export class MmapPool {
 
   /**
    * 初始化映射池
+   * 自动探测 .ndts 和 .ndts.zst 文件，透明解压。
    */
   init(symbols: string[], basePath: string = './data'): void {
     console.log(`📂 Loading ${symbols.length} files...`);
     
     let totalSize = 0;
+    let compressedCount = 0;
     
     for (const symbol of symbols) {
-      const path = `${basePath}/${symbol}.ndts`;
+      // 探测文件：优先 .ndts，其次 .ndts.zst
+      const probed = CompressionCache.probe(basePath, symbol);
+      if (!probed) {
+        console.warn(`⚠️  File not found: ${basePath}/${symbol}.ndts(.zst)`);
+        continue;
+      }
+      if (probed.compressed) compressedCount++;
+
+      const path = probed.path; // 始终是 .ndts 路径，open() 内部会 resolve
       const mmapped = new MmappedColumnarTable(path);
-      
+
       try {
         mmapped.open();
         this.maps.set(symbol, mmapped);
@@ -225,7 +241,7 @@ export class MmapPool {
       }
     }
 
-    console.log(`✅ Loaded ${this.maps.size} files`);
+    console.log(`✅ Loaded ${this.maps.size} files${compressedCount > 0 ? ` (${compressedCount} from compressed)` : ''}`);
     console.log(`   Total size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`);
   }
 

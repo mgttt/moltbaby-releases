@@ -481,6 +481,258 @@ export class OrderStateManager {
     this.stopDetection();
     logger.info('[OrderStateManager] 管理器已重置');
   }
+
+  // ============ 异常回滚机制 (P2新增) ============
+
+  /**
+   * 异常回滚：订单提交超时
+   * 场景：订单在SUBMITTING状态超时，需要回滚到OUTSIDE_MAGNET或标记失败
+   */
+  rollbackSubmitTimeout(orderLinkId: string): boolean {
+    const order = this.orders.get(orderLinkId);
+    if (!order) {
+      logger.warn(`[OrderStateManager] 回滚失败: 订单不存在 ${orderLinkId}`);
+      return false;
+    }
+
+    // 只有SUBMITTING或ABNORMAL(SUBMIT_TIMEOUT)状态可以回滚
+    if (order.state !== 'SUBMITTING' && !(order.state === 'ABNORMAL' && order.abnormalReason === 'SUBMIT_TIMEOUT')) {
+      logger.warn(`[OrderStateManager] 回滚失败: 订单状态不允许回滚 ${orderLinkId} [${order.state}]`);
+      return false;
+    }
+
+    const oldState = order.state;
+    order.state = 'SUBMIT_FAILED';
+    order.lastUpdateAt = Date.now();
+    
+    logger.info(`[OrderStateManager] 回滚完成: ${orderLinkId} [${oldState} -> SUBMIT_FAILED]`);
+    return true;
+  }
+
+  /**
+   * 异常回滚：部分成交后撤单
+   * 场景：订单部分成交后需要撤单，处理残余仓位
+   */
+  rollbackPartialFill(orderLinkId: string, filledQty: number): { success: boolean; remainingQty: number } {
+    const order = this.orders.get(orderLinkId);
+    if (!order) {
+      logger.warn(`[OrderStateManager] 部分成交回滚失败: 订单不存在 ${orderLinkId}`);
+      return { success: false, remainingQty: 0 };
+    }
+
+    // 更新实际成交数量
+    order.filledQty = filledQty;
+    const remainingQty = order.qty - filledQty;
+
+    // 如果完全成交，标记为FILLED
+    if (remainingQty <= 0) {
+      order.state = 'FILLED';
+      order.lastUpdateAt = Date.now();
+      logger.info(`[OrderStateManager] 部分成交回滚: 订单已完全成交 ${orderLinkId}`);
+      return { success: true, remainingQty: 0 };
+    }
+
+    // 部分成交，标记为CANCELLED并记录残余
+    order.state = 'CANCELLED';
+    order.lastUpdateAt = Date.now();
+    order.abnormalReason = `PARTIAL_FILL_CANCELLED: 成交${filledQty}/${order.qty}, 残余${remainingQty}`;
+    
+    logger.info(`[OrderStateManager] 部分成交回滚完成: ${orderLinkId} [成交${filledQty}, 残余${remainingQty}]`);
+    return { success: true, remainingQty };
+  }
+
+  /**
+   * 异常回滚：网络断连恢复
+   * 场景：网络断连后恢复，需要同步订单状态
+   */
+  async rollbackNetworkDisconnect(
+    orderLinkId: string,
+    queryExchangeStatus: () => Promise<{ status: string; filledQty: number } | null>
+  ): Promise<{ success: boolean; action: 'synced' | 'cancelled' | 'failed'; message: string }> {
+    const order = this.orders.get(orderLinkId);
+    if (!order) {
+      return { success: false, action: 'failed', message: '订单不存在' };
+    }
+
+    try {
+      // 查询交易所实际状态
+      const exchangeState = await queryExchangeStatus();
+      
+      if (!exchangeState) {
+        // 交易所无此订单，可能从未提交成功
+        if (order.state === 'SUBMITTING') {
+          order.state = 'SUBMIT_FAILED';
+          order.abnormalReason = 'NETWORK_DISCONNECT: 提交失败，交易所无记录';
+          order.lastUpdateAt = Date.now();
+          return { 
+            success: true, 
+            action: 'synced', 
+            message: '交易所无记录，标记为提交失败' 
+          };
+        }
+        return { 
+          success: false, 
+          action: 'failed', 
+          message: '交易所无记录且订单状态异常' 
+        };
+      }
+
+      // 同步成交数量
+      if (exchangeState.filledQty > order.filledQty) {
+        order.filledQty = exchangeState.filledQty;
+      }
+
+      // 根据交易所状态更新本地状态
+      switch (exchangeState.status) {
+        case 'Filled':
+          order.state = 'FILLED';
+          order.lastUpdateAt = Date.now();
+          return { 
+            success: true, 
+            action: 'synced', 
+            message: '订单已完全成交' 
+          };
+
+        case 'Cancelled':
+        case 'Canceled':
+          order.state = 'CANCELLED';
+          order.lastUpdateAt = Date.now();
+          return { 
+            success: true, 
+            action: 'cancelled', 
+            message: '订单已撤单' 
+          };
+
+        case 'PartiallyFilled':
+          // 部分成交，尝试撤单残余
+          order.state = 'SUBMITTED';
+          order.lastUpdateAt = Date.now();
+          return { 
+            success: true, 
+            action: 'synced', 
+            message: `订单部分成交 ${order.filledQty}/${order.qty}` 
+          };
+
+        case 'New':
+          // 订单仍在挂单中
+          order.state = 'SUBMITTED';
+          order.lastUpdateAt = Date.now();
+          return { 
+            success: true, 
+            action: 'synced', 
+            message: '订单仍在挂单中' 
+          };
+
+        default:
+          return { 
+            success: false, 
+            action: 'failed', 
+            message: `未知交易所状态: ${exchangeState.status}` 
+          };
+      }
+    } catch (error: any) {
+      logger.error(`[OrderStateManager] 网络断连回滚失败: ${orderLinkId}`, error);
+      return { 
+        success: false, 
+        action: 'failed', 
+        message: `查询失败: ${error.message}` 
+      };
+    }
+  }
+
+  /**
+   * 获取需要回滚的订单列表
+   */
+  getOrdersNeedingRollback(): OrderState[] {
+    return this.getAllOrders().filter(order => {
+      // SUBMITTING状态超过30秒
+      if (order.state === 'SUBMITTING') {
+        const elapsed = Date.now() - order.createdAt;
+        if (elapsed > 30000) return true;
+      }
+      
+      // ABNORMAL状态
+      if (order.state === 'ABNORMAL') return true;
+      
+      return false;
+    });
+  }
+
+  /**
+   * 批量执行回滚
+   */
+  async batchRollback(
+    handlers: {
+      onSubmitTimeout?: (order: OrderState) => Promise<boolean>;
+      onPartialFill?: (order: OrderState) => Promise<{ filledQty: number }>;
+      onNetworkDisconnect?: (order: OrderState) => Promise<{ status: string; filledQty: number } | null>;
+    }
+  ): Promise<{
+    total: number;
+    success: number;
+    failed: number;
+    details: Array<{ orderLinkId: string; action: string; message: string }>;
+  }> {
+    const orders = this.getOrdersNeedingRollback();
+    const result = {
+      total: orders.length,
+      success: 0,
+      failed: 0,
+      details: [] as Array<{ orderLinkId: string; action: string; message: string }>,
+    };
+
+    for (const order of orders) {
+      try {
+        let success = false;
+        let message = '';
+
+        if (order.state === 'SUBMITTING' || order.abnormalReason === 'SUBMIT_TIMEOUT') {
+          // 提交超时回滚
+          success = this.rollbackSubmitTimeout(order.orderLinkId);
+          message = success ? '提交超时回滚成功' : '提交超时回滚失败';
+        } else if (order.abnormalReason?.includes('PARTIAL_FILL')) {
+          // 部分成交回滚
+          if (handlers.onPartialFill) {
+            const fillInfo = await handlers.onPartialFill(order);
+            const rollbackResult = this.rollbackPartialFill(order.orderLinkId, fillInfo.filledQty);
+            success = rollbackResult.success;
+            message = `部分成交回滚: 残余${rollbackResult.remainingQty}`;
+          }
+        } else if (order.abnormalReason?.includes('NETWORK')) {
+          // 网络断连回滚
+          if (handlers.onNetworkDisconnect) {
+            const rollbackResult = await this.rollbackNetworkDisconnect(
+              order.orderLinkId,
+              () => handlers.onNetworkDisconnect!(order)
+            );
+            success = rollbackResult.success;
+            message = rollbackResult.message;
+          }
+        }
+
+        if (success) {
+          result.success++;
+        } else {
+          result.failed++;
+        }
+        
+        result.details.push({
+          orderLinkId: order.orderLinkId,
+          action: success ? 'SUCCESS' : 'FAILED',
+          message,
+        });
+      } catch (error: any) {
+        result.failed++;
+        result.details.push({
+          orderLinkId: order.orderLinkId,
+          action: 'ERROR',
+          message: error.message,
+        });
+      }
+    }
+
+    return result;
+  }
 }
 
 // 导出单例

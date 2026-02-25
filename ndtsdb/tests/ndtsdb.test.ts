@@ -1200,7 +1200,7 @@ describe('Partitioned Table', () => {
     // 只查询 day2 的数据（应该只扫描 1 个分区）
     const results = table.query(
       undefined,
-      { min: day2, max: day2 + 24 * 60 * 60 * 1000 - 1 }
+      { timeRange: { min: day2, max: day2 + 24 * 60 * 60 * 1000 - 1 } }
     );
 
     expect(results.length).toBe(1);

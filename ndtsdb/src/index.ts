@@ -17,6 +17,17 @@ export { AppendWriter, crc32 } from './append.js';
 // ─── 压缩 ────────────────────────────────────────────
 
 export { GorillaCompressor, GorillaDecompressor } from './compression.js';
+export { CompressionCache } from './compression-cache.js';
+
+// ─── 缓存监测 ────────────────────────────────────────
+
+export { CacheMonitor } from './cache-monitor.js';
+export type { 
+  CacheAccessRecord, 
+  CacheMetrics, 
+  CacheAlertConfig, 
+  CacheAlert 
+} from './cache-monitor.js';
 
 // ─── libndts (C FFI) ─────────────────────────────────
 

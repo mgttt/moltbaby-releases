@@ -6,6 +6,7 @@
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { BTreeIndex } from './index/btree.js';
+import { CompressionCache } from './compression-cache.js';
 import { CompositeIndex } from './index/composite.js';
 
 export type ColumnarType = 'int64' | 'float64' | 'int32' | 'int16' | 'string';
@@ -427,9 +428,12 @@ export class ColumnarTable {
 
   /**
    * 从二进制文件加载
+   * 支持透明解压：.ndts.zst 自动解压后加载
    */
   static loadFromFile(path: string): ColumnarTable {
-    const buffer = readFileSync(path);
+    // 透明解压：如果 .ndts 不存在但 .ndts.zst 存在，自动解压
+    const resolvedPath = CompressionCache.getInstance().resolve(path);
+    const buffer = readFileSync(resolvedPath);
     
     // 读取 header 长度
     const headerLength = buffer.readUInt32LE(0);

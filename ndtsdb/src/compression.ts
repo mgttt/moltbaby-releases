@@ -615,8 +615,7 @@ export class BrotliCompressor {
   }
 }
 
-// 导出别名（向后兼容）
-export { BrotliCompressor as ZstdCompressor };
+
 
 /**
  * 测试 Gorilla 压缩

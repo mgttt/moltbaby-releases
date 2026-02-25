@@ -6,7 +6,7 @@
 import { openSync, closeSync, writeSync, readSync, fstatSync, existsSync, mkdirSync, renameSync, rmSync } from 'fs';
 import { dirname } from 'path';
 import { TombstoneManager } from './tombstone.js';
-import { DeltaEncoderInt64, DeltaEncoderInt32, RLEEncoder, GorillaEncoder, ZstdCompressor } from './compression.js';
+import { DeltaEncoderInt64, DeltaEncoderInt32, RLEEncoder, GorillaEncoder, BrotliCompressor } from './compression.js';
 
 /**
  * CRC32 计算 (IEEE 802.3)
@@ -330,7 +330,7 @@ export class AppendWriter {
   /**
    * 自动选择压缩算法
    */
-  private autoSelectAlgorithm(type: string): 'delta' | 'rle' | 'gorilla' | 'zstd' | 'none' {
+  private autoSelectAlgorithm(type: string): 'delta' | 'rle' | 'gorilla' | 'brotli' | 'none' {
     switch (type) {
       case 'int64':
         return 'delta'; // 单调递增（如 timestamp）
@@ -349,7 +349,7 @@ export class AppendWriter {
   private compressColumn(
     buf: Buffer,
     type: string,
-    algorithm: 'delta' | 'rle' | 'gorilla' | 'zstd' | 'none',
+    algorithm: 'delta' | 'rle' | 'gorilla' | 'brotli' | 'none',
     rowCount: number
   ): Buffer | null {
     try {
@@ -389,9 +389,8 @@ export class AppendWriter {
           break;
         }
 
-        case 'zstd': {
-          // Zstd 支持所有数据类型（通用压缩）
-          const encoder = new ZstdCompressor(3); // 压缩级别 3（平衡）
+        case 'brotli': {
+          const encoder = new BrotliCompressor(3);
           
           if (type === 'float64') {
             const arr = new Float64Array(buf.buffer, buf.byteOffset, rowCount);
@@ -427,7 +426,7 @@ export class AppendWriter {
   static decompressColumn(
     buf: Buffer,
     type: string,
-    algorithm: 'delta' | 'rle' | 'gorilla' | 'zstd' | 'none',
+    algorithm: 'delta' | 'rle' | 'gorilla' | 'brotli' | 'none',
     rowCount: number
   ): Buffer | null {
     try {
@@ -463,9 +462,8 @@ export class AppendWriter {
           break;
         }
 
-        case 'zstd': {
-          // Zstd 解压（通用）
-          const encoder = new ZstdCompressor(3);
+        case 'brotli': {
+          const encoder = new BrotliCompressor(3);
           
           if (type === 'float64') {
             const decompressed = encoder.decompressFloat64(new Uint8Array(buf), rowCount);

@@ -1,6 +1,6 @@
 /**
- * Negative方向验证（30天数据）
- * 验证不同lean+不同spacing产生不同结果
+ * Neutral方向验证（BTC下跌段）
+ * 验证回测引擎能正确产生交易
  */
 
 import { QuickJSBacktestEngine, BacktestConfig } from '../legacy/quickjs-backtest';
@@ -8,31 +8,24 @@ import { resolve } from 'path';
 import { writeFileSync } from 'fs';
 
 const DB_PATH = resolve(process.cwd(), '..', 'quant-lib', 'data', 'ndtsdb');
-
-// 【P2修复】使用15m数据（ndtsdb中1m分区为空）
 const INTERVAL = '15m';
 
-// 只测试negative方向，不同spacing
-// 【P2修复】使用更小的spacing和更大的orderSize，确保在下跌段也能触发交易
+// 测试neutral方向，不同spacing
 const testCases = [
-  { lean: 'negative' as const, spacing: 0.005, orderSize: 500, name: 'S1' },
-  { lean: 'negative' as const, spacing: 0.01, orderSize: 1000, name: 'S2' },
-  { lean: 'negative' as const, spacing: 0.015, orderSize: 1500, name: 'S3' },
+  { lean: 'neutral' as const, spacing: 0.01, orderSize: 100, name: 'S1-neutral' },
+  { lean: 'neutral' as const, spacing: 0.02, orderSize: 200, name: 'S2-neutral' },
+  { lean: 'neutral' as const, spacing: 0.03, orderSize: 300, name: 'S3-neutral' },
 ];
 
 async function runTest(tc: typeof testCases[0]) {
-  // 【修改】固定上涨段 2026-01-15 ~ 2026-02-15
-  const startDate = new Date('2026-01-15');
-  const endDate = new Date('2026-02-15');
-  
   const engine = new QuickJSBacktestEngine({
     strategyPath: 'strategies/grid/gales-simple.js',
-    symbol: 'BTC/USDT',  // 【修改】BTC有完整15m数据
-    from: '2026-01-15',  // 固定开始日期
-    to: '2026-02-15',  // 固定结束日期
+    symbol: 'BTC/USDT',
+    from: '2026-01-15',
+    to: '2026-02-15',
     interval: INTERVAL,
     initialBalance: 10000,
-    direction: 'short',
+    direction: 'neutral',
     proxy: 'http://127.0.0.1:8890',
     dbPath: DB_PATH,
     params: {
@@ -40,8 +33,9 @@ async function runTest(tc: typeof testCases[0]) {
       gridSpacing: tc.spacing,
       orderSize: tc.orderSize,
       gridCount: 5,
-      maxPosition: 10000,  // 【P2修复】增加仓位上限允许更多交易
-      enableMarketRegime: false,  // 【P2修复】禁用ADX市场状态检测，避免暂停下单
+      maxPosition: 10000,
+      priceTick: 0.01,
+      symbol: 'BTCUSDT',
     },
   } as BacktestConfig);
 
@@ -80,12 +74,12 @@ async function runTest(tc: typeof testCases[0]) {
 }
 
 async function main() {
-  console.log('Negative方向验证（BTC上涨段 2026-01-15~2026-02-15）');
+  console.log('Neutral方向验证（BTC 2026-01-15~2026-02-15）');
   console.log('='.repeat(100));
   
   const results = [];
   for (const tc of testCases) {
-    console.log(`\n[${tc.name}] lean=${tc.lean} spacing=${tc.spacing} orderSize=${tc.orderSize} interval=${INTERVAL}...`);
+    console.log(`\n[${tc.name}] lean=${tc.lean} spacing=${tc.spacing} orderSize=${tc.orderSize}...`);
     const r = await runTest(tc);
     results.push(r);
     
@@ -97,7 +91,7 @@ async function main() {
       if (r.totalTrades > 0) {
         console.log(`  ✅ 有交易，验证通过`);
       } else {
-        console.log(`  ⚠️ 无交易（可能是价格走势导致）`);
+        console.log(`  ⚠️ 无交易`);
       }
     } else {
       console.log(`  ❌ 失败: ${r.error}`);
@@ -125,7 +119,7 @@ async function main() {
   }
   
   // 保存结果
-  const outputPath = resolve(process.cwd(), 'tests', '.temp', 'negative-30days-results.json');
+  const outputPath = resolve(process.cwd(), 'tests', '.temp', 'neutral-btc-results.json');
   writeFileSync(outputPath, JSON.stringify(results, null, 2));
   console.log(`\n结果保存: ${outputPath}`);
 }
