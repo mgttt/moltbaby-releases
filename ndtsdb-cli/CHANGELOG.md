@@ -5,6 +5,52 @@
 
 ---
 
+## [v1.0.0.0] - 2026-02-26
+
+### 🎯 HNSW 核心算法优化
+
+#### P2: 启发式邻居选择 (Heuristic Neighbor Selection)
+
+**问题**: 原实现简单取最近 M 个邻居，导致邻居高度重叠，搜索容易陷入局部最优。
+
+**解决方案**: 实现 HNSW 论文 Algorithm 2，在邻居选择时考虑多样性：
+- 候选点不仅要比查询点近，还要与已选集合保持足够距离
+- 引入多样性因子 α (默认 1.0)，平衡距离和多样性
+- 保证最小连通性 (M/2)，避免图碎片化
+
+**核心函数**: `select_neighbors_heuristic()`
+```c
+/* 启发式决策逻辑 */
+if (R_count == 0) 直接加入;
+else if (min_dist_to_selected > ALPHA * dist_cq) 多样性通过;
+else if (R_count < MIN_GUARANTEE) 连通性保证;
+```
+
+#### P3: ef-搜索优化 (ef-Search)
+
+**问题**: 原贪婪搜索每层只返回一个最近点，搜索质量受限。
+
+**解决方案**: 完整实现 HNSW 论文的多候选 ef-search：
+- 维护候选集 W (大小 ef) 和待检查队列 C
+- 广度优先探索邻居，直到无法改进
+- 按距离排序返回 ef 个最佳候选
+
+**核心函数**: `hnsw_search_layer_ef_full()`
+- 时间复杂度: O(ef * M * log(ef))
+- 支持在 K-NN 搜索和索引构建中复用
+
+#### 邻居剪枝 (Shrink)
+
+新增邻居剪枝机制：当节点连接数超过 M 时，使用启发式方法剪枝，保持图的稀疏性和搜索效率。
+
+### 版本封存
+
+- **版本**: v1.0.0.0 (stable)
+- **API 状态**: ndtsdb_vec.h API 稳定
+- **二进制**: APE 跨平台单文件 (Linux/macOS/Windows/FreeBSD)
+
+---
+
 ## [Unreleased] - 2026-02-24
 
 ### 知识引擎（纯C内置）

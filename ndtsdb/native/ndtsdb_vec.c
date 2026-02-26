@@ -225,13 +225,187 @@ static HnswNode* hnsw_search_layer_simple(HnswIndex* idx, HnswNode* entry,
     return curr;
 }
 
-/* 带 ef 参数的多候选搜索 */
+/* ═══════════════════════════════════════════════════════════════════════════
+ * P3: ef-搜索优化 —— 完整 HNSW ef-search 实现
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * 算法: HNSW Layer Search with ef parameter
+ * 参考: "Efficient and robust approximate nearest neighbor search using 
+ *        Hierarchical Navigable Small World graphs" (Malkov & Yashunin, 2018)
+ *
+ * 核心思想:
+ *   - 贪婪搜索只维护一个当前最近点，容易陷入局部最优
+ *   - ef-search 同时维护 ef 个候选，通过广度探索提高召回率
+ *
+ * 数据结构:
+ *   - W: 动态候选集 (大小最多 ef)，按距离排序，保存当前找到的最近邻
+ *   - C: 待检查队列 (priority queue)，按距离排序
+ *   - visited: 哈希/数组标记已访问节点，避免重复处理
+ *
+ * 算法流程:
+ *   1. 初始化 W={entry}, C={entry}, visited={entry}
+ *   2. while C 非空:
+ *      a. 从 C 弹出最近点 c
+ *      b. 找到 W 中最远点 f
+ *      c. 如果 dist(c) > dist(f): break (无法改进)
+ *      d. 遍历 c 的邻居 e:
+ *         - 如果 e ∉ visited:
+ *           * 标记 visited
+ *           * 找到 W 中最远点 f
+ *           * 如果 dist(e) < dist(f) 或 |W| < ef:
+ *             · 将 e 插入 W 和 C
+ *             · 如果 |W| > ef: 从 W 移除最远点
+ *   3. 返回 W (大小为 ef 的候选集)
+ *
+ * 复杂度: O(ef * M * log(ef))，其中 M 为每层最大连接数
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* 最小堆元素：用于 ef-search 的优先队列 */
+typedef struct {
+    HnswNode* node;
+    float dist;
+    int is_candidate;  /* 1=在候选集W中, 0=只在待检查集C中 */
+} EfSearchItem;
+
+/*  ef-search 比较函数：用于最小堆 (距离小的在前)  */
+static int ef_item_compare(const void* a, const void* b)
+{
+    const EfSearchItem* ia = (const EfSearchItem*)a;
+    const EfSearchItem* ib = (const EfSearchItem*)b;
+    if (ia->dist < ib->dist) return -1;
+    if (ia->dist > ib->dist) return 1;
+    return 0;
+}
+
+/* 完整 ef-search 实现：返回找到的候选数量，结果写入 out_results */
+static int hnsw_search_layer_ef_full(HnswIndex* idx, HnswNode* entry,
+                                     const float* query, int level, int ef,
+                                     HnswNode** out_results, float* out_dists)
+{
+    /* ═══ 初始化 ═══ */
+    int max_visited = idx->node_count + 16;  /* 留点余量 */
+    
+    /* visited 集合：使用动态数组 + 线性查找 (小数据集够用，大数据可改哈希) */
+    HnswNode** visited = (HnswNode**)calloc(max_visited, sizeof(HnswNode*));
+    int visited_count = 0;
+    
+    /* W (候选集) 和 C (待检查队列)：使用简单数组 + 插入排序
+     * 注意：生产环境可换成二叉堆或 fibonacci heap */
+    EfSearchItem* W = (EfSearchItem*)malloc(ef * sizeof(EfSearchItem));
+    EfSearchItem* C = (EfSearchItem*)malloc(ef * 2 * sizeof(EfSearchItem));  /* C 可能临时膨胀 */
+    int W_count = 0, C_count = 0;
+    
+    float entry_dist = vec_distance(entry->embedding, query, idx->dim);
+    
+    /* 初始化：entry 同时加入 W, C, visited */
+    W[W_count++] = (EfSearchItem){entry, entry_dist, 1};
+    C[C_count++] = (EfSearchItem){entry, entry_dist, 1};
+    visited[visited_count++] = entry;
+    
+    /* ═══ 主循环 ═══ */
+    while (C_count > 0) {
+        /* 从 C 中找到并移除距离最小的点 c */
+        int c_idx = 0;
+        for (int i = 1; i < C_count; i++) {
+            if (C[i].dist < C[c_idx].dist) c_idx = i;
+        }
+        EfSearchItem c_item = C[c_idx];
+        /* 从 C 中移除 (用最后一个元素覆盖) */
+        C[c_idx] = C[--C_count];
+        
+        /* 找到 W 中最远的点 f */
+        float f_dist = W[0].dist;
+        for (int i = 1; i < W_count; i++) {
+            if (W[i].dist > f_dist) f_dist = W[i].dist;
+        }
+        
+        /* 终止条件：如果 c 比 W 中最远的还远，无法改进 */
+        if (c_item.dist > f_dist) break;
+        
+        /* 遍历 c 的邻居 */
+        HnswNode* c_node = c_item.node;
+        for (int ni = 0; ni < c_node->neighbor_counts[level]; ni++) {
+            HnswNode* e = (HnswNode*)c_node->neighbors[level][ni];
+            if (!e) continue;
+            
+            /* 检查是否访问过 */
+            int already_visited = 0;
+            for (int vi = 0; vi < visited_count; vi++) {
+                if (visited[vi] == e) { already_visited = 1; break; }
+            }
+            if (already_visited) continue;
+            
+            /* 标记已访问 */
+            if (visited_count < max_visited) {
+                visited[visited_count++] = e;
+            }
+            
+            /* 计算距离 */
+            float e_dist = vec_distance(e->embedding, query, idx->dim);
+            
+            /* 找到当前 W 中最远的点 */
+            float w_max_dist = W[0].dist;
+            int w_max_idx = 0;
+            for (int i = 1; i < W_count; i++) {
+                if (W[i].dist > w_max_dist) {
+                    w_max_dist = W[i].dist;
+                    w_max_idx = i;
+                }
+            }
+            
+            /* 如果 e 比 W 中最远的近，或 W 还没满，则加入 */
+            if (e_dist < w_max_dist || W_count < ef) {
+                /* 加入 W */
+                if (W_count < ef) {
+                    W[W_count++] = (EfSearchItem){e, e_dist, 1};
+                } else {
+                    /* 替换 W 中最远的 */
+                    W[w_max_idx] = (EfSearchItem){e, e_dist, 1};
+                }
+                
+                /* 同时加入 C 继续探索 */
+                if (C_count < ef * 2) {
+                    C[C_count++] = (EfSearchItem){e, e_dist, 0};
+                }
+            }
+        }
+    }
+    
+    /* ═══ 输出结果 ═══ */
+    /* 按距离排序 W */
+    for (int i = 0; i < W_count - 1; i++) {
+        for (int j = i + 1; j < W_count; j++) {
+            if (W[j].dist < W[i].dist) {
+                EfSearchItem tmp = W[i];
+                W[i] = W[j];
+                W[j] = tmp;
+            }
+        }
+    }
+    
+    /* 复制到输出 */
+    int result_count = W_count;
+    for (int i = 0; i < result_count; i++) {
+        out_results[i] = W[i].node;
+        out_dists[i] = W[i].dist;
+    }
+    
+    /* 清理 */
+    free(visited);
+    free(W);
+    free(C);
+    
+    return result_count;
+}
+
+/* 简化接口：ef-search 返回最近的一个 (兼容旧接口) */
 static HnswNode* hnsw_search_layer_ef(HnswIndex* idx, HnswNode* entry,
                                       const float* query, int level, int ef)
 {
-    /* 简化实现：贪婪搜索后返回最近的一个 */
-    /* TODO: 实现完整的 ef-搜索，维护候选集和访问集 */
-    return hnsw_search_layer_simple(idx, entry, query, level);
+    HnswNode* results[1];
+    float dists[1];
+    int found = hnsw_search_layer_ef_full(idx, entry, query, level, ef, results, dists);
+    return (found > 0) ? results[0] : entry;
 }
 
 static HnswNode* hnsw_node_create(int64_t ts, const float* emb, int dim, int max_level, int M)
@@ -338,7 +512,152 @@ static int hnsw_index_add_node(HnswIndex* idx, HnswNode* node)
     return 0;
 }
 
-/* ─── HNSW K-NN 搜索 ───────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════════
+ * P2: 启发式邻居选择 —— 多样性优化
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * 问题背景:
+ *   原始 HNSW 在选择邻居时，简单地取最近的 M 个节点。这会导致：
+ *   - 图连通性虽好，但搜索时容易陷入局部最优
+ *   - 邻居之间高度重叠，减少有效搜索路径
+ *
+ * 算法: Heuristic Neighbor Selection (HNSW 论文 Algorithm 2)
+ *
+ * 核心思想:
+ *   不仅考虑候选点到查询点 q 的距离，还考虑候选点之间的相互距离。
+ *   优先保留与已选集合距离较远的点，提高图的全局连通性和多样性。
+ *
+ * 算法流程 (select_neighbors_heuristic):
+ *   输入: 查询点 q, 候选集 candidates, 数量 M, 层数 level
+ *   输出: 选中的 M 个邻居
+ *
+ *   1. 按距离排序 candidates
+ *   2. R ← [] (结果集), W ← candidates (工作队列)
+ *   3. while |R| < M 且 W 非空:
+ *      a. 从 W 弹出最近的点 c
+ *      b. 检查多样性: c 应该与 R 中所有点保持一定距离
+ *         - 计算 min_dist(c, R) = min{dist(c, r) for r in R}
+ *         - 如果 R 为空 或 min_dist(c, R) > α * dist(c, q): 
+ *           * 将 c 加入 R (保留，因为与已选点差异大)
+ *         - 否则:
+ *           * 如果 |R| < M/2: 仍然加入 (保证最小连通性)
+ *   4. 如果 |R| < M: 从 W 剩余元素补齐 (保证连通性)
+ *   5. 返回 R
+ *
+ * 参数 α (extend_candidates_factor):
+ *   - α = 0: 只考虑距离 q 的远近，等同原始算法
+ *   - α = 1.0: 严格多样性检查 (默认)
+ *   - α > 1.0: 更激进的多样性选择，可能牺牲精度
+ *
+ * 复杂度: O(M * |candidates|)，由于 M 很小(通常 16-32)，实际开销可忽略
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    HnswNode* node;
+    float dist_to_q;      /* 到查询点的距离 */
+    float min_dist_to_R;  /* 到已选集合的最小距离 */
+} NeighborCandidate;
+
+/* 启发式邻居选择主函数 */
+static void select_neighbors_heuristic(HnswIndex* idx, 
+                                        const float* query,
+                                        HnswNode** candidates,
+                                        float* candidate_dists,
+                                        int candidate_count,
+                                        int M,
+                                        HnswNode** out_selected,
+                                        int* out_selected_count)
+{
+    if (candidate_count <= M) {
+        /* 候选不够，全部选中 */
+        for (int i = 0; i < candidate_count; i++) {
+            out_selected[i] = candidates[i];
+        }
+        *out_selected_count = candidate_count;
+        return;
+    }
+    
+    /* 按距离排序候选 (简单冒泡，因为数量不多) */
+    NeighborCandidate* work = (NeighborCandidate*)malloc(candidate_count * sizeof(NeighborCandidate));
+    for (int i = 0; i < candidate_count; i++) {
+        work[i].node = candidates[i];
+        work[i].dist_to_q = candidate_dists[i];
+        work[i].min_dist_to_R = 0.0f;
+    }
+    
+    for (int i = 0; i < candidate_count - 1; i++) {
+        for (int j = i + 1; j < candidate_count; j++) {
+            if (work[j].dist_to_q < work[i].dist_to_q) {
+                NeighborCandidate tmp = work[i];
+                work[i] = work[j];
+                work[j] = tmp;
+            }
+        }
+    }
+    
+    /* 启发式选择 */
+    HnswNode** R = (HnswNode**)malloc(M * sizeof(HnswNode*));
+    int R_count = 0;
+    int* selected_flags = (int*)calloc(candidate_count, sizeof(int));
+    
+    const float ALPHA = 1.0f;  /* 多样性因子，可配置 */
+    const int MIN_GUARANTEE = M / 2;  /* 至少保证一半连通性 */
+    
+    for (int i = 0; i < candidate_count && R_count < M; i++) {
+        if (selected_flags[i]) continue;
+        
+        HnswNode* c = work[i].node;
+        float dist_cq = work[i].dist_to_q;
+        
+        /* 计算到已选集合的最小距离 */
+        float min_dist_to_selected = 2.0f;  /* 最大距离为 2 (余弦距离) */
+        for (int j = 0; j < R_count; j++) {
+            float d = vec_distance(c->embedding, R[j]->embedding, idx->dim);
+            if (d < min_dist_to_selected) min_dist_to_selected = d;
+        }
+        
+        /* 启发式决策:
+         * 1. 如果 R 为空，直接加入
+         * 2. 如果与已选集合距离足够远 (多样性)，加入
+         * 3. 如果还没满足最小连通性保证，加入
+         */
+        int should_select = 0;
+        if (R_count == 0) {
+            should_select = 1;
+        } else if (min_dist_to_selected > ALPHA * dist_cq) {
+            /* 多样性检查通过：与已选点距离大于 α * dist(c,q) */
+            should_select = 1;
+        } else if (R_count < MIN_GUARANTEE) {
+            /* 连通性保证：至少选 M/2 个最近的 */
+            should_select = 1;
+        }
+        
+        if (should_select) {
+            R[R_count++] = c;
+            selected_flags[i] = 1;
+        }
+    }
+    
+    /* 如果选不够 M 个，从剩余候选补齐 */
+    for (int i = 0; i < candidate_count && R_count < M; i++) {
+        if (!selected_flags[i]) {
+            R[R_count++] = work[i].node;
+        }
+    }
+    
+    /* 输出 */
+    *out_selected_count = R_count;
+    for (int i = 0; i < R_count; i++) {
+        out_selected[i] = R[i];
+    }
+    
+    /* 清理 */
+    free(work);
+    free(R);
+    free(selected_flags);
+}
+
+/* ─── HNSW K-NN 搜索 (使用 ef-search) ───────────────────── */
 
 static int hnsw_knn_search(HnswIndex* idx, const float* query, int k,
                             HnswNode** results, float* distances)
@@ -350,72 +669,47 @@ static int hnsw_knn_search(HnswIndex* idx, const float* query, int k,
     
     int max_level = curr_entry->max_level;
     
-    /* 从最高层开始 */
+    /* ═══ P3 优化：使用 ef-search 替代贪婪搜索 ═══
+     * 
+     * 原始代码使用贪婪搜索，每层只返回一个最近点，容易局部最优。
+     * 使用 ef_search 参数，在顶层向下传播时保持 ef 个候选，
+     * 显著提高搜索质量和召回率。
+     */
+    
+    /* 高层使用 ef_search 进行多候选搜索，结果作为下一层入口 */
+    HnswNode** layer_results = (HnswNode**)malloc(idx->ef_search * sizeof(HnswNode*));
+    float* layer_dists = (float*)malloc(idx->ef_search * sizeof(float));
+    
     for (int lc = max_level; lc >= 1; lc--) {
-        HnswNode* nearest = hnsw_search_layer_simple(idx, curr_entry, query, lc);
-        if (nearest) curr_entry = nearest;
-    }
-    
-    /* 第 0 层收集候选 */
-    typedef struct { HnswNode* node; float dist; } Cand;
-    Cand* candidates = (Cand*)malloc(idx->node_count * sizeof(Cand));
-    int cand_count = 0;
-    
-    int* visited = (int*)calloc(idx->node_count, sizeof(int));
-    
-    /* BFS 收集候选 */
-    HnswNode** queue = (HnswNode**)malloc(idx->node_count * sizeof(HnswNode*));
-    int qhead = 0, qtail = 0;
-    
-    queue[qtail++] = curr_entry;
-    int entry_idx = -1;
-    for (int i = 0; i < idx->node_count; i++) {
-        if (idx->nodes[i] == curr_entry) { entry_idx = i; break; }
-    }
-    if (entry_idx >= 0) visited[entry_idx] = 1;
-    
-    while (qhead < qtail && cand_count < idx->ef_search) {
-        HnswNode* curr = queue[qhead++];
-        float d = vec_distance(curr->embedding, query, idx->dim);
-        candidates[cand_count].node = curr;
-        candidates[cand_count].dist = d;
-        cand_count++;
-        
-        for (int i = 0; i < curr->neighbor_counts[0]; i++) {
-            HnswNode* nb = (HnswNode*)curr->neighbors[0][i];
-            if (!nb) continue;
-            
-            int nb_idx = -1;
-            for (int j = 0; j < idx->node_count; j++) {
-                if (idx->nodes[j] == nb) { nb_idx = j; break; }
-            }
-            if (nb_idx < 0 || visited[nb_idx]) continue;
-            visited[nb_idx] = 1;
-            
-            queue[qtail++] = nb;
+        int found = hnsw_search_layer_ef_full(idx, curr_entry, query, lc, 
+                                               idx->ef_search, layer_results, layer_dists);
+        if (found > 0) {
+            /* 使用最近的结果作为下一层入口 */
+            curr_entry = layer_results[0];
         }
     }
     
-    /* 排序取前 k */
-    for (int i = 0; i < cand_count - 1 && i < k; i++) {
-        for (int j = i + 1; j < cand_count; j++) {
-            if (candidates[j].dist < candidates[i].dist) {
-                Cand tmp = candidates[i];
-                candidates[i] = candidates[j];
-                candidates[j] = tmp;
-            }
-        }
-    }
+    free(layer_results);
+    free(layer_dists);
     
-    int count = (cand_count < k) ? cand_count : k;
+    /* ═══ 第 0 层使用 ef-search 收集最终候选 ═══
+     * 第 0 层包含所有节点，使用 ef_search 收集足够候选后取前 k
+     */
+    HnswNode** final_results = (HnswNode**)malloc(idx->ef_search * sizeof(HnswNode*));
+    float* final_dists = (float*)malloc(idx->ef_search * sizeof(float));
+    
+    int final_found = hnsw_search_layer_ef_full(idx, curr_entry, query, 0,
+                                                 idx->ef_search, final_results, final_dists);
+    
+    /* 取前 k 个作为最终结果 */
+    int count = (final_found < k) ? final_found : k;
     for (int i = 0; i < count; i++) {
-        results[i] = candidates[i].node;
-        distances[i] = candidates[i].dist;
+        results[i] = final_results[i];
+        distances[i] = final_dists[i];
     }
     
-    free(candidates);
-    free(visited);
-    free(queue);
+    free(final_results);
+    free(final_dists);
     
     return count;
 }
@@ -763,28 +1057,127 @@ int ndtsdb_vec_build_index(NDTSDB* db,
             }
         }
         
-        /* 从当前节点层向下处理 */
+        /* ═══ P2 + P3: 优化的邻居选择和连接 ═══
+         *
+         * 原实现问题:
+         *   1. 只使用贪婪搜索，每层只找一个最近点
+         *   2. 邻居选择简单，没有考虑多样性
+         *   3. 只是机械地收集邻居的邻居，没有策略
+         *
+         * 优化方案:
+         *   1. 使用 ef-search 收集 ef_construction 个候选 (P3)
+         *   2. 使用启发式选择从中挑选最多 M 个多样性邻居 (P2)
+         *   3. 建立双向连接，保证图的无向性
+         */
+        
         HnswNode* ep_w = curr_ep;
         for (int lc = (max_level < ep_level ? max_level : ep_level); lc >= 0; lc--) {
-            /* 搜索近邻 */
-            HnswNode* nearest = hnsw_search_layer_ef(idx, ep_w, node->embedding, lc, idx->ef_construction);
+            /* ═══ Step 1: ef-search 收集候选 (P3) ═══
+             * 使用 ef_construction 参数进行多候选搜索，
+             * 返回该层上距离最近的 ef_construction 个节点
+             */
+            HnswNode** ef_results = (HnswNode**)malloc(idx->ef_construction * sizeof(HnswNode*));
+            float* ef_dists = (float*)malloc(idx->ef_construction * sizeof(float));
             
-            /* 选择邻居并连接 */
-            if (nearest && nearest != node) {
-                hnsw_node_add_neighbor(node, lc, nearest);
-                hnsw_node_add_neighbor(nearest, lc, node);
-                
-                /* 收集更多邻居 */
-                for (int ni = 0; ni < nearest->neighbor_counts[lc] && node->neighbor_counts[lc] < idx->M; ni++) {
-                    HnswNode* nn = (HnswNode*)nearest->neighbors[lc][ni];
-                    if (nn && nn != node) {
-                        hnsw_node_add_neighbor(node, lc, nn);
-                        hnsw_node_add_neighbor(nn, lc, node);
-                    }
-                }
+            int ef_found = hnsw_search_layer_ef_full(idx, ep_w, node->embedding, lc, 
+                                                      idx->ef_construction, ef_results, ef_dists);
+            
+            /* 过滤掉自己 */
+            int valid_count = 0;
+            for (int i = 0; i < ef_found; i++) {
+                if (ef_results[i] != node) valid_count++;
             }
             
-            ep_w = nearest ? nearest : ep_w;
+            if (valid_count > 0) {
+                /* 准备候选数组 */
+                HnswNode** candidates = (HnswNode**)malloc(valid_count * sizeof(HnswNode*));
+                float* candidate_dists = (float*)malloc(valid_count * sizeof(float));
+                
+                int ci = 0;
+                for (int i = 0; i < ef_found; i++) {
+                    if (ef_results[i] != node) {
+                        candidates[ci] = ef_results[i];
+                        candidate_dists[ci] = ef_dists[i];
+                        ci++;
+                    }
+                }
+                
+                /* ═══ Step 2: 启发式邻居选择 (P2) ═══
+                 * 从候选中选择最多 M 个邻居，兼顾距离和多样性
+                 * 参考 HNSW 论文 Algorithm 2: heuristic selection
+                 */
+                HnswNode** selected = (HnswNode**)malloc(idx->M * sizeof(HnswNode*));
+                int selected_count = 0;
+                
+                select_neighbors_heuristic(idx, node->embedding, 
+                                            candidates, candidate_dists, valid_count,
+                                            idx->M, selected, &selected_count);
+                
+                /* ═══ Step 3: 建立双向连接 ═══
+                 * 对新节点：添加 selected 作为邻居
+                 * 对已有节点：反向添加新节点作为邻居
+                 */
+                for (int si = 0; si < selected_count; si++) {
+                    HnswNode* neighbor = selected[si];
+                    
+                    /* 双向连接 */
+                    hnsw_node_add_neighbor(node, lc, neighbor);
+                    hnsw_node_add_neighbor(neighbor, lc, node);
+                    
+                    /* ═══ Step 4: 邻居剪枝 (Shrink) ═══
+                     * 如果邻居的连接数超过 M，也需要用启发式方法剪枝
+                     * 这是 HNSW 保持稀疏图的关键
+                     */
+                    if (neighbor->neighbor_counts[lc] > idx->M) {
+                        /* 收集邻居的所有邻居作为候选 */
+                        int nb_nc = neighbor->neighbor_counts[lc];
+                        HnswNode** nb_cands = (HnswNode**)malloc(nb_nc * sizeof(HnswNode*));
+                        float* nb_dists = (float*)malloc(nb_nc * sizeof(float));
+                        
+                        for (int ni = 0; ni < nb_nc; ni++) {
+                            HnswNode* nn = (HnswNode*)neighbor->neighbors[lc][ni];
+                            nb_cands[ni] = nn;
+                            nb_dists[ni] = vec_distance(neighbor->embedding, nn->embedding, idx->dim);
+                        }
+                        
+                        /* 启发式选择保留的邻居 */
+                        HnswNode** nb_selected = (HnswNode**)malloc(idx->M * sizeof(HnswNode*));
+                        int nb_sel_count = 0;
+                        
+                        select_neighbors_heuristic(idx, neighbor->embedding,
+                                                    nb_cands, nb_dists, nb_nc,
+                                                    idx->M, nb_selected, &nb_sel_count);
+                        
+                        /* 重建邻居列表 */
+                        /* 注意：简单实现是直接清空后重建，生产环境可用更高效的 swap-remove */
+                        for (int ni = 0; ni < nb_nc; ni++) {
+                            neighbor->neighbors[lc][ni] = NULL;
+                        }
+                        neighbor->neighbor_counts[lc] = 0;
+                        
+                        for (int ni = 0; ni < nb_sel_count; ni++) {
+                            neighbor->neighbors[lc][ni] = (struct HnswNode*)nb_selected[ni];
+                        }
+                        neighbor->neighbor_counts[lc] = nb_sel_count;
+                        
+                        free(nb_cands);
+                        free(nb_dists);
+                        free(nb_selected);
+                    }
+                }
+                
+                /* 更新下一层入口点：使用最近的那个 */
+                if (selected_count > 0) {
+                    ep_w = selected[0];
+                }
+                
+                free(candidates);
+                free(candidate_dists);
+                free(selected);
+            }
+            
+            free(ef_results);
+            free(ef_dists);
         }
         
         /* 更新 entry_point */
