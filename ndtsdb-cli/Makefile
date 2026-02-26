@@ -70,6 +70,27 @@ cosmo-docker:
 	@rm -f *.elf *.dbg
 	@echo "  Cleaned: *.elf *.dbg (intermediate files)"
 
+# cosmo-docker-ci: 从 moltbaby 根目录调用（CI 环境专用）
+# 用法: make -C ndtsdb-cli cosmo-docker-ci
+cosmo-docker-ci:
+	@echo "=== Cosmocc APE Build (CI mode) ==="
+	@echo "Image : $(COSMO_IMAGE)"
+	@echo "Output: ndtsdb-cli/$(COSMO_BINARY)"
+	@rm -f ndtsdb-cli/$(COSMO_BINARY)
+	@podman run --rm \
+		-v $$(pwd):/workspace \
+		-w /workspace \
+		$(COSMO_IMAGE) \
+		cosmocc -o ndtsdb-cli/$(COSMO_BINARY) \
+			$(COSMO_SOURCES) $(COSMO_FLAGS)
+	@echo ""
+	@echo "✓ APE binary: ndtsdb-cli/$(COSMO_BINARY)"
+	@echo "  Size  : $$(ls -lh ndtsdb-cli/$(COSMO_BINARY) | awk '{print $$5}')"
+	@echo "  Format: $$(file ndtsdb-cli/$(COSMO_BINARY) | cut -d: -f2)"
+	@echo "  Runs on: Linux / macOS / Windows / FreeBSD (x86-64)"
+	@rm -f ndtsdb-cli/*.elf ndtsdb-cli/*.dbg
+	@echo "  Cleaned: *.elf *.dbg (intermediate files)"
+
 # cosmo: 从 ndtsdb-cli 目录内挂载 (备用, 需手动调整路径)
 cosmo:
 	@echo "=== Cosmocc APE Build (local workspace mount) ==="

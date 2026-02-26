@@ -6,15 +6,15 @@ const logger = createLogger('ExecutionAgent');
 
 import { ExecutionAgent, OrderRequest, OrderResponse, Position } from './agent';
 
-// 硬编码API key（MVP阶段）
-const HARDCODED_API_KEY = 'test-api-key-123456';
-
 export class SimpleExecutionAgent implements ExecutionAgent {
   private apiKey: string;
   private positions: Map<string, Position> = new Map();
   private orderCounter = 0;
 
-  constructor(apiKey: string = HARDCODED_API_KEY) {
+  constructor(apiKey: string) {
+    if (!apiKey) {
+      throw new Error('ExecutionAgent: apiKey is required');
+    }
     this.apiKey = apiKey;
     logger.info('[ExecutionAgent] 初始化完成，API Key:', apiKey.substring(0, 10) + '...');
   }
