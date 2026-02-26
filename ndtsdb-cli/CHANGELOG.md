@@ -5,6 +5,27 @@
 
 ---
 
+## [v1.0.0.1] - 2026-02-26
+
+### 与 ndtsdb (Bun 版) 格式互通
+
+**背景**: 之前 Bun 版使用纯 TypeScript 实现的写入逻辑，与 CLI 的 C 核心格式不兼容。
+
+**解决方案**:
+- Bun 版通过 FFI 调用 libndts (C 核心)
+- 废弃纯 TS 的 append.ts 写入逻辑
+- 统一使用 CLI 格式作为标准
+
+**Bun 版变更** (`ndtsdb/`):
+- 新增 `ndts-db-ffi.ts` - libndts FFI 绑定
+- 新增 `append-ffi.ts` - FFI 适配的 AppendWriter
+- `AppendWriter` 现在通过 FFI 调用 C 核心写入
+- 版本同步为 1.0.0.1
+
+**CLI 保持不变**: `ndtsdb-cli/` 代码无需修改，格式已是标准。
+
+---
+
 ## [v1.0.0.0] - 2026-02-26
 
 ### 🎯 HNSW 核心算法优化

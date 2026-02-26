@@ -11,14 +11,35 @@
  *   - timestamp 单位：毫秒 epoch（int64_t）。
  *
  * 线程安全：否。多线程使用须外部加锁。
- *
- * v0.4.0 API 冻结。
  */
 #ifndef NDTSDB_H
 #define NDTSDB_H
 
 #include <stddef.h>
 #include <stdint.h>
+
+/* ─── 版本信息 ─────────────────────────────────────────── */
+#ifndef NDTSDB_VERSION
+#define NDTSDB_VERSION "1.0.0.1"
+#endif
+#ifndef NDTSDB_VERSION_MAJOR
+#define NDTSDB_VERSION_MAJOR 1
+#endif
+#ifndef NDTSDB_VERSION_MINOR
+#define NDTSDB_VERSION_MINOR 0
+#endif
+#ifndef NDTSDB_VERSION_PATCH
+#define NDTSDB_VERSION_PATCH 0
+#endif
+
+/* 版本号计算：MAJOR * 1000000 + MINOR * 1000 + PATCH */
+#define NDTSDB_VERSION_NUMBER ((NDTSDB_VERSION_MAJOR * 1000000) + \
+                               (NDTSDB_VERSION_MINOR * 1000) + \
+                               NDTSDB_VERSION_PATCH)
+
+/* 版本检查宏 */
+#define NDTSDB_VERSION_CHECK(major, minor, patch) \
+    (NDTSDB_VERSION_NUMBER >= ((major) * 1000000 + (minor) * 1000 + (patch)))
 
 #ifdef __cplusplus
 extern "C" {

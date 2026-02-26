@@ -10,9 +10,18 @@
 export { ColumnarTable } from './columnar.js';
 export type { ColumnarType } from './columnar.js';
 
+// ─── 版本信息 ────────────────────────────────────────
+
+export { VERSION, VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, getVersion } from './ndts-db-ffi.js';
+
 // ─── 增量写入 + 完整性校验 ───────────────────────────
 
-export { AppendWriter, crc32 } from './append.js';
+// FFI 适配层 (与 CLI 格式互通)
+export { AppendWriterFFI as AppendWriter, AppendWriterFFI } from './append-ffi.js';
+export { NdtsDatabase, KlineRow, openDatabase, isLibraryAvailable } from './ndts-db-ffi.js';
+
+// 遗留纯 TS 实现 (格式不兼容，已弃用)
+// export { AppendWriter, crc32 } from './append.js';
 
 // ─── 压缩 ────────────────────────────────────────────
 

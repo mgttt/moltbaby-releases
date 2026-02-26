@@ -1,7 +1,8 @@
 # Makefile for ndtsdb-cli
 # 正式构建: make cosmo-docker → ndtsdb-cli.com (APE 跨平台, podman + cosmocc)
 
-VERSION = 1.0.0
+# 版本号优先级: 1) 传入的 VERSION 参数 2) ../ndtsdb/VERSION 3) 默认值
+VERSION := $(if $(VERSION),$(VERSION),$(shell cat ../ndtsdb/VERSION 2>/dev/null || echo "1.0.0.1"))
 
 # ============================================================================
 # 正式构建: Cosmocc (podman 容器, APE 跨平台二进制)

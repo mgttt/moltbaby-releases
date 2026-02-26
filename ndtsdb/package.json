@@ -1,6 +1,6 @@
 {
   "name": "ndtsdb",
-  "version": "0.9.5.0",
+  "version": "1.0.0.1",
   "main": "src/index.ts",
   "devDependencies": {
     "@types/bun": "latest"
