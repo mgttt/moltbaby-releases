@@ -487,6 +487,163 @@ export class HNSWIndex {
     
     return index;
   }
+
+  /**
+   * 二进制序列化格式：
+   * Header (32 bytes):
+   *   - magic: 4 bytes "HNSW"
+   *   - version: 4 bytes uint32
+   *   - M: 4 bytes uint32
+   *   - efConstruction: 4 bytes uint32
+   *   - efSearch: 4 bytes uint32
+   *   - dimension: 4 bytes uint32
+   *   - entryPoint: 4 bytes int32 (-1 for null)
+   *   - maxLevel: 4 bytes uint32
+   *   - size: 4 bytes uint32
+   * 
+   * Nodes section:
+   *   For each node:
+   *     - id: 4 bytes uint32
+   *     - numLevels: 4 bytes uint32
+   *     - vector: dimension * 4 bytes (float32)
+   *     - For each level:
+   *       - numConnections: 4 bytes uint32
+   *       - connections: numConnections * 4 bytes (uint32)
+   */
+
+  /**
+   * 序列化索引到二进制格式
+   * 比JSON更快、更紧凑，适合大规模数据
+   */
+  serializeBinary(): Uint8Array {
+    // 计算总大小
+    let totalSize = 32; // Header
+    
+    for (const [id, node] of this.nodes) {
+      totalSize += 8; // id + numLevels
+      totalSize += this.dimension * 4; // vector
+      for (let level = 0; level < node.connections.length; level++) {
+        totalSize += 4; // numConnections count
+        const connections = node.connections[level];
+        if (connections) {
+          totalSize += connections.length * 4; // connections data
+        }
+      }
+    }
+    
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new DataView(buffer);
+    const uint8View = new Uint8Array(buffer);
+    let offset = 0;
+    
+    // Write header
+    const magic = new TextEncoder().encode("HNSW");
+    uint8View.set(magic, offset);
+    offset += 4;
+    
+    view.setUint32(offset, 1, true); offset += 4; // version
+    view.setUint32(offset, this.M, true); offset += 4;
+    view.setUint32(offset, this.efConstruction, true); offset += 4;
+    view.setUint32(offset, this.efSearch, true); offset += 4;
+    view.setUint32(offset, this.dimension, true); offset += 4;
+    view.setInt32(offset, this.entryPoint ?? -1, true); offset += 4;
+    view.setUint32(offset, this.maxLevel, true); offset += 4;
+    view.setUint32(offset, this.size, true); offset += 4;
+    
+    // Write nodes
+    for (const [id, node] of this.nodes) {
+      view.setUint32(offset, id, true); offset += 4;
+      view.setUint32(offset, node.connections.length, true); offset += 4;
+      
+      // Write vector
+      const floatView = new Float32Array(buffer, offset, this.dimension);
+      floatView.set(node.vector);
+      offset += this.dimension * 4;
+      
+      // Write connections for each level
+      for (let level = 0; level < node.connections.length; level++) {
+        const connections = node.connections[level];
+        if (connections) {
+          view.setUint32(offset, connections.length, true); offset += 4;
+          for (const connId of connections) {
+            view.setUint32(offset, connId, true); offset += 4;
+          }
+        } else {
+          view.setUint32(offset, 0, true); offset += 4;
+        }
+      }
+    }
+    
+    return uint8View;
+  }
+
+  /**
+   * 从二进制格式反序列化索引
+   */
+  static deserializeBinary(data: Uint8Array): HNSWIndex {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    let offset = 0;
+    
+    // Read header
+    const magic = new TextDecoder().decode(data.slice(0, 4));
+    if (magic !== "HNSW") {
+      throw new Error("Invalid binary format: wrong magic number");
+    }
+    offset += 4;
+    
+    const version = view.getUint32(offset, true); offset += 4;
+    if (version !== 1) {
+      throw new Error(`Unsupported binary format version: ${version}`);
+    }
+    
+    const M = view.getUint32(offset, true); offset += 4;
+    const efConstruction = view.getUint32(offset, true); offset += 4;
+    const efSearch = view.getUint32(offset, true); offset += 4;
+    const dimension = view.getUint32(offset, true); offset += 4;
+    const entryPoint = view.getInt32(offset, true); offset += 4;
+    const maxLevel = view.getUint32(offset, true); offset += 4;
+    const size = view.getUint32(offset, true); offset += 4;
+    
+    const index = new HNSWIndex({
+      M,
+      efConstruction,
+      efSearch,
+      dimension
+    });
+    
+    index.entryPoint = entryPoint >= 0 ? entryPoint : null;
+    index.maxLevel = maxLevel;
+    index.size = size;
+    
+    // Read nodes
+    for (let i = 0; i < size; i++) {
+      const id = view.getUint32(offset, true); offset += 4;
+      const numLevels = view.getUint32(offset, true); offset += 4;
+      
+      // Read vector
+      const vector = new Float32Array(data.buffer, data.byteOffset + offset, dimension);
+      offset += dimension * 4;
+      
+      const node = new HNSWNode(id, new Float32Array(vector), numLevels - 1);
+      
+      // Read connections for each level
+      for (let level = 0; level < numLevels; level++) {
+        const numConnections = view.getUint32(offset, true); offset += 4;
+        const connections: number[] = [];
+        
+        for (let j = 0; j < numConnections; j++) {
+          connections.push(view.getUint32(offset, true));
+          offset += 4;
+        }
+        
+        node.connections[level] = connections;
+      }
+      
+      index.nodes.set(id, node);
+    }
+    
+    return index;
+  }
 }
 
 // 默认导出

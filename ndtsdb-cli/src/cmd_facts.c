@@ -794,6 +794,7 @@ static int cmd_facts_search(int argc, char **argv) {
         hit_count++;
     }
 
+    ndtsdb_close(db);
     ndtsdb_lock_release(lock_fd);
 
     // 排序（按相似度降序）

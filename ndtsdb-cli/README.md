@@ -74,7 +74,7 @@ make cosmo-docker
 └─────────────────────────────────────────┘
 ```
 
-**注意**: ndtsdb-cli 与 [ndtsdb](../ndtsdb/) (Bun/TS 版) **数据格式不同**，不互通。
+**注意**: ndtsdb-cli 与 [ndtsdb](../ndtsdb/) (Bun/TS 版) 数据格式已互通（通过 `AppendWriterFFI` 适配层）。
 
 ## 已归档文档
 

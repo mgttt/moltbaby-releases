@@ -1,6 +1,11 @@
 // ============================================================
-// 增量写入 + CRC32 完整性校验
+// [DEPRECATED] 增量写入 + CRC32 完整性校验
 // append-only 模式，不重写整个文件
+//
+// ⚠️ 本文件已废弃 (v0.9.0+)
+//   - 原因: 纯 TS 实现与 CLI 格式不兼容，性能不及 C 核心
+//   - 替代: 使用 append-ffi.ts (AppendWriterFFI) 或 CLI 原生接口
+//   - 计划: 下版本移除
 // ============================================================
 
 import { openSync, closeSync, writeSync, readSync, fstatSync, existsSync, mkdirSync, renameSync, rmSync } from 'fs';

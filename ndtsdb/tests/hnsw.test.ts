@@ -233,4 +233,86 @@ describe("HNSW Index", () => {
     expect(nonZeroResult).toBeDefined();
     expect(nonZeroResult!.score).toBe(1.0);
   });
+
+  // 测试用例13: 二进制序列化和反序列化
+  it("should serialize and deserialize binary correctly", () => {
+    const index = new HNSWIndex({ dimension: 3, M: 16, efConstruction: 100 });
+    
+    // 插入一些向量
+    index.insert(1, new Float32Array([1, 0, 0]));
+    index.insert(2, new Float32Array([0, 1, 0]));
+    index.insert(3, new Float32Array([0, 0, 1]));
+    
+    // 二进制序列化
+    const binary = index.serializeBinary();
+    
+    // 验证二进制格式（至少包含header）
+    expect(binary.length).toBeGreaterThan(32);
+    
+    // 验证magic number
+    const magic = new TextDecoder().decode(binary.slice(0, 4));
+    expect(magic).toBe("HNSW");
+    
+    // 二进制反序列化
+    const restored = HNSWIndex.deserializeBinary(binary);
+    
+    // 验证统计信息
+    const stats = restored.getStats();
+    expect(stats.size).toBe(3);
+    expect(stats.dimension).toBe(3);
+    expect(stats.M).toBe(16);
+    
+    // 验证搜索功能仍然正确
+    const results = restored.search(new Float32Array([1, 0, 0]), 1);
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe(1);
+    expect(results[0].score).toBeCloseTo(1.0, 5);
+  });
+
+  // 测试用例14: 二进制格式大规模数据
+  it("should handle binary serialization for larger dataset", () => {
+    const dim = 128;
+    const index = new HNSWIndex({ dimension: dim, M: 16, efConstruction: 64 });
+    
+    // 插入100个随机向量
+    for (let i = 0; i < 100; i++) {
+      const vec = new Float32Array(dim);
+      for (let j = 0; j < dim; j++) {
+        vec[j] = Math.random();
+      }
+      index.insert(i, vec);
+    }
+    
+    // 二进制序列化
+    const binary = index.serializeBinary();
+    
+    // 反序列化
+    const restored = HNSWIndex.deserializeBinary(binary);
+    
+    expect(restored.getSize()).toBe(100);
+    
+    // 验证搜索功能
+    const query = new Float32Array(dim);
+    for (let j = 0; j < dim; j++) {
+      query[j] = Math.random();
+    }
+    
+    const results = restored.search(query, 10);
+    expect(results).toHaveLength(10);
+    
+    // 验证分数在有效范围
+    for (const r of results) {
+      expect(r.score).toBeGreaterThanOrEqual(0);
+      expect(r.score).toBeLessThanOrEqual(1);
+    }
+  });
+
+  // 测试用例15: 二进制格式错误处理
+  it("should throw error on invalid binary format", () => {
+    const invalidData = new Uint8Array([0, 0, 0, 0]); // Wrong magic
+    
+    expect(() => {
+      HNSWIndex.deserializeBinary(invalidData);
+    }).toThrow("Invalid binary format");
+  });
 });

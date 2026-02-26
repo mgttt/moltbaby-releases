@@ -66,7 +66,7 @@ const avg20 = sma(prices, 20);  // 200M+/s
 └─────────────────────────────────────────┘
 ```
 
-**注意**: ndtsdb (TS) 与 [ndtsdb-cli](../ndtsdb-cli/) **数据格式不同**，不互通。
+**注意**: ndtsdb (TS) 与 [ndtsdb-cli](../ndtsdb-cli/) 数据格式已互通（通过 `AppendWriterFFI` 适配层）。
 
 ---
 
