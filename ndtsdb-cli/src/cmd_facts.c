@@ -2,10 +2,13 @@
 // 存储: 向量 → ndtsdb(.ndtv), 原文 → {database}/facts-text.jsonl
 //
 // 子命令:
-//   write   --database --text <t> --agent-id <id> [--type T] [--validity V] [--scope S] [--key K] [--dim N]
-//   import  --database --input <facts.jsonl>   (JSONL每行: {text, agent_id, type, embedding?})
-//   list    --database [--agent-id ID]
-//   search  --database --query <text> [--top-k N] [--threshold F] [--agent-id ID] [--json] [--dim N]
+//   write    --database --text <t> --agent-id <id> [--type T] [--validity V] [--scope S] [--key K] [--dim N]
+//   import   --database --input <facts.jsonl>   (JSONL每行: {text, agent_id, type, embedding?})
+//   list     --database [--agent-id ID]
+//   search   --database --query <text> [--top-k N] [--threshold F] [--agent-id ID] [--json] [--dim N]
+//   decay    --database --query <text> --half-life 7d [options]   (时间衰减搜索)
+//   dedup    --database --threshold 0.95 [--dry-run]             (查重/去重)
+//   archive  --database --before -30d [--dry-run]                (归档旧数据)
 
 #include "cmd_facts.h"
 #include "cmd_embed.h"
@@ -23,34 +26,16 @@
 // 内存缓存（进程生命周期内有效，避免重复磁盘 IO）
 // ============================================================
 
-typedef struct {
-    float* embedding;
-    uint16_t dim;
-    int64_t ts;
-    char agent_id[32];
-    char type[16];
-    char scope[64];
-    float confidence;
-} CachedVector;
+VectorCache g_vec_cache = {0};
 
-typedef struct {
-    CachedVector* items;
-    int count;
-    int capacity;
-    char db_path[512];
-    bool loaded;
-} VectorCache;
-
-static VectorCache g_vec_cache = {0};
-
-static void cache_init(void) {
+void cache_init(void) {
     g_vec_cache.capacity = 4096;
     g_vec_cache.items = (CachedVector*)calloc(g_vec_cache.capacity, sizeof(CachedVector));
     g_vec_cache.count = 0;
     g_vec_cache.loaded = false;
 }
 
-static void cache_clear(void) {
+void cache_clear(void) {
     if (!g_vec_cache.items) return;
     for (int i = 0; i < g_vec_cache.count; i++) {
         free(g_vec_cache.items[i].embedding);
@@ -59,7 +44,7 @@ static void cache_clear(void) {
     g_vec_cache.loaded = false;
 }
 
-static void cache_add(const VecRecord* rec, const char* scope) {
+void cache_add(const VecRecord* rec, const char* scope) {
     if (!g_vec_cache.items) cache_init();
     if (g_vec_cache.count >= g_vec_cache.capacity) {
         // 扩容
@@ -83,7 +68,7 @@ static void cache_add(const VecRecord* rec, const char* scope) {
 }
 
 // 加载所有 .ndtv 到缓存
-static void cache_load_all(const char* database) {
+void cache_load_all(const char* database) {
     if (g_vec_cache.loaded && strcmp(g_vec_cache.db_path, database) == 0) return;
     
     cache_clear();
@@ -180,7 +165,7 @@ static int text_index_append(const char *database, long long ts,
 }
 
 // 从 sidecar JSONL 按 ts 查找 text（简单线性扫描）
-static int text_index_find(const char *database, long long ts, char *text_out, size_t text_size) {
+int text_index_find(const char *database, long long ts, char *text_out, size_t text_size) {
     char path[1024];
     facts_text_path(database, path, sizeof(path));
 
@@ -847,7 +832,10 @@ int cmd_facts(int argc, char **argv) {
         printf("  write    Write a text entry (generates embedding locally)\n");
         printf("  import   Batch import from JSONL file\n");
         printf("  list     List all facts [--agent-id ID]\n");
-        printf("  search   Semantic search by text query or raw vector\n\n");
+        printf("  search   Semantic search by text query or raw vector\n");
+        printf("  decay    Search with time decay (recency boost)\n");
+        printf("  dedup    Find duplicate/similar facts\n");
+        printf("  archive  Archive old/expired facts\n\n");
         printf("Use 'ndtsdb-cli facts <command> --help' for details.\n");
         return argc < 3 ? 1 : 0;
     }
@@ -856,6 +844,9 @@ int cmd_facts(int argc, char **argv) {
     if (strcmp(argv[2], "import") == 0) return cmd_facts_import(argc, argv);
     if (strcmp(argv[2], "list")   == 0) return cmd_facts_list(argc, argv);
     if (strcmp(argv[2], "search") == 0) return cmd_facts_search(argc, argv);
+    if (strcmp(argv[2], "decay")  == 0) return cmd_facts_decay_search(argc, argv);
+    if (strcmp(argv[2], "dedup")  == 0) return cmd_facts_dedup(argc, argv);
+    if (strcmp(argv[2], "archive")== 0) return cmd_facts_archive(argc, argv);
 
     fprintf(stderr, "Error: unknown facts command: %s\n", argv[2]);
     fprintf(stderr, "Run 'ndtsdb-cli facts --help' for available commands.\n");

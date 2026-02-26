@@ -124,6 +124,7 @@ pub fn build(b: *std.Build) !void {
     exe.addCSourceFile(.{ .file = b.path("src/cmd_embed.c"), .flags = c_flags.items });
     exe.addCSourceFile(.{ .file = b.path("src/cmd_search.c"), .flags = c_flags.items });
     exe.addCSourceFile(.{ .file = b.path("src/cmd_facts.c"), .flags = c_flags.items });
+    exe.addCSourceFile(.{ .file = b.path("src/cmd_facts_enhancements.c"), .flags = c_flags.items });
     exe.addCSourceFile(.{ .file = b.path("src/ndtsdb_lock.c"), .flags = c_flags.items });
     exe.addCSourceFile(.{ .file = b.path("src/bindings/qjs_ndtsdb.c"), .flags = c_flags.items });
     exe.addCSourceFile(.{ .file = b.path("../ndtsdb/native/ndts.c"), .flags = c_flags.items });

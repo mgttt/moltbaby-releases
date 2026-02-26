@@ -24,6 +24,7 @@ COSMO_SOURCES = \
 	ndtsdb-cli/src/cmd_embed.c \
 	ndtsdb-cli/src/cmd_search.c \
 	ndtsdb-cli/src/cmd_facts.c \
+	ndtsdb-cli/src/cmd_facts_enhancements.c \
 	ndtsdb-cli/src/ndtsdb_lock.c \
 	ndtsdb-cli/src/bindings/qjs_ndtsdb.c \
 	ndtsdb/native/ndts.c \

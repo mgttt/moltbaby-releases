@@ -588,7 +588,7 @@ static void handle_http_request(int client_fd, const char *request, const char *
                     "{\"error\":\"Internal Server Error\",\"message\":\"Failed to open database\"}");
                 ndtsdb_lock_release(lock_fd);
             } else {
-                VectorRecord vrec;
+                VecRecord vrec;
                 memset(&vrec, 0, sizeof(vrec));
                 
                 const char *p;
@@ -661,7 +661,7 @@ static void handle_http_request(int client_fd, const char *request, const char *
                 }
                 
                 if (vrec.timestamp > 0 && vrec.agent_id[0] && vrec.embedding && vrec.embedding_dim > 0) {
-                    int ok = ndtsdb_insert_vector(db, vrec.agent_id, vrec.type, &vrec);
+                    int ok = ndtsdb_vec_insert(db, vrec.agent_id, vrec.type, &vrec);
                     if (ok == 0) {
                         inserted++;
                         KlineRow marker = {
@@ -814,10 +814,10 @@ static void handle_http_request(int client_fd, const char *request, const char *
                             
                             if (agent_filter[0] && strcmp(symbol, agent_filter) != 0) continue;
                             
-                            VectorQueryResult *vresult = ndtsdb_query_vectors(db, symbol, interval);
+                            VecQueryResult *vresult = ndtsdb_vec_query(db, symbol, interval);
                             if (vresult && vresult->count > 0) {
                                 for (uint32_t j = 0; j < vresult->count && match_count < 1024; j++) {
-                                    VectorRecord *rec = &vresult->records[j];
+                                    VecRecord *rec = &vresult->records[j];
                                     if (rec->embedding_dim != query_dim) continue;
                                     
                                     float dot = 0.0f, norm_q = 0.0f, norm_r = 0.0f;

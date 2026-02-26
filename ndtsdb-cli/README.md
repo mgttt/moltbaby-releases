@@ -51,12 +51,16 @@ echo '{"symbol":"BTC","interval":"1h","timestamp":1700000000000,...}' | \
 
 ## 构建
 
+**构建方式**: 必须使用 Podman 容器，禁止本机直接编译
+
 ```bash
 # 正式构建 (Podman + Cosmocc)
 make cosmo-docker
 
 # 输出: ndtsdb-cli.com (APE 跨平台二进制, ~3MB)
 ```
+
+**注意**: 本机 `zig` 已移除，统一使用容器构建以避免环境差异
 
 ## 项目关系
 

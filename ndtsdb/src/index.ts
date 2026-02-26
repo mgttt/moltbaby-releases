@@ -16,12 +16,9 @@ export { VERSION, VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, getVersion } from
 
 // ─── 增量写入 + 完整性校验 ───────────────────────────
 
-// FFI 适配层 (与 CLI 格式互通) - 推荐
+// FFI 适配层 (与 CLI 格式互通)
 export { AppendWriterFFI as AppendWriter, AppendWriterFFI } from './append-ffi.js';
 export { NdtsDatabase, KlineRow, openDatabase, isLibraryAvailable } from './ndts-db-ffi.js';
-
-// [DEPRECATED] 遗留纯 TS 实现 (格式不兼容，已废弃，下版本移除)
-// export { AppendWriter, crc32 } from './append.js';
 
 // ─── 压缩 ────────────────────────────────────────────
 
