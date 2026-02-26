@@ -16,8 +16,99 @@
 #include <math.h>
 #include <time.h>
 #include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vector.h"
+#include "../../ndtsdb/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
+
+// ============================================================
+// 内存缓存（进程生命周期内有效，避免重复磁盘 IO）
+// ============================================================
+
+typedef struct {
+    float* embedding;
+    uint16_t dim;
+    int64_t ts;
+    char agent_id[32];
+    char type[16];
+    char scope[64];
+    float confidence;
+} CachedVector;
+
+typedef struct {
+    CachedVector* items;
+    int count;
+    int capacity;
+    char db_path[512];
+    bool loaded;
+} VectorCache;
+
+static VectorCache g_vec_cache = {0};
+
+static void cache_init(void) {
+    g_vec_cache.capacity = 4096;
+    g_vec_cache.items = (CachedVector*)calloc(g_vec_cache.capacity, sizeof(CachedVector));
+    g_vec_cache.count = 0;
+    g_vec_cache.loaded = false;
+}
+
+static void cache_clear(void) {
+    if (!g_vec_cache.items) return;
+    for (int i = 0; i < g_vec_cache.count; i++) {
+        free(g_vec_cache.items[i].embedding);
+    }
+    g_vec_cache.count = 0;
+    g_vec_cache.loaded = false;
+}
+
+static void cache_add(const VecRecord* rec, const char* scope) {
+    if (!g_vec_cache.items) cache_init();
+    if (g_vec_cache.count >= g_vec_cache.capacity) {
+        // 扩容
+        int new_cap = g_vec_cache.capacity * 2;
+        CachedVector* new_items = (CachedVector*)realloc(g_vec_cache.items, new_cap * sizeof(CachedVector));
+        if (!new_items) return;
+        g_vec_cache.items = new_items;
+        g_vec_cache.capacity = new_cap;
+    }
+    CachedVector* cv = &g_vec_cache.items[g_vec_cache.count++];
+    cv->dim = rec->embedding_dim;
+    cv->ts = rec->timestamp;
+    strncpy(cv->agent_id, rec->agent_id, 31); cv->agent_id[31] = '\0';
+    strncpy(cv->type, rec->type, 15); cv->type[15] = '\0';
+    strncpy(cv->scope, scope, 63); cv->scope[63] = '\0';
+    cv->confidence = rec->confidence;
+    cv->embedding = (float*)malloc(rec->embedding_dim * sizeof(float));
+    if (cv->embedding) {
+        memcpy(cv->embedding, rec->embedding, rec->embedding_dim * sizeof(float));
+    }
+}
+
+// 加载所有 .ndtv 到缓存
+static void cache_load_all(const char* database) {
+    if (g_vec_cache.loaded && strcmp(g_vec_cache.db_path, database) == 0) return;
+    
+    cache_clear();
+    strncpy(g_vec_cache.db_path, database, 511);
+    g_vec_cache.db_path[511] = '\0';
+    
+    NDTSDB* db = ndtsdb_open(database);
+    if (!db) return;
+    
+    // 枚举所有 scope/type 分区
+    char syms[256][32], itvs[256][16];
+    int n = ndtsdb_list_symbols(db, syms, itvs, 256);
+    
+    for (int s = 0; s < n; s++) {
+        VecQueryResult* vr = ndtsdb_vec_query(db, syms[s], itvs[s]);
+        if (!vr) continue;
+        for (uint32_t i = 0; i < vr->count; i++) {
+            cache_add(&vr->records[i], syms[s]);
+        }
+        ndtsdb_vec_free_result(vr);
+    }
+    
+    ndtsdb_close(db);
+    g_vec_cache.loaded = true;
+}
 
 // ============================================================
 // 工具函数
@@ -188,8 +279,8 @@ static int cmd_facts_write(int argc, char **argv) {
         fprintf(stderr, "Error: --database and --text are required\n");
         return 1;
     }
-    if (dim <= 0 || dim > 512) {
-        fprintf(stderr, "Error: --dim must be 1-512\n");
+    if (dim <= 0 || dim > 2048) {
+        fprintf(stderr, "Error: --dim must be 1-2048\n");
         return 1;
     }
 
@@ -246,7 +337,7 @@ static int cmd_facts_write(int argc, char **argv) {
         return 1;
     }
 
-    VectorRecord vrec;
+    VecRecord vrec;
     vrec.timestamp = ts;
     strncpy(vrec.agent_id, agent_id, 31); vrec.agent_id[31] = '\0';
     strncpy(vrec.type, type, 15);         vrec.type[15] = '\0';
@@ -256,13 +347,13 @@ static int cmd_facts_write(int argc, char **argv) {
     vrec.embedding = embedding;
 
     // symbol = scope, interval = type（与ndtsdb存储键一致）
-    int ok = ndtsdb_insert_vector(db, scope, type, &vrec);
+    int ok = ndtsdb_vec_insert(db, scope, type, &vrec);
     ndtsdb_close(db);
     ndtsdb_lock_release(lock_fd);
     free(embedding);
 
     if (ok != 0) {
-        fprintf(stderr, "Error: ndtsdb_insert_vector failed\n");
+        fprintf(stderr, "Error: ndtsdb_vec_insert failed\n");
         return 1;
     }
 
@@ -410,14 +501,14 @@ static int cmd_facts_import(int argc, char **argv) {
         }
 
         // 尝试提取预计算 embedding
-        float embedding[512];
+        float embedding[2048];
         int emb_dim = 0;
         char *ep = strstr(line, "\"embedding\":");
         if (ep) {
             ep = strchr(ep, '[');
             if (ep) {
                 ep++;
-                while (*ep && *ep != ']' && emb_dim < 512) {
+                while (*ep && *ep != ']' && emb_dim < 2048) {
                     char *end;
                     float v = strtof(ep, &end);
                     if (end == ep) { ep++; continue; }
@@ -441,7 +532,7 @@ static int cmd_facts_import(int argc, char **argv) {
 
         long long ts = now_ms() + imported;  // 确保唯一
 
-        VectorRecord vrec;
+        VecRecord vrec;
         vrec.timestamp = ts;
         strncpy(vrec.agent_id, agent_val, 31); vrec.agent_id[31] = '\0';
         strncpy(vrec.type, type_val, 15);      vrec.type[15] = '\0';
@@ -450,7 +541,7 @@ static int cmd_facts_import(int argc, char **argv) {
         vrec.embedding_dim = emb_dim;
         vrec.embedding = embedding;
 
-        if (ndtsdb_insert_vector(db, scope_val, type_val, &vrec) == 0) {
+        if (ndtsdb_vec_insert(db, scope_val, type_val, &vrec) == 0) {
             if (text_val[0] != '\0') {
                 text_index_append(database, ts, agent_val, type_val,
                                   validity_val, scope_val, key_val, text_val);
@@ -573,6 +664,16 @@ static int cmd_facts_list(int argc, char **argv) {
 // facts search
 // ============================================================
 
+typedef struct { long long ts; float sim; char agent_id[32]; char type[16]; } Hit;
+
+static int hit_compare_desc(const void *a, const void *b) {
+    const Hit *ha = (const Hit *)a;
+    const Hit *hb = (const Hit *)b;
+    if (hb->sim > ha->sim) return 1;
+    if (hb->sim < ha->sim) return -1;
+    return 0;
+}
+
 static int cmd_facts_search(int argc, char **argv) {
     const char *database = NULL;
     const char *query_text = NULL;
@@ -624,11 +725,11 @@ static int cmd_facts_search(int argc, char **argv) {
     }
 
     // 构建查询向量
-    float query_vec[512];
+    float query_vec[2048];
     int query_dim = 0;
 
     if (query_text) {
-        if (dim <= 0 || dim > 512) { fprintf(stderr, "Error: --dim must be 1-512\n"); return 1; }
+        if (dim <= 0 || dim > 2048) { fprintf(stderr, "Error: --dim must be 1-2048\n"); return 1; }
         float *emb = (float *)malloc(dim * sizeof(float));
         if (!emb) { fprintf(stderr, "Error: out of memory\n"); return 1; }
         if (embed_generate(query_text, emb, dim) != 0) {
@@ -642,7 +743,7 @@ static int cmd_facts_search(int argc, char **argv) {
         const char *p = strchr(query_vector_str, '[');
         if (!p) { fprintf(stderr, "Error: --query-vector must be '[f1,f2,...]'\n"); return 1; }
         p++;
-        while (*p && *p != ']' && query_dim < 512) {
+        while (*p && *p != ']' && query_dim < 2048) {
             char *end;
             float v = strtof(p, &end);
             if (end == p) { p++; continue; }
@@ -664,76 +765,46 @@ static int cmd_facts_search(int argc, char **argv) {
         return 1;
     }
 
-    // 枚举数据库目录下所有 .ndtv 文件获取 symbol/interval 对
-    #include <dirent.h>
-    typedef struct { long long ts; float sim; char agent_id[32]; char type[16]; } Hit;
+    // 使用内存缓存进行搜索
+    cache_load_all(database);
+    
     Hit hits[4096];
     int hit_count = 0;
-
-    DIR *dir = opendir(database);
-    if (dir) {
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL && hit_count < 4096) {
-            // 文件名格式: {scope}__{type}.ndtv
-            size_t nlen = strlen(ent->d_name);
-            if (nlen < 6 || strcmp(ent->d_name + nlen - 5, ".ndtv") != 0) continue;
-
-            char fname[256];
-            strncpy(fname, ent->d_name, sizeof(fname) - 1);
-            fname[nlen - 5] = '\0';  // 去掉 .ndtv
-
-            char *sep = strstr(fname, "__");
-            if (!sep) continue;
-            *sep = '\0';
-            const char *scope_name = fname;
-            const char *type_name  = sep + 2;
-
-            // 过滤 agent（这里 scope 对应 agent namespace）
-            if (agent_filter && strcmp(scope_name, agent_filter) != 0) continue;
-
-            VectorQueryResult *vr = ndtsdb_query_vectors(db, scope_name, type_name);
-            if (!vr) continue;
-
-            for (uint32_t i = 0; i < vr->count && hit_count < 4096; i++) {
-                VectorRecord *rec = &vr->records[i];
-                if (rec->embedding_dim != query_dim) continue;
-
-                float dot = 0, nq = 0, nr = 0;
-                for (int j = 0; j < query_dim; j++) {
-                    dot += query_vec[j] * rec->embedding[j];
-                    nq  += query_vec[j] * query_vec[j];
-                    nr  += rec->embedding[j] * rec->embedding[j];
-                }
-                float sim = (nq > 0 && nr > 0) ? dot / (sqrtf(nq) * sqrtf(nr)) : 0.0f;
-                if (sim < threshold) continue;
-
-                hits[hit_count].ts  = rec->timestamp;
-                hits[hit_count].sim = sim;
-                strncpy(hits[hit_count].agent_id, rec->agent_id, 31); hits[hit_count].agent_id[31]='\0';
-                strncpy(hits[hit_count].type, rec->type, 15);          hits[hit_count].type[15]='\0';
-                hit_count++;
-            }
-            ndtsdb_vector_free_result(vr);
+    
+    for (int i = 0; i < g_vec_cache.count && hit_count < 4096; i++) {
+        CachedVector* cv = &g_vec_cache.items[i];
+        if (cv->dim != query_dim) continue;
+        
+        // 过滤 agent（这里 scope 对应 agent namespace）
+        if (agent_filter && strcmp(cv->scope, agent_filter) != 0) continue;
+        
+        float dot = 0, nq = 0, nr = 0;
+        for (int j = 0; j < query_dim; j++) {
+            dot += query_vec[j] * cv->embedding[j];
+            nq  += query_vec[j] * query_vec[j];
+            nr  += cv->embedding[j] * cv->embedding[j];
         }
-        closedir(dir);
+        float sim = (nq > 0 && nr > 0) ? dot / (sqrtf(nq) * sqrtf(nr)) : 0.0f;
+        if (sim < threshold) continue;
+        
+        hits[hit_count].ts  = cv->ts;
+        hits[hit_count].sim = sim;
+        strncpy(hits[hit_count].agent_id, cv->agent_id, 31); hits[hit_count].agent_id[31]='\0';
+        strncpy(hits[hit_count].type, cv->type, 15);          hits[hit_count].type[15]='\0';
+        hit_count++;
     }
 
-    ndtsdb_close(db);
     ndtsdb_lock_release(lock_fd);
 
-    // 排序（冒泡，数量有限）
-    for (int i = 0; i < hit_count - 1; i++) {
-        for (int j = i + 1; j < hit_count; j++) {
-            if (hits[j].sim > hits[i].sim) {
-                Hit tmp = hits[i]; hits[i] = hits[j]; hits[j] = tmp;
-            }
-        }
+    // 排序（按相似度降序）
+    if (hit_count > 1) {
+        qsort(hits, hit_count, sizeof(Hit), hit_compare_desc);
     }
     if (hit_count > top_k) hit_count = top_k;
 
     // 输出
     if (json_output) {
-        printf("[");
+        printf("[\n");
         for (int i = 0; i < hit_count; i++) {
             char text_val[MAX_TEXT] = "";
             text_index_find(database, hits[i].ts, text_val, sizeof(text_val));
@@ -741,12 +812,12 @@ static int cmd_facts_search(int argc, char **argv) {
             char esc[MAX_TEXT * 2];
             json_escape(text_val, esc, sizeof(esc));
 
-            if (i > 0) printf(",");
-            printf("{\"rank\":%d,\"similarity\":%.4f,\"agent_id\":\"%s\",\"type\":\"%s\","
+            if (i > 0) printf(",\n");
+            printf("  {\"rank\":%d,\"similarity\":%.4f,\"agent_id\":\"%s\",\"type\":\"%s\","
                    "\"ts\":%lld,\"text\":\"%s\"}",
                    i+1, hits[i].sim, hits[i].agent_id, hits[i].type, hits[i].ts, esc);
         }
-        printf("]\n");
+        printf("\n]\n");
     } else {
         printf("Top %d results (query_dim=%d):\n\n", hit_count, query_dim);
         for (int i = 0; i < hit_count; i++) {

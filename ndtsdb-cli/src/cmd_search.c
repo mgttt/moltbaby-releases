@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vector.h"
+#include "../../ndtsdb/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
 
 // 解析向量字符串 "[0.1,0.2,0.3]"
@@ -110,11 +110,11 @@ int cmd_search(int argc, char **argv) {
     
     for (int s = 0; s < n && result_count < 1024; s++) {
         // 只处理向量分区
-        VectorQueryResult *vr = ndtsdb_query_vectors(db, syms[s], itvs[s]);
+        VecQueryResult *vr = ndtsdb_vec_query(db, syms[s], itvs[s]);
         if (!vr) continue;
         
         for (uint32_t i = 0; i < vr->count && result_count < 1024; i++) {
-            VectorRecord *rec = &vr->records[i];
+            VecRecord *rec = &vr->records[i];
             if (rec->embedding_dim != query_dim) continue;
             
             // 计算余弦相似度
@@ -137,7 +137,7 @@ int cmd_search(int argc, char **argv) {
                 result_count++;
             }
         }
-        ndtsdb_vector_free_result(vr);
+        ndtsdb_vec_free_result(vr);
     }
     
     ndtsdb_close(db);

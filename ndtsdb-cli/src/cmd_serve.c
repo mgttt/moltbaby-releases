@@ -10,7 +10,7 @@
 #include <math.h>
 #include "quickjs.h"
 #include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vector.h"
+#include "../../ndtsdb/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
 #include "cmd_serve.h"
 #include "common.h"
@@ -841,7 +841,7 @@ static void handle_http_request(int client_fd, const char *request, const char *
                                     }
                                 }
                             }
-                            if (vresult) ndtsdb_vector_free_result(vresult);
+                            if (vresult) ndtsdb_vec_free_result(vresult);
                         }
                         closedir(dir);
                     }

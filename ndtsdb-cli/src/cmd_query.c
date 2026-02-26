@@ -8,7 +8,7 @@
 #include <limits.h>
 #include "quickjs.h"
 #include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vector.h"
+#include "../../ndtsdb/native/ndtsdb_vec.h"
 
 // 外部依赖（由 main.c 提供）
 extern JSContext *ctx;
@@ -107,11 +107,11 @@ int cmd_query(int argc, char *argv[]) {
             
             // 输出
             if (row->flags & 0x01) {
-                VectorQueryResult* vqr = ndtsdb_query_vectors(db, rows[i].symbol, rows[i].interval);
+                VecQueryResult* vqr = ndtsdb_vec_query(db, rows[i].symbol, rows[i].interval);
                 if (vqr && vqr->count > 0) {
                     for (uint32_t j = 0; j < vqr->count; j++) {
                         if (vqr->records[j].timestamp == row->timestamp) {
-                            VectorRecord* vrec = &vqr->records[j];
+                            VecRecord* vrec = &vqr->records[j];
                             if (strcmp(format, "csv") == 0) {
                                 printf("%lld,%s,%s,%.6f,%d,,,\n",
                                     (long long)vrec->timestamp,
@@ -128,7 +128,7 @@ int cmd_query(int argc, char *argv[]) {
                             break;
                         }
                     }
-                    ndtsdb_vector_free_result(vqr);
+                    ndtsdb_vec_free_result(vqr);
                 }
             } else if (strcmp(format, "csv") == 0) {
                 printf("%lld,%s,%s,%.8f,%.8f,%.8f,%.8f,%.8f\n",

@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ndtsdb.h"
-#include "ndtsdb_vector.h"
+#include "ndtsdb_vec.h"
 #include "quickjs.h"
 
 // Cosmocc 兼容性：显式前向声明
@@ -569,7 +569,7 @@ static JSValue js_ndtsdb_get_latest_timestamp(JSContext *ctx, JSValueConst this_
 }
 
 // ============ queryVectors ============
-static JSValue js_ndtsdb_query_vectors(JSContext *ctx, JSValueConst this_val,
+static JSValue js_ndtsdb_vec_query(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv) {
     CHECK_ARGC(ctx, argc, 3);
     
@@ -588,7 +588,7 @@ static JSValue js_ndtsdb_query_vectors(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "interval must be a string");
     }
     
-    VectorQueryResult *r = ndtsdb_query_vectors(db, symbol, interval);
+    VecQueryResult *r = ndtsdb_vec_query(db, symbol, interval);
     JS_FreeCString(ctx, symbol);
     JS_FreeCString(ctx, interval);
     
@@ -615,7 +615,7 @@ static JSValue js_ndtsdb_query_vectors(JSContext *ctx, JSValueConst this_val,
         JS_SetPropertyUint32(ctx, arr, i, row);
     }
     
-    ndtsdb_vector_free_result(r);
+    ndtsdb_vec_free_result(r);
     return arr;
 }
 
@@ -631,7 +631,7 @@ static const JSCFunctionListEntry js_ndtsdb_funcs[] = {
     JS_CFUNC_DEF("queryTimeRange", 3, js_ndtsdb_query_time_range),
     JS_CFUNC_DEF("queryFilteredTime", 4, js_ndtsdb_query_filtered_time),
     JS_CFUNC_DEF("getLatestTimestamp", 3, js_ndtsdb_get_latest_timestamp),
-    JS_CFUNC_DEF("queryVectors", 3, js_ndtsdb_query_vectors),
+    JS_CFUNC_DEF("queryVectors", 3, js_ndtsdb_vec_query),
 };
 
 static int js_ndtsdb_init(JSContext *ctx, JSModuleDef *m)

@@ -231,7 +231,7 @@ static void l2_normalize(float* vec, int dim) {
 
 // 生成 embedding
 int embed_generate(const char* text, float* embedding, int dim) {
-    if (!text || !embedding || dim <= 0 || dim > 512) {
+    if (!text || !embedding || dim <= 0 || dim > 2048) {
         return -1;
     }
     
@@ -290,8 +290,8 @@ int cmd_embed(int argc, char** argv) {
         return 1;
     }
     
-    if (dim <= 0 || dim > 512) {
-        fprintf(stderr, "Error: dim must be between 1 and 512\n");
+    if (dim <= 0 || dim > 2048) {
+        fprintf(stderr, "Error: dim must be between 1 and 2048\n");
         return 1;
     }
     

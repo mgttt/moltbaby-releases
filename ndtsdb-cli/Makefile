@@ -28,7 +28,7 @@ COSMO_SOURCES = \
 	ndtsdb-cli/src/ndtsdb_lock.c \
 	ndtsdb-cli/src/bindings/qjs_ndtsdb.c \
 	ndtsdb/native/ndts.c \
-	ndtsdb/native/ndtsdb_vector.c \
+	ndtsdb/native/ndtsdb_vec.c \
 	ndtsdb-cli/vendor/quickjs-2024-01-13/quickjs.c \
 	ndtsdb-cli/vendor/quickjs-2024-01-13/libregexp.c \
 	ndtsdb-cli/vendor/quickjs-2024-01-13/libunicode.c \
@@ -50,19 +50,18 @@ COSMO_FLAGS = \
 all: cosmo-docker
 
 # cosmo-docker: 从 moltbaby 根目录挂载，路径与 COSMO_SOURCES 对齐
-# 产物: ndtsdb-cli/ndtsdb-cli-docker.com，同时复制为 ndtsdb-cli/ndtsdb-cli.com
+# 产物: ndtsdb-cli/ndtsdb-cli.com (APE 跨平台可执行文件)
 cosmo-docker:
 	@echo "=== Cosmocc APE Build (podman, reproducible) ==="
 	@echo "Image : $(COSMO_IMAGE)"
-	@echo "Output: ndtsdb-cli/$(COSMO_DOCKER_BINARY)  →  ndtsdb-cli/$(COSMO_BINARY)"
-	@rm -f $(COSMO_DOCKER_BINARY) $(COSMO_BINARY)
+	@echo "Output: ndtsdb-cli/$(COSMO_BINARY)"
+	@rm -f $(COSMO_BINARY)
 	@podman run --rm \
 		-v $$(pwd)/..:/workspace \
 		-w /workspace \
 		$(COSMO_IMAGE) \
-		cosmocc -o ndtsdb-cli/$(COSMO_DOCKER_BINARY) \
+		cosmocc -o ndtsdb-cli/$(COSMO_BINARY) \
 			$(COSMO_SOURCES) $(COSMO_FLAGS)
-	@cp $(COSMO_DOCKER_BINARY) $(COSMO_BINARY)
 	@echo ""
 	@echo "✓ APE binary: ndtsdb-cli/$(COSMO_BINARY)"
 	@echo "  Size  : $$(ls -lh $(COSMO_BINARY) | awk '{print $$5}')"
@@ -90,7 +89,7 @@ cosmo:
 			src/cmd_plugin.c src/cmd_embed.c src/cmd_search.c \
 			src/cmd_facts.c src/ndtsdb_lock.c \
 			src/bindings/qjs_ndtsdb.c \
-			/ndtsdb/native/ndts.c /ndtsdb/native/ndtsdb_vector.c \
+			/ndtsdb/native/ndts.c /ndtsdb/native/ndtsdb_vec.c \
 			vendor/quickjs-2024-01-13/quickjs.c \
 			vendor/quickjs-2024-01-13/libregexp.c \
 			vendor/quickjs-2024-01-13/libunicode.c \
@@ -251,14 +250,14 @@ $(BUILD_DIR)/cutils.o: $(QJS_DIR)/cutils.c | $(BUILD_DIR)
 $(BUILD_DIR)/libbf.o: $(QJS_DIR)/libbf.c | $(BUILD_DIR)
 	$(CC) $(QJS_CFLAGS) -c $< -o $@
 
-LIB_SOURCES = ../ndtsdb/native/ndts.c ../ndtsdb/native/ndtsdb_vector.c
-LIB_OBJECTS = $(BUILD_DIR)/ndts_lib.o $(BUILD_DIR)/ndtsdb_vector_lib.o
+LIB_SOURCES = ../ndtsdb/native/ndts.c ../ndtsdb/native/ndtsdb_vec.c
+LIB_OBJECTS = $(BUILD_DIR)/ndts_lib.o $(BUILD_DIR)/ndtsdb_vec_lib.o
 LIB_CFLAGS  = -O2 -Wall -fPIC -I./include -I../ndtsdb/native -D_DEFAULT_SOURCE -D_XOPEN_SOURCE=600
 
 lib-static: $(LIBNDTSDB)
 $(BUILD_DIR)/ndts_lib.o: ../ndtsdb/native/ndts.c | $(BUILD_DIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
-$(BUILD_DIR)/ndtsdb_vector_lib.o: ../ndtsdb/native/ndtsdb_vector.c | $(BUILD_DIR)
+$(BUILD_DIR)/ndtsdb_vec_lib.o: ../ndtsdb/native/ndtsdb_vec.c | $(BUILD_DIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 $(LIBNDTSDB): $(LIB_OBJECTS) | $(LIB_DIR)/.dir
 	ar rcs $@ $^

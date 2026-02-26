@@ -354,7 +354,7 @@ static void handle_http_request(int client_fd, const char *request, const char *
                                 }
                             }
                         }
-                        if (vresult) ndtsdb_vector_free_result(vresult);
+                        if (vresult) ndtsdb_vec_free_result(vresult);
                     }
                     
                     ndtsdb_close(db);

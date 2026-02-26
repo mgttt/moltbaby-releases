@@ -39,7 +39,7 @@
 
 // 使用完整的 ndtsdb.h（而不是 src/bindings 中的简化版）
 #include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vector.h"
+#include "../../ndtsdb/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
 #include "cmd_indicators.h"
 #include "cmd_io.h"

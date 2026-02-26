@@ -1,7 +1,7 @@
 /**
  * libndtsdb.h — NDTSDB Shared Library Public API
  *
- * 统一头文件，包含核心 API + 向量扩展
+ * 统一头文件，包含核心 API + 向量扩展 (ndtsdb-vec)
  * 用于 Python/Node FFI 绑定
  */
 #ifndef LIBNDTSDB_H
@@ -45,7 +45,7 @@ typedef struct {
 typedef struct NDTSDB NDTSDB;
 
 /* ============================================================================
- * Vector Types (from ndtsdb_vector.h)
+ * Vector Types (from ndtsdb_vec.h)
  * ============================================================================ */
 
 typedef struct {
@@ -56,12 +56,25 @@ typedef struct {
     uint16_t embedding_dim;
     float*   embedding;
     uint32_t flags;
-} VectorRecord;
+} VecRecord;
+
+/* 向后兼容 */
+typedef VecRecord VectorRecord;
 
 typedef struct {
-    VectorRecord* records;
-    uint32_t      count;
-} VectorQueryResult;
+    VecRecord* records;
+    uint32_t   count;
+} VecQueryResult;
+
+/* 向后兼容 */
+typedef VecQueryResult VectorQueryResult;
+
+/* HNSW 配置 */
+typedef struct {
+    int M;
+    int ef_construction;
+    int ef_search;
+} VecHnswConfig;
 
 /* ============================================================================
  * Core API — Lifecycle
@@ -99,12 +112,27 @@ int ndtsdb_list_symbols(NDTSDB* db, char symbols[][32], char intervals[][16], in
 const char* ndtsdb_get_path(NDTSDB* db);
 
 /* ============================================================================
- * Vector API — Write/Query
+ * Vector API — Write/Query (new ndtsdb-vec)
  * ============================================================================ */
 
-int ndtsdb_insert_vector(NDTSDB* db, const char* symbol, const char* interval, const VectorRecord* record);
-VectorQueryResult* ndtsdb_query_vectors(NDTSDB* db, const char* symbol, const char* interval);
-void ndtsdb_vector_free_result(VectorQueryResult* result);
+int ndtsdb_vec_insert(NDTSDB* db, const char* symbol, const char* interval, const VecRecord* record);
+VecQueryResult* ndtsdb_vec_query(NDTSDB* db, const char* symbol, const char* interval);
+VecQueryResult* ndtsdb_vec_search(NDTSDB* db, const char* symbol, const char* interval,
+                                   const float* query, int dim, int top_k, const VecHnswConfig* config);
+void ndtsdb_vec_free_result(VecQueryResult* result);
+
+/* HNSW 索引管理 */
+int ndtsdb_vec_build_index(NDTSDB* db, const char* symbol, const char* interval, const VecHnswConfig* config);
+int ndtsdb_vec_has_index(NDTSDB* db, const char* symbol, const char* interval);
+
+/* ============================================================================
+ * Vector API — Backward Compatibility (deprecated)
+ * ============================================================================ */
+
+/* 旧 API 映射到新 API */
+#define ndtsdb_insert_vector ndtsdb_vec_insert
+#define ndtsdb_query_vectors ndtsdb_vec_query
+#define ndtsdb_vector_free_result ndtsdb_vec_free_result
 
 #ifdef __cplusplus
 }

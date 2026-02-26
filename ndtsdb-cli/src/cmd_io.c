@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <math.h>
 #include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vector.h"
+#include "../../ndtsdb/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
 
 #ifdef _WIN32
@@ -43,7 +43,7 @@ extern JSContext *ctx;
 extern JSRuntime *rt;
 
 /* ─── 向量字段支持（M1-B/C） ───────────────────────────────
- * VectorRecord 定义在 ndtsdb_vector.h 中
+ * VecRecord 定义在 ndtsdb_vec.h 中
  */
 #define VECTOR_MAX_DIM 4096
 
@@ -127,9 +127,9 @@ static bool json_is_vector_record(const char *line) {
     return strstr(line, "\"embedding\"") != NULL;
 }
 
-// parse_vector_record — 解析向量 JSON 行到 VectorRecord
+// parse_vector_record — 解析向量 JSON 行到 VecRecord
 // 成功返回 true，embedding 需调用方 free()
-static bool parse_vector_record(const char *line, VectorRecord *out) {
+static bool parse_vector_record(const char *line, VecRecord *out) {
     memset(out, 0, sizeof(*out));
 
     const char *v;
@@ -375,7 +375,7 @@ int cmd_write_json(int argc, char *argv[]) {
 
             // ── 向量记录路径（M1-B）──────────────────────────────
             if (json_is_vector_record(line)) {
-                VectorRecord vrec;
+                VecRecord vrec;
                 if (!parse_vector_record(line, &vrec)) {
                     fprintf(stderr, "Warning: failed to parse vector record: %.80s\n", line);
                     errors++;
@@ -383,8 +383,8 @@ int cmd_write_json(int argc, char *argv[]) {
                     continue;
                 }
 
-                // M1-C: 调用 native 向量 API（vrec 本身就是 VectorRecord）
-                int ok = ndtsdb_insert_vector(db, vrec.agent_id, vrec.type, &vrec);
+                // M1-C: 调用 native 向量 API（vrec 本身就是 VecRecord）
+                int ok = ndtsdb_vec_insert(db, vrec.agent_id, vrec.type, &vrec);
                 if (ok == 0) {
                     count++;
                     // 同时写入 KlineRow 标记行（flags=0x01），供 query_all 列举
@@ -711,7 +711,7 @@ int cmd_write_vector(int argc, char *argv[]) {
         if (len == 0) continue;
         
         // 解析向量 JSON
-        VectorRecord vrec;
+        VecRecord vrec;
         memset(&vrec, 0, sizeof(vrec));
         
         // 解析 agent_id
@@ -795,7 +795,7 @@ int cmd_write_vector(int argc, char *argv[]) {
         
         // 验证并写入
         if (vrec.timestamp > 0 && vrec.agent_id[0] && vrec.embedding && vrec.embedding_dim > 0) {
-            int ok = ndtsdb_insert_vector(db, vrec.agent_id, vrec.type, &vrec);
+            int ok = ndtsdb_vec_insert(db, vrec.agent_id, vrec.type, &vrec);
             if (ok == 0) {
                 // 写入标记行
                 KlineRow marker = {
@@ -946,12 +946,12 @@ int cmd_export(int argc, char *argv[]) {
             if (rows[i].row.flags & 0x01) {
                 // 临时策略：当发现向量行标记时，实时查询 .ndtv 文件获取完整数据
                 // （此处 rows[i].symbol/interval 作为分区键）
-                VectorQueryResult* vqr = ndtsdb_query_vectors(db, rows[i].symbol, rows[i].interval);
+                VecQueryResult* vqr = ndtsdb_vec_query(db, rows[i].symbol, rows[i].interval);
                 if (vqr && vqr->count > 0) {
                     // 找到匹配 timestamp 的记录
                     for (uint32_t j = 0; j < vqr->count; j++) {
                         if (vqr->records[j].timestamp == rows[i].row.timestamp) {
-                            VectorRecord* vrec = &vqr->records[j];
+                            VecRecord* vrec = &vqr->records[j];
                             if (is_csv) {
                                 // CSV 不适合输出变长 embedding，仅输出元数据
                                 fprintf(fp, "%s,%s,%lld,%.6f,%d,,,\n",
@@ -971,7 +971,7 @@ int cmd_export(int argc, char *argv[]) {
                             break;
                         }
                     }
-                    ndtsdb_vector_free_result(vqr);
+                    ndtsdb_vec_free_result(vqr);
                 } else {
                     // 向量文件不存在或为空，输出占位（不应发生）
                     fprintf(fp, "{\"agent_id\":\"%s\",\"type\":\"%s\",\"timestamp\":%lld,\"error\":\"vector data not found\"}\n",
