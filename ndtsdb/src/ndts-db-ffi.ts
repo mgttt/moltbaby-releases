@@ -229,8 +229,7 @@ export class NdtsDatabase {
     this.handle = lib.symbols.ndtsdb_open(ptr(pathBuf)) as bigint;
     
     if (this.handle === 0n) {
-      const error = lib.symbols.ndtsdb_last_error();
-      throw new Error(`Failed to open database: ${error ? new CString(error) : 'unknown'}`);
+      throw new Error(`Failed to open database at ${this.path}`);
     }
   }
   
@@ -255,8 +254,7 @@ export class NdtsDatabase {
     );
     
     if (result !== 0) {
-      const error = lib.symbols.ndtsdb_last_error();
-      throw new Error(`Insert failed: ${error ? new CString(error) : 'unknown'}`);
+      throw new Error(`Insert failed for ${symbol}/${interval}`);
     }
   }
   
@@ -284,8 +282,7 @@ export class NdtsDatabase {
     );
     
     if (result < 0) {
-      const error = lib.symbols.ndtsdb_last_error();
-      throw new Error(`Batch insert failed: ${error ? new CString(error) : 'unknown'}`);
+      throw new Error(`Batch insert failed for ${symbol}/${interval} (${rows.length} rows)`);
     }
     
     return result;
