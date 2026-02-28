@@ -256,6 +256,27 @@ int ndtsdb_list_symbols(NDTSDB* db, char symbols[][32], char intervals[][16], in
  */
 const char* ndtsdb_get_path(NDTSDB* db);
 
+/* ─── JSON 序列化 ─────────────────────────────────────────── */
+
+/**
+ * ndtsdb_query_all_json — 将所有数据序列化为 JSON 字符串
+ *
+ * 返回格式：{"rows":[...], "count": N}，包含所有 symbol/interval 的所有 K 线数据
+ *
+ * 调用方须通过 ndtsdb_free_json() 释放返回的指针
+ *
+ * @param db  数据库句柄
+ * @return    JSON 字符串指针，失败返回 NULL
+ */
+char* ndtsdb_query_all_json(NDTSDB* db);
+
+/**
+ * ndtsdb_free_json — 释放 JSON 字符串
+ *
+ * @param json  ndtsdb_query_all_json 返回的指针，NULL 安全
+ */
+void ndtsdb_free_json(char* json);
+
 #ifdef __cplusplus
 }
 #endif

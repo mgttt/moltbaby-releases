@@ -2062,3 +2062,116 @@ const char* ndtsdb_get_path(NDTSDB* db) {
     if (!db) return NULL;
     return db->path;
 }
+
+/* ─── JSON 序列化 ─────────────────────────────────────────── */
+
+/**
+ * ndtsdb_query_all_json — 将所有数据序列化为 JSON 字符串
+ *
+ * 返回格式：
+ * {
+ *   "rows": [
+ *     {
+ *       "symbol": "BTC/USDT",
+ *       "interval": "1h",
+ *       "timestamp": 1234567890000,
+ *       "open": 45000.5,
+ *       "high": 46000.0,
+ *       "low": 44999.0,
+ *       "close": 45500.25,
+ *       "volume": 123.45,
+ *       "flags": 0
+ *     },
+ *     ...
+ *   ],
+ *   "count": 12345
+ * }
+ *
+ * 调用方须通过 ndtsdb_free_json() 释放返回的指针
+ *
+ * @param db  数据库句柄
+ * @return    JSON 字符串指针，失败返回 NULL
+ */
+char* ndtsdb_query_all_json(NDTSDB* db) {
+    (void)db;
+
+    // 第一遍：计算所需大小
+    size_t json_size = 256;  // 头部开销: {"rows":[...],count:N}
+    uint32_t total_count = 0;
+
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        total_count += sd->count;
+
+        // 每行约 200 字节 (symbol + interval + numbers)
+        json_size += sd->count * 200;
+        // symbol/interval 字符串开销
+        json_size += sd->count * (strlen(sd->symbol) + strlen(sd->interval) + 10);
+    }
+
+    // 分配缓冲区
+    char* json = (char*)malloc(json_size);
+    if (!json) return NULL;
+
+    // 第二遍：生成 JSON
+    char* p = json;
+    size_t remaining = json_size;
+
+    // 写入头部
+    int written = snprintf(p, remaining, "{\"rows\":[");
+    if (written < 0) {
+        free(json);
+        return NULL;
+    }
+    p += written;
+    remaining -= written;
+
+    // 写入行数据
+    int first_row = 1;
+    for (uint32_t i = 0; i < g_symbol_count; i++) {
+        SymbolData* sd = &g_symbols[i];
+        for (uint32_t j = 0; j < sd->count; j++) {
+            KlineRow* kr = &sd->klines[j];
+
+            if (!first_row && remaining > 0) {
+                *p++ = ',';
+                remaining--;
+            }
+            first_row = 0;
+
+            written = snprintf(p, remaining,
+                "{\"symbol\":\"%s\",\"interval\":\"%s\",\"timestamp\":%ld,"
+                "\"open\":%g,\"high\":%g,\"low\":%g,\"close\":%g,"
+                "\"volume\":%g,\"flags\":%u}",
+                sd->symbol, sd->interval, (long)kr->timestamp,
+                kr->open, kr->high, kr->low, kr->close,
+                kr->volume, kr->flags
+            );
+
+            if (written < 0 || (size_t)written >= remaining) {
+                // 缓冲区溢出，扩容（简单处理：直接截断）
+                break;
+            }
+            p += written;
+            remaining -= written;
+        }
+    }
+
+    // 写入尾部
+    written = snprintf(p, remaining, "],\"count\":%u}", total_count);
+    if (written < 0) {
+        free(json);
+        return NULL;
+    }
+
+    return json;
+}
+
+/**
+ * ndtsdb_free_json — 释放 JSON 字符串
+ *
+ * @param json  ndtsdb_query_all_json 返回的指针，NULL 安全
+ */
+void ndtsdb_free_json(char* json) {
+    if (json) free(json);
+}

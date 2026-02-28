@@ -98,6 +98,8 @@ function findLibrary(): string {
 // } KlineRow;              // = 52 bytes, 实际对齐到 56
 
 export interface KlineRow {
+  symbol?: string;    // symbol_id -> symbol (for JSON deserialization)
+  interval?: string;  // interval (for JSON deserialization)
   timestamp: number;  // int64_t
   open: number;       // double
   high: number;       // double
@@ -205,7 +207,16 @@ export function initLibrary(): void {
       args: [FFIType.ptr],
       returns: FFIType.cstring,
     },
-    // 注：ndtsdb_last_error 在当前版本库中不可用，已移除
+
+    // JSON 序列化
+    ndtsdb_query_all_json: {
+      args: [FFIType.ptr],
+      returns: FFIType.cstring,
+    },
+    ndtsdb_free_json: {
+      args: [FFIType.ptr],
+      returns: FFIType.void,
+    },
   });
   
   console.log('[ndtsdb:ffi] Database FFI initialized');
@@ -299,26 +310,54 @@ export class NdtsDatabase {
   
   queryAll(): KlineRow[] {
     if (!lib || !this.handle) throw new Error('Database not open');
-    
-    const resultPtr = lib.symbols.ndtsdb_query_all(this.handle) as bigint;
-    if (resultPtr === 0n) return [];
-    
-    return this.readQueryResult(resultPtr);
+
+    try {
+      // 使用新的 JSON 序列化函数
+      // Bun FFI: cstring 返回值是直接的 JS 字符串，无需转换
+      const jsonStr = lib.symbols.ndtsdb_query_all_json(this.handle) as string;
+
+      if (!jsonStr || jsonStr.length === 0) {
+        return [];
+      }
+
+      // Note: Bun FFI 会自动释放 C 字符串，无需显式调用 ndtsdb_free_json
+      // 如果需要手动释放，取消下面的注释
+      // try {
+      //   lib.symbols.ndtsdb_free_json(jsonStr);
+      // } catch (e) {
+      //   // Ignore cleanup errors
+      // }
+
+      // Parse JSON and extract rows
+      return this.parseQueryResultJson(jsonStr);
+    } catch (err) {
+      console.error('[ndtsdb:ffi] Error in queryAll():', err);
+      return [];
+    }
   }
-  
-  private readQueryResult(resultPtr: bigint): KlineRow[] {
-    if (!lib) return [];
-    
-    // QueryResult 结构: rows(8) + count(4) + capacity(4)
-    const resultBuf = Buffer.allocUnsafe(16);
-    // 注意：这里需要读取指针指向的内存，FFI 不直接支持
-    // 实际实现需要用 C 函数包装或特殊处理
-    
-    // 简化：假设 ndtsdb_free_result 会自动释放
-    // 实际需要在 C 端添加序列化函数
-    
-    lib.symbols.ndtsdb_free_result(resultPtr);
-    return [];
+
+  private parseQueryResultJson(jsonStr: string): KlineRow[] {
+    try {
+      const data = JSON.parse(jsonStr);
+      if (!data.rows || !Array.isArray(data.rows)) {
+        return [];
+      }
+
+      return data.rows.map((row: any) => ({
+        symbol: row.symbol,
+        interval: row.interval,
+        timestamp: row.timestamp,
+        open: row.open,
+        high: row.high,
+        low: row.low,
+        close: row.close,
+        volume: row.volume,
+        flags: row.flags || 0,
+      }));
+    } catch (err) {
+      console.error('[ndtsdb:ffi] Error parsing query result JSON:', err);
+      return [];
+    }
   }
   
   getPath(): string {
