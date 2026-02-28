@@ -351,7 +351,11 @@ export function isLibraryAvailable(): boolean {
   }
 }
 
-// 自动初始化
+// 自动初始化（dlopen 失败时不阻塞模块加载）
 if (isLibraryAvailable()) {
-  initLibrary();
+  try {
+    initLibrary();
+  } catch (e) {
+    // libndts .so 可能版本不匹配，允许模块继续加载
+  }
 }

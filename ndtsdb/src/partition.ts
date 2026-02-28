@@ -2,7 +2,7 @@
 // 分区表管理 - 按时间/symbol 自动分区
 // ============================================================
 
-import { AppendWriter, AppendFileHeader, AppendWriterOptions } from './append.js';
+import { AppendWriter, type AppendWriterOptions } from './append-ffi.js';
 import { existsSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 

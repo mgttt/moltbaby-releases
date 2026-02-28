@@ -1,7 +1,7 @@
 // StateStore - ndtsdb状态持久化（Phase 1）
 // 支持UPSERT模拟（追加+读取去重）和Append-only
 
-import { AppendWriter } from '../../../ndtsdb/src/append.ts';
+import { AppendWriter } from '../../../ndtsdb/src/index.js';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 
