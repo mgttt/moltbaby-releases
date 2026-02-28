@@ -8,6 +8,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NATIVE_DIR="$SCRIPT_DIR/../native"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CONTAINERFILE="$ROOT_DIR/podman/ndts-zig-builder/Containerfile"
 IMAGE_NAME="ndts-zig-builder"
 
 cd "$NATIVE_DIR"
@@ -23,9 +25,9 @@ if ! command -v podman &> /dev/null; then
 fi
 
 # 构建镜像 (如果不存在或有更新)
-if [[ "$1" == "--rebuild" ]] || ! podman image exists "$IMAGE_NAME"; then
+if [[ "${1:-}" == "--rebuild" ]] || ! podman image exists "$IMAGE_NAME"; then
     echo "📦 Building container image..."
-    podman build -t "$IMAGE_NAME" -f Containerfile.zig .
+    podman build -t "$IMAGE_NAME" -f "$CONTAINERFILE" .
     echo ""
 fi
 

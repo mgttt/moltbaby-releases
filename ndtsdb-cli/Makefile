@@ -78,17 +78,17 @@ cosmo-docker-ci:
 	@echo "Output: ndtsdb-cli/$(COSMO_BINARY)"
 	@rm -f ndtsdb-cli/$(COSMO_BINARY)
 	@podman run --rm \
-		-v $$(pwd):/workspace \
+		-v $$(pwd)/..:/workspace \
 		-w /workspace \
 		$(COSMO_IMAGE) \
 		cosmocc -o ndtsdb-cli/$(COSMO_BINARY) \
 			$(COSMO_SOURCES) $(COSMO_FLAGS)
 	@echo ""
 	@echo "✓ APE binary: ndtsdb-cli/$(COSMO_BINARY)"
-	@echo "  Size  : $$(ls -lh ndtsdb-cli/$(COSMO_BINARY) | awk '{print $$5}')"
-	@echo "  Format: $$(file ndtsdb-cli/$(COSMO_BINARY) | cut -d: -f2)"
+	@echo "  Size  : $$(ls -lh $(COSMO_BINARY) | awk '{print $$5}')"
+	@echo "  Format: $$(file $(COSMO_BINARY) | cut -d: -f2)"
 	@echo "  Runs on: Linux / macOS / Windows / FreeBSD (x86-64)"
-	@rm -f ndtsdb-cli/*.elf ndtsdb-cli/*.dbg
+	@rm -f *.elf *.dbg
 	@echo "  Cleaned: *.elf *.dbg (intermediate files)"
 
 # cosmo: 从 ndtsdb-cli 目录内挂载 (备用, 需手动调整路径)
@@ -151,7 +151,7 @@ help:
 	@echo "  make help         → 显示此帮助"
 	@echo ""
 	@echo "前提: podman image localhost/cosmocc:latest 已就绪"
-	@echo "      如需重建镜像: podman build -f Dockerfile.cosmocc -t cosmocc:latest .."
+	@echo "      如需重建镜像: podman build -f podman/ndtsdb-cli-cosmo/Dockerfile -t cosmocc:latest ."
 
 .PHONY: all cosmo cosmo-docker install uninstall clean help
 

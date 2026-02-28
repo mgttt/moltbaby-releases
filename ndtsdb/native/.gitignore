@@ -1,0 +1,19 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Generated files
+version.h
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+*.swp
