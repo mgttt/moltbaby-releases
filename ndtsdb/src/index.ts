@@ -18,7 +18,8 @@ export { VERSION, VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, getVersion } from
 
 // FFI 适配层 (与 CLI 格式互通)
 export { AppendWriterFFI as AppendWriter, AppendWriterFFI } from './append-ffi.js';
-export { NdtsDatabase, KlineRow, openDatabase, isLibraryAvailable } from './ndts-db-ffi.js';
+export { NdtsDatabase, openDatabase, isLibraryAvailable } from './ndts-db-ffi.js';
+export type { KlineRow } from './ndts-db-ffi.js';
 
 // ─── 压缩 ────────────────────────────────────────────
 
