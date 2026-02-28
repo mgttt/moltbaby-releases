@@ -44,15 +44,26 @@ export class AppendWriterFFI {
     this.path = path;
     this.columns = columns;
     this.options = options;
-    
-    // 从路径解析 symbol 和 interval
-    // 路径格式: <db_path>/<symbol>__<interval>.ndts
+
+    // 支持两种路径格式：
+    // 1. symbol__interval: <db_path>/<symbol>__<interval>.ndts
+    // 2. 分区格式: <db_path>/15m/bucket-N.ndts (哈希分区)
     const match = path.match(/([^/]+)__([^/.]+)\.ndts$/);
-    if (!match) {
-      throw new Error(`Invalid path format: ${path}. Expected: <db_path>/<symbol>__<interval>.ndts`);
+    if (match) {
+      // symbol__interval 格式
+      this.symbol = match[1];
+      this.interval = match[2];
+    } else if (path.includes('/bucket-')) {
+      // 分区格式：bucket-N.ndts
+      const bucketMatch = path.match(/\/([^/]+)\/bucket-(\d+)\.ndts$/);
+      if (!bucketMatch) {
+        throw new Error(`Invalid bucket path format: ${path}`);
+      }
+      this.interval = bucketMatch[1]; // 如 "15m"
+      this.symbol = `bucket-${bucketMatch[2]}`; // 如 "bucket-48"
+    } else {
+      throw new Error(`Invalid path format: ${path}. Expected either <db>/<symbol>__<interval>.ndts or <db>/<interval>/bucket-N.ndts`);
     }
-    this.symbol = match[1];
-    this.interval = match[2];
   }
   
   /**
@@ -62,9 +73,16 @@ export class AppendWriterFFI {
     if (!isLibraryAvailable()) {
       throw new Error('libndts not available. Please build ndtsdb-cli first: cd ndtsdb-cli && make cosmo-docker');
     }
-    
+
     // 提取数据库目录路径
-    const dbPath = this.path.replace(/\/[^/]+__[^/.]+\.ndts$/, '');
+    let dbPath: string;
+    if (this.path.includes('/bucket-')) {
+      // 分区格式：向上两级
+      dbPath = this.path.replace(/\/[^/]+\/bucket-\d+\.ndts$/, '');
+    } else {
+      // symbol__interval 格式：向上一级
+      dbPath = this.path.replace(/\/[^/]+__[^/.]+\.ndts$/, '');
+    }
     this.db = openDatabase(dbPath);
   }
   
@@ -182,15 +200,51 @@ export class AppendWriterFFI {
   }
   
   /**
+   * 静态方法：读取分区头信息 (获取行数)
+   * 用于 partition.ts 的分区加载逻辑
+   */
+  static readHeader(path: string): { totalRows: number } {
+    try {
+      // 处理哈希分区路径格式：<db_path>/15m/bucket-N.ndts
+      // 提取数据库根路径（向上两级目录）
+      const dbPath = path.replace(/\/[^/]+\/[^/]+\.ndts$/, '');
+      const db = openDatabase(dbPath);
+      try {
+        // 查询该分区文件的行数
+        // 注意：由于分区文件名约定，我们需要通过文件大小估算或直接加载
+        const rows = db.queryAll();
+        return { totalRows: rows.length };
+      } finally {
+        db.close();
+      }
+    } catch (error: any) {
+      // 如果打开失败（文件不存在或损坏），返回 0
+      console.warn(`Failed to read header from ${path}:`, error.message);
+      return { totalRows: 0 };
+    }
+  }
+
+  /**
    * 静态方法：读取文件 (使用 C 核心)
+   * 支持两种路径格式：
+   * 1. symbol__interval 格式：<db_path>/<symbol>__<interval>.ndts
+   * 2. 分区格式：<db_path>/15m/bucket-N.ndts (哈希分区)
    */
   static readAll(path: string): { header: any; data: Record<string, any>[] } {
-    const dbPath = path.replace(/\/[^/]+__[^/.]+\.ndts$/, '');
+    let dbPath: string;
+
+    // 尝试匹配 symbol__interval 格式
     const match = path.match(/([^/]+)__([^/.]+)\.ndts$/);
-    if (!match) {
-      throw new Error(`Invalid path format: ${path}`);
+    if (match) {
+      // symbol__interval 格式：往上一级目录
+      dbPath = path.replace(/\/[^/]+__[^/.]+\.ndts$/, '');
+    } else if (path.includes('/bucket-')) {
+      // 分区格式：bucket-N.ndts (往上两级目录)
+      dbPath = path.replace(/\/[^/]+\/bucket-\d+\.ndts$/, '');
+    } else {
+      throw new Error(`Invalid path format: ${path}. Expected either <db>/<symbol>__<interval>.ndts or <db>/<interval>/bucket-N.ndts`);
     }
-    
+
     const db = openDatabase(dbPath);
     try {
       const rows = db.queryAll();

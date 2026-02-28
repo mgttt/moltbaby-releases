@@ -205,10 +205,7 @@ export function initLibrary(): void {
       args: [FFIType.ptr],
       returns: FFIType.cstring,
     },
-    ndtsdb_last_error: {
-      args: [],
-      returns: FFIType.cstring,
-    },
+    // 注：ndtsdb_last_error 在当前版本库中不可用，已移除
   });
   
   console.log('[ndtsdb:ffi] Database FFI initialized');
