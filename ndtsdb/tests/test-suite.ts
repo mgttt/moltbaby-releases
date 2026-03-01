@@ -120,15 +120,15 @@ await runTest('超大表自动扩容', async () => {
   if (table.getRowCount() !== 1000) throw new Error('Row count after growth failed');
 });
 
-// ─── 模块 2: AppendWriter ─────────────────────────
+// ─── 模块 2: AppendWriterFFI ─────────────────────────
 
-console.log('\n📦 Module 2: AppendWriter 增量写入\n');
+console.log('\n📦 Module 2: AppendWriterFFI 增量写入\n');
 
 await runTest('创建新文件并追加', async () => {
-  const { AppendWriter } = await import('../src/append.js');
+  const { AppendWriterFFI } = await import('../src/append.js');
   const path = `${TEST_DIR}/append.ndts`;
   
-  const writer = new AppendWriter(path, [
+  const writer = new AppendWriterFFI(path, [
     { name: 'ts', type: 'int64' },
     { name: 'price', type: 'float64' },
   ]);
@@ -137,41 +137,41 @@ await runTest('创建新文件并追加', async () => {
   writer.append([{ ts: 1700000001000n, price: 101.0 }]);
   writer.close();
   
-  const { header } = AppendWriter.readAll(path);
+  const { header } = AppendWriterFFI.readAll(path);
   if (header.totalRows !== 2) throw new Error('Expected 2 rows');
   if (header.chunkCount !== 2) throw new Error('Expected 2 chunks');
 });
 
 await runTest('重新打开追加', async () => {
-  const { AppendWriter } = await import('../src/append.js');
+  const { AppendWriterFFI } = await import('../src/append.js');
   const path = `${TEST_DIR}/append-reopen.ndts`;
   
   // 第一次写入
-  const w1 = new AppendWriter(path, [{ name: 'v', type: 'int64' }]);
+  const w1 = new AppendWriterFFI(path, [{ name: 'v', type: 'int64' }]);
   w1.open();
   w1.append([{ v: 1n }]);
   w1.close();
   
   // 重新打开追加
-  const w2 = new AppendWriter(path, [{ name: 'v', type: 'int64' }]);
+  const w2 = new AppendWriterFFI(path, [{ name: 'v', type: 'int64' }]);
   w2.open();
   w2.append([{ v: 2n }]);
   w2.close();
   
-  const { header } = AppendWriter.readAll(path);
+  const { header } = AppendWriterFFI.readAll(path);
   if (header.totalRows !== 2) throw new Error('Expected 2 rows total');
 });
 
 await runTest('CRC32 校验通过', async () => {
-  const { AppendWriter } = await import('../src/append.js');
+  const { AppendWriterFFI } = await import('../src/append.js');
   const path = `${TEST_DIR}/crc-valid.ndts`;
   
-  const writer = new AppendWriter(path, [{ name: 'v', type: 'float64' }]);
+  const writer = new AppendWriterFFI(path, [{ name: 'v', type: 'float64' }]);
   writer.open();
   writer.append([{ v: 1.0 }, { v: 2.0 }]);
   writer.close();
   
-  const result = AppendWriter.verify(path);
+  const result = AppendWriterFFI.verify(path);
   if (!result.ok) throw new Error(`CRC check failed: ${result.errors.join(', ')}`);
 });
 

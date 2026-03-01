@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Test fix for P0 issue: AppendWriter.readHeader() missing
+ * Test fix for P0 issue: AppendWriterFFI.readHeader() missing
  * This test verifies that PartitionedTable can now load partitions
  */
 
@@ -10,7 +10,7 @@ import { existsSync } from 'fs';
 // Test data location (from bot-003's report)
 const testDataPath = '/home/devali/moltbaby/quant-lib/data/ndtsdb/klines-partitioned/15m';
 
-console.log('🔍 Testing P0 fix: AppendWriter.readHeader() method');
+console.log('🔍 Testing P0 fix: AppendWriterFFI.readHeader() method');
 console.log('━'.repeat(60));
 
 // Check if test data exists
@@ -54,7 +54,7 @@ try {
   console.log(`✅ Query successful: ${results.length} rows returned`);
 
   console.log('━'.repeat(60));
-  console.log('🎉 P0 fix verified: AppendWriter.readHeader() works!');
+  console.log('🎉 P0 fix verified: AppendWriterFFI.readHeader() works!');
   process.exit(0);
 
 } catch (error) {

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { existsSync, unlinkSync } from 'fs';
-import { AppendWriter, ColumnDefinition } from '../src/append.js';
+import { AppendWriterFFI, ColumnDefinition } from '../src/append-ffi.js';
 
 const RUN_ID = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
 const TEST_DIR = `/tmp/ndtsdb-compression-edge-${RUN_ID}`;
@@ -34,7 +34,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle empty data (0 rows)', async () => {
     const path = `${TEST_DIR}-empty.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -49,7 +49,7 @@ describe('Compression Edge Cases', () => {
     await writer.close();
 
     // Should be able to read back
-    const { header, data } = AppendWriter.readAll(path);
+    const { header, data } = AppendWriterFFI.readAll(path);
     expect(header.totalRows).toBe(0);
     
     console.log('Empty data test passed: 0 rows handled correctly');
@@ -57,7 +57,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle single row', async () => {
     const path = `${TEST_DIR}-single.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -75,7 +75,7 @@ describe('Compression Edge Cases', () => {
     }]);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     expect(data.get('timestamp')!.length).toBe(1);
     expect((data.get('symbol_id') as Int32Array)[0]).toBe(42);
     expect((data.get('price') as Float64Array)[0]).toBeCloseTo(12345.67, 2);
@@ -85,7 +85,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle identical values (RLE best case)', async () => {
     const path = `${TEST_DIR}-identical.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -109,7 +109,7 @@ describe('Compression Edge Cases', () => {
     writer.append(rows);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const symbolIds = data.get('symbol_id') as Int32Array;
     expect(symbolIds.length).toBe(1000);
     expect(symbolIds.every(r => r === 999)).toBe(true);
@@ -119,7 +119,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle random values (worst case)', async () => {
     const path = `${TEST_DIR}-random.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -144,7 +144,7 @@ describe('Compression Edge Cases', () => {
     writer.append(rows);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const timestamps = data.get('timestamp') as BigInt64Array;
     const prices = data.get('price') as Float64Array;
     expect(timestamps.length).toBe(1000);
@@ -160,7 +160,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle mixed compression (some columns compressed, some not)', async () => {
     const path = `${TEST_DIR}-mixed.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -184,7 +184,7 @@ describe('Compression Edge Cases', () => {
     writer.append(rows);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const timestamps = data.get('timestamp') as BigInt64Array;
     expect(timestamps.length).toBe(1000);
     expect(Number(timestamps[0])).toBe(rows[0].timestamp);
@@ -195,7 +195,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle all columns with different compression types', async () => {
     const path = `${TEST_DIR}-all-compressed.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -219,7 +219,7 @@ describe('Compression Edge Cases', () => {
     writer.append(rows);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const symbolIds = data.get('symbol_id') as Int32Array;
     expect(symbolIds.length).toBe(10000);
     expect(symbolIds[0]).toBe(0);
@@ -230,7 +230,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle compression disabled explicitly', async () => {
     const path = `${TEST_DIR}-disabled.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: false,
       },
@@ -249,7 +249,7 @@ describe('Compression Edge Cases', () => {
     writer.append(rows);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     expect(data.get('timestamp')!.length).toBe(1000);
     
     console.log('Explicit disabled compression test passed');
@@ -257,7 +257,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle very large delta values', async () => {
     const path = `${TEST_DIR}-large-delta.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -282,7 +282,7 @@ describe('Compression Edge Cases', () => {
     writer.append(rows);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const timestamps = data.get('timestamp') as BigInt64Array;
     expect(timestamps.length).toBe(100);
     // Verify first and last values match
@@ -294,7 +294,7 @@ describe('Compression Edge Cases', () => {
 
   it('should handle negative values with compression', async () => {
     const path = `${TEST_DIR}-negative.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -316,7 +316,7 @@ describe('Compression Edge Cases', () => {
     writer.append(rows);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const prices = data.get('price') as Float64Array;
     expect(prices.length).toBe(1000);
     expect(prices[0]).toBe(50000);

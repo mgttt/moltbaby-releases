@@ -338,6 +338,13 @@ export class NdtsDatabase {
 
   private parseQueryResultJson(jsonStr: string): KlineRow[] {
     try {
+      // If the string looks like it contains source code, it's probably an error message
+      if (jsonStr.includes('private parseQueryResultJson') || jsonStr.includes('function')) {
+        console.error('[ndtsdb:ffi] Received source code instead of JSON. This suggests an error in the C code.');
+        console.error('[ndtsdb:ffi] First 200 chars:', jsonStr.substring(0, 200));
+        return [];
+      }
+
       const data = JSON.parse(jsonStr);
       if (!data.rows || !Array.isArray(data.rows)) {
         return [];
@@ -356,6 +363,7 @@ export class NdtsDatabase {
       }));
     } catch (err) {
       console.error('[ndtsdb:ffi] Error parsing query result JSON:', err);
+      console.error('[ndtsdb:ffi] JSON string (first 500 chars):', jsonStr.substring(0, 500));
       return [];
     }
   }

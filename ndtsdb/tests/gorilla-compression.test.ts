@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'bun:test';
-import { AppendWriter } from '../src/append';
+import { AppendWriter } from '../src/append-ffi';
 import { rmSync, statSync, existsSync } from 'fs';
 
 describe('Gorilla Compression Integration', () => {

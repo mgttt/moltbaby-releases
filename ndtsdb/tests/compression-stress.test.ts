@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { existsSync, unlinkSync, statSync } from 'fs';
-import { AppendWriter, ColumnDefinition } from '../src/append.js';
+import { AppendWriterFFI, ColumnDefinition } from '../src/append-ffi.js';
 
 const RUN_ID = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
 const TEST_DIR = `/tmp/ndtsdb-compression-stress-${RUN_ID}`;
@@ -45,7 +45,7 @@ describe('Compression Stress Tests', () => {
 
   it('should handle 10K rows with delta compression', async () => {
     const path = `${TEST_DIR}-10k-delta.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -75,7 +75,7 @@ describe('Compression Stress Tests', () => {
 
     // Read back and verify
     const startRead = performance.now();
-    const { header, data } = AppendWriter.readAll(path);
+    const { header, data } = AppendWriterFFI.readAll(path);
     const readTime = performance.now() - startRead;
 
     const timestamps = data.get('timestamp') as BigInt64Array;
@@ -92,7 +92,7 @@ describe('Compression Stress Tests', () => {
 
   it('should handle 100K rows with RLE compression', async () => {
     const path = `${TEST_DIR}-100k-rle.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -124,7 +124,7 @@ describe('Compression Stress Tests', () => {
 
     // Read back
     const startRead = performance.now();
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const readTime = performance.now() - startRead;
 
     const symbolIds = data.get('symbol_id') as Int32Array;
@@ -141,7 +141,7 @@ describe('Compression Stress Tests', () => {
     // Monitor memory
     const memBefore = process.memoryUsage();
     
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -185,7 +185,7 @@ describe('Compression Stress Tests', () => {
 
     // Read back
     const startRead = performance.now();
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const readTime = performance.now() - startRead;
 
     const timestamps = data.get('timestamp') as BigInt64Array;
@@ -211,7 +211,7 @@ describe('Compression Stress Tests', () => {
 
     // Test 1: No compression
     const pathNoComp = `${TEST_DIR}-nocompress.ndts`;
-    const writerNoComp = new AppendWriter(pathNoComp, columns);
+    const writerNoComp = new AppendWriterFFI(pathNoComp, columns);
     writerNoComp.open();
     writerNoComp.append(rows);
     await writerNoComp.close();
@@ -219,7 +219,7 @@ describe('Compression Stress Tests', () => {
 
     // Test 2: Delta + Gorilla compression (float64 uses gorilla)
     const pathDelta = `${TEST_DIR}-delta.ndts`;
-    const writerDelta = new AppendWriter(pathDelta, columns, {
+    const writerDelta = new AppendWriterFFI(pathDelta, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -235,7 +235,7 @@ describe('Compression Stress Tests', () => {
 
     // Test 3: RLE compression
     const pathRle = `${TEST_DIR}-rle.ndts`;
-    const writerRle = new AppendWriter(pathRle, columns, {
+    const writerRle = new AppendWriterFFI(pathRle, columns, {
       compression: {
         enabled: true,
         algorithms: {

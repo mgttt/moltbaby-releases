@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { existsSync, unlinkSync } from 'fs';
-import { AppendWriter, ColumnDefinition } from '../src/append.js';
+import { AppendWriterFFI, ColumnDefinition } from '../src/append-ffi.js';
 
 const RUN_ID = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
 const TEST_DIR = `/tmp/ndtsdb-compat-${RUN_ID}`;
@@ -30,7 +30,7 @@ describe('Compression File Format Compatibility', () => {
 
   it('should create and read uncompressed file', async () => {
     const path = `${TEST_DIR}-uncompressed.ndts`;
-    const writer = new AppendWriter(path, columns);
+    const writer = new AppendWriterFFI(path, columns);
 
     const rows: any[] = [];
     for (let i = 0; i < 100; i++) {
@@ -45,7 +45,7 @@ describe('Compression File Format Compatibility', () => {
     writer.append(rows);
     await writer.close();
 
-    const { header, data } = AppendWriter.readAll(path);
+    const { header, data } = AppendWriterFFI.readAll(path);
     expect(header.totalRows).toBe(100);
     const timestamps = data.get('timestamp') as BigInt64Array;
     expect(Number(timestamps[0])).toBe(1000000000000);
@@ -55,7 +55,7 @@ describe('Compression File Format Compatibility', () => {
 
   it('should create and read compressed file', async () => {
     const path = `${TEST_DIR}-compressed.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -79,7 +79,7 @@ describe('Compression File Format Compatibility', () => {
     writer.append(rows);
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const symbolIds = data.get('symbol_id') as Int32Array;
     expect(symbolIds.length).toBe(1000);
     expect(symbolIds[0]).toBe(0);
@@ -92,7 +92,7 @@ describe('Compression File Format Compatibility', () => {
     const path = `${TEST_DIR}-reopened.ndts`;
     
     // First write
-    const writer1 = new AppendWriter(path, columns, {
+    const writer1 = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -111,7 +111,7 @@ describe('Compression File Format Compatibility', () => {
     await writer1.close();
 
     // Reopen and append
-    const writer2 = new AppendWriter(path, columns, {
+    const writer2 = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -130,7 +130,7 @@ describe('Compression File Format Compatibility', () => {
     await writer2.close();
 
     // Read all
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const symbolIds = data.get('symbol_id') as Int32Array;
     expect(symbolIds.length).toBe(2);
     expect(symbolIds[0]).toBe(1);
@@ -143,7 +143,7 @@ describe('Compression File Format Compatibility', () => {
     const path = `${TEST_DIR}-append.ndts`;
     
     // First write (uncompressed)
-    const writer1 = new AppendWriter(path, columns);
+    const writer1 = new AppendWriterFFI(path, columns);
     writer1.open();
     writer1.append([{
       timestamp: 1000000000000,
@@ -153,7 +153,7 @@ describe('Compression File Format Compatibility', () => {
     await writer1.close();
 
     // Reopen and append (still uncompressed)
-    const writer2 = new AppendWriter(path, columns);
+    const writer2 = new AppendWriterFFI(path, columns);
     writer2.open();
     writer2.append([{
       timestamp: 1000001000000,
@@ -162,7 +162,7 @@ describe('Compression File Format Compatibility', () => {
     }]);
     await writer2.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     expect(data.get('symbol_id')!.length).toBe(2);
     
     console.log('Reopen uncompressed test passed');
@@ -170,7 +170,7 @@ describe('Compression File Format Compatibility', () => {
 
   it('should verify header integrity after compression', async () => {
     const path = `${TEST_DIR}-header.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -190,7 +190,7 @@ describe('Compression File Format Compatibility', () => {
     await writer.close();
 
     // Read back and verify data
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const timestamps = data.get('timestamp') as BigInt64Array;
     const prices = data.get('price') as Float64Array;
     expect(timestamps.length).toBe(1);
@@ -205,7 +205,7 @@ describe('Compression File Format Compatibility', () => {
 
   it('should handle multiple append operations', async () => {
     const path = `${TEST_DIR}-multiappend.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -230,7 +230,7 @@ describe('Compression File Format Compatibility', () => {
     }
     await writer.close();
 
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     const symbolIds = data.get('symbol_id') as Int32Array;
     expect(symbolIds.length).toBe(50);
     expect(symbolIds[0]).toBe(0);
@@ -244,7 +244,7 @@ describe('Compression File Format Compatibility', () => {
 
   it('should verify CRC32 integrity', async () => {
     const path = `${TEST_DIR}-crc.ndts`;
-    const writer = new AppendWriter(path, columns, {
+    const writer = new AppendWriterFFI(path, columns, {
       compression: {
         enabled: true,
         algorithms: {
@@ -265,7 +265,7 @@ describe('Compression File Format Compatibility', () => {
     // File should exist and be readable
     expect(existsSync(path)).toBe(true);
     
-    const { data } = AppendWriter.readAll(path);
+    const { data } = AppendWriterFFI.readAll(path);
     expect(data.get('timestamp')!.length).toBe(1);
     
     // Cleanup

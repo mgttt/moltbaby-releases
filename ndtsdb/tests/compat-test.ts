@@ -3,7 +3,7 @@
 // ndtsdb 互通性测试 - 验证 Bun 版与 CLI 版格式兼容
 // ============================================================
 
-import { AppendWriter, isLibraryAvailable, openDatabase } from '../src/index.js';
+import { AppendWriterFFI, isLibraryAvailable, openDatabase } from '../src/index.js';
 import { existsSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 
@@ -30,7 +30,7 @@ mkdirSync(TEST_DB, { recursive: true });
 
 // 测试 1: Bun 版写入
 console.log('2. Bun 版写入数据...');
-const writer = new AppendWriter(
+const writer = new AppendWriterFFI(
   join(TEST_DB, `${SYMBOL}__${INTERVAL}.ndts`),
   [
     { name: 'timestamp', type: 'int64' },

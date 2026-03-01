@@ -2,7 +2,7 @@
 // 增量写入 + CRC32 校验测试
 // ============================================================
 
-import { AppendWriter, crc32 } from '../src/append.js';
+import { AppendWriterFFI as AppendWriter } from '../src/append-ffi.js';
 import { existsSync, mkdirSync, unlinkSync } from 'fs';
 
 console.log('🧪 增量写入 + CRC32 测试\n');

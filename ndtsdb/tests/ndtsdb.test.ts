@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, rmdirSync, unlinkSync, readdirSync, rmSync } fro
 import { join } from 'path';
 
 import { ColumnarTable } from '../src/columnar.js';
-import { AppendWriter, crc32 } from '../src/append.js';
+import { AppendWriter, crc32 } from '../src/append-ffi.js';
 import { MmapPool, MmappedColumnarTable } from '../src/mmap/pool.js';
 import { MmapMergeStream } from '../src/mmap/merge.js';
 import { SQLParser } from '../src/sql/parser.js';

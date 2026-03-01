@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { AppendWriter } from '../src/index.js';
+import { AppendWriterFFI } from '../src/index.js';
 import { readdirSync, statSync } from 'fs';
 import { join } from 'path';
 
@@ -13,7 +13,7 @@ console.log('Files:', files.length);
 let total = 0;
 for (const file of files.slice(0, 3)) {
   const path = join(DATA_DIR, file);
-  const header = AppendWriter.readHeader(path);
+  const header = AppendWriterFFI.readHeader(path);
   console.log(file, 'rows:', header.totalRows);
   total += header.totalRows;
 }

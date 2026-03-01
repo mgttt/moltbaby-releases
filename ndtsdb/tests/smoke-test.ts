@@ -72,21 +72,21 @@ test('文件存取', () => {
   if (col[0] !== 42.0) throw new Error('Data mismatch');
 });
 
-test('AppendWriter 增量写入', () => {
-  const { AppendWriter } = require('../src/append.js');
+test('AppendWriterFFI 增量写入', () => {
+  const { AppendWriterFFI } = require('../src/append.js');
   const path = `${TEST_DIR}/append.ndts`;
   
-  const writer = new AppendWriter(path, [{ name: 'v', type: 'float64' }]);
+  const writer = new AppendWriterFFI(path, [{ name: 'v', type: 'float64' }]);
   writer.open();
   writer.append([{ v: 1.0 }, { v: 2.0 }]);
   writer.close();
   
-  const { header } = AppendWriter.readAll(path);
+  const { header } = AppendWriterFFI.readAll(path);
   if (header.totalRows !== 2) throw new Error('Append failed');
 });
 
 test('CRC32 校验', () => {
-  const { AppendWriter, crc32 } = require('../src/append.js');
+  const { AppendWriterFFI, crc32 } = require('../src/append.js');
   
   const data = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
   const checksum = crc32(data);
