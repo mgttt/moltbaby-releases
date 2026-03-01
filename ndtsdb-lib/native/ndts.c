@@ -21,6 +21,14 @@
 #include <windows.h>
 #include <direct.h>
 #define mkdir(path, mode) _mkdir(path)
+/* strndup is a POSIX extension not available on Windows */
+static char* strndup(const char* s, size_t n) {
+    size_t len = 0;
+    while (len < n && s[len]) len++;
+    char* p = (char*)malloc(len + 1);
+    if (p) { memcpy(p, s, len); p[len] = '\0'; }
+    return p;
+}
 // Windows 简易目录遍历结构
 typedef struct DIR {
     HANDLE handle;
@@ -995,6 +1003,17 @@ static uint32_t crc32_buf(const void* data, size_t len) {
     return crc ^ 0xFFFFFFFFu;
 }
 
+/* 增量 CRC32 — 用于跨多个缓冲区的流式计算。
+ * 初始状态：state = 0xFFFFFFFFu
+ * 终态：result = state ^ 0xFFFFFFFFu  */
+static uint32_t crc32_update(uint32_t state, const void* data, size_t len) {
+    crc32_init_table();
+    const uint8_t* p = (const uint8_t*)data;
+    for (size_t i = 0; i < len; i++)
+        state = g_crc32_table[(state ^ p[i]) & 0xFF] ^ (state >> 8);
+    return state;
+}
+
 /**
  * timestamp → 日期标签
  */
@@ -1454,6 +1473,10 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
         if (fread(&row_count, 4, 1, f) != 1 || row_count == 0) break;
         if (row_count > 10000000) break;  /* 安全上限，防止 OOM */
 
+        /* 增量 CRC 状态（与 write 侧 crc32_buf 等价，从同一初始值开始） */
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &row_count, 4);
+
         /* 分配列缓冲区 */
         int32_t*  sym_ids    = (int32_t*)malloc(row_count * 4);
         int32_t*  itv_ids    = (int32_t*)malloc(row_count * 4);
@@ -1482,6 +1505,9 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
             free(closes); free(volumes); free(flags);
             break;
         }
+        crc_state = crc32_update(crc_state, sym_ids,    row_count * 4);
+        crc_state = crc32_update(crc_state, itv_ids,    row_count * 4);
+        crc_state = crc32_update(crc_state, timestamps, row_count * 8);
 
         /* OHLCV：gorilla 解压 或 raw */
         int ok = 1;
@@ -1496,6 +1522,9 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 uint8_t* cbuf = (uint8_t*)malloc(clen);
                 if (!cbuf) { ok = 0; break; }
                 if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); ok = 0; break; }
+                /* CRC 覆盖压缩字节（与写入侧一致），必须在 free(cbuf) 前计算 */
+                crc_state = crc32_update(crc_state, &clen, 4);
+                crc_state = crc32_update(crc_state, cbuf, clen);
                 size_t decoded = gorilla_decompress_f64(cbuf, clen, ohlcv[ci], row_count);
                 free(cbuf);
                 if (decoded != row_count) { ok = 0; }
@@ -1507,18 +1536,35 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 fread(closes,  8, row_count, f) != row_count ||
                 fread(volumes, 8, row_count, f) != row_count) {
                 ok = 0;
+            } else {
+                crc_state = crc32_update(crc_state, opens,   row_count * 8);
+                crc_state = crc32_update(crc_state, highs,   row_count * 8);
+                crc_state = crc32_update(crc_state, lows,    row_count * 8);
+                crc_state = crc32_update(crc_state, closes,  row_count * 8);
+                crc_state = crc32_update(crc_state, volumes, row_count * 8);
             }
         }
 
         /* flags — 始终 raw */
         if (ok && fread(flags, 4, row_count, f) != row_count) ok = 0;
+        if (ok) crc_state = crc32_update(crc_state, flags, row_count * 4);
 
-        /* 读并验证 chunk CRC32 */
+        /* 验证 chunk CRC32 */
         if (ok) {
-            uint32_t chunk_crc_on_disk = 0;
-            if (fread(&chunk_crc_on_disk, 4, 1, f) != 1) ok = 0;
-            /* CRC 校验失败时跳过整个 chunk 而非中止（允许追加写的部分有效性） */
-            (void)chunk_crc_on_disk;  /* TODO: compute and compare if strict mode */
+            uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+            uint32_t disk_crc = 0;
+            if (fread(&disk_crc, 4, 1, f) != 1) {
+                ok = 0;
+            } else if (disk_crc != computed_crc) {
+                /* CRC 不匹配：跳过此 chunk（数据损坏），继续尝试下一个 chunk */
+                fprintf(stderr, "[ndtsdb] chunk CRC mismatch in %s: "
+                        "computed=0x%08X disk=0x%08X rows=%u — skipping\n",
+                        filepath, computed_crc, disk_crc, row_count);
+                free(sym_ids); free(itv_ids); free(timestamps);
+                free(opens); free(highs); free(lows);
+                free(closes); free(volumes); free(flags);
+                continue;
+            }
         }
 
         if (!ok) {
@@ -1586,6 +1632,24 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
     db->symbols_capacity = 0;
 
     db->is_dir = path_is_dir(path);
+
+    /* 路径不存在时：若路径无扩展名（不以 .ndts 结尾），自动创建目录并切换为
+     * 目录模式（NDTS 分区格式）。以 .ndts 结尾的路径保持文件模式（向后兼容）。 */
+    if (!db->is_dir) {
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            /* 路径不存在 — 仅在无 .ndts 扩展名时创建目录 */
+            size_t plen = strlen(path);
+            int has_ndts_ext = (plen >= 5 &&
+                strcmp(path + plen - 5, ".ndts") == 0);
+            if (!has_ndts_ext) {
+                if (mkdir(path, 0755) == 0)
+                    db->is_dir = 1;
+            }
+        }
+        /* 若 stat 成功则为普通文件，保持 is_dir = 0 (文件模式向后兼容) */
+    }
+
     db->dirty  = 0;
 
     if (db->is_dir) {
@@ -2162,4 +2226,34 @@ char* ndtsdb_query_all_json(NDTSDB* db) {
  */
 void ndtsdb_free_json(char* json) {
     if (json) free(json);
+}
+
+/**
+ * ndtsdb_list_symbols_json — 将所有 symbol/interval 组合序列化为 JSON 数组
+ *
+ * 返回格式：[{"symbol":"BTCUSDT","interval":"1h"},...]
+ * 调用方须通过 ndtsdb_free_json() 释放返回的指针。
+ */
+char* ndtsdb_list_symbols_json(NDTSDB* db) {
+    if (!db || db->symbol_count == 0) {
+        char* empty = malloc(3);
+        if (empty) { empty[0] = '['; empty[1] = ']'; empty[2] = '\0'; }
+        return empty;
+    }
+    /* Each entry: {"symbol":"<31 chars>","interval":"<15 chars>"} ~ 70 bytes + separators */
+    size_t cap = (size_t)db->symbol_count * 80 + 4;
+    char* buf = malloc(cap);
+    if (!buf) return NULL;
+    size_t pos = 0;
+    buf[pos++] = '[';
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        if (i > 0) buf[pos++] = ',';
+        pos += (size_t)snprintf(buf + pos, cap - pos,
+            "{\"symbol\":\"%s\",\"interval\":\"%s\"}",
+            db->symbols[i].symbol,
+            db->symbols[i].interval);
+    }
+    buf[pos++] = ']';
+    buf[pos]   = '\0';
+    return buf;
 }

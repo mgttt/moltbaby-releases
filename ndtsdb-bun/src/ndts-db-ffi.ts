@@ -211,13 +211,17 @@ export function initLibrary(): void {
     // 工具函数
     ndtsdb_get_path: {
       args: [FFIType.ptr],
-      returns: FFIType.cstring,
+      returns: FFIType.ptr,   // ptr, read via CString (cstring return type is broken in this Bun version)
     },
 
     // JSON 序列化
     ndtsdb_query_all_json: {
       args: [FFIType.ptr],
-      returns: FFIType.ptr,   // ptr (not cstring) so we can free it after reading
+      returns: FFIType.ptr,
+    },
+    ndtsdb_list_symbols_json: {
+      args: [FFIType.ptr],
+      returns: FFIType.ptr,
     },
     ndtsdb_free_json: {
       args: [FFIType.ptr],
@@ -383,7 +387,23 @@ export class NdtsDatabase {
   getPath(): string {
     if (!lib || !this.handle) return '';
     const pathPtr = lib.symbols.ndtsdb_get_path(this.handle);
-    return pathPtr ? new CString(pathPtr) : '';
+    if (!pathPtr) return '';
+    return new CString(pathPtr as number).toString();
+  }
+
+  listSymbols(): Array<{ symbol: string; interval: string }> {
+    if (!lib || !this.handle) throw new Error('Database not open');
+    const jsonPtr = lib.symbols.ndtsdb_list_symbols_json(this.handle);
+    if (!jsonPtr) return [];
+    const jsonStr = new CString(jsonPtr as number).toString();
+    try {
+      lib.symbols.ndtsdb_free_json(jsonPtr);
+    } catch { /* best-effort */ }
+    try {
+      return JSON.parse(jsonStr) as Array<{ symbol: string; interval: string }>;
+    } catch {
+      return [];
+    }
   }
 
 }

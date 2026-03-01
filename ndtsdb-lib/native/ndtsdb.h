@@ -285,6 +285,14 @@ char* ndtsdb_query_all_json(NDTSDB* db);
  */
 void ndtsdb_free_json(char* json);
 
+/**
+ * ndtsdb_list_symbols_json — 将所有 symbol/interval 组合序列化为 JSON 数组
+ *
+ * 返回格式：[{"symbol":"BTCUSDT","interval":"1h"},...]
+ * 调用方须通过 ndtsdb_free_json() 释放返回的指针。
+ */
+char* ndtsdb_list_symbols_json(NDTSDB* db);
+
 #ifdef __cplusplus
 }
 #endif

@@ -17,21 +17,16 @@ import { SQLParser } from '../src/sql/parser.js';
 import { SQLExecutor } from '../src/sql/executor.js';
 import { sampleBy, ohlcv, movingAverage, exponentialMovingAverage } from '../src/query.js';
 import { RoaringBitmap } from '../src/index/bitmap.js';
+import { NdtsDatabase, isLibraryAvailable } from '../src/ndts-db-ffi.js';
 
 const TEST_DIR = './data/bun-test';
 
-// 清理函数
+// 清理函数 — 递归删除整个 TEST_DIR 再重建，确保子目录也被清空
 function cleanDir() {
-  if (!existsSync(TEST_DIR)) {
-    mkdirSync(TEST_DIR, { recursive: true });
-    return;
-  }
   try {
-    const files = readdirSync(TEST_DIR);
-    for (const f of files) {
-      unlinkSync(join(TEST_DIR, f));
-    }
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
   } catch {}
+  mkdirSync(TEST_DIR, { recursive: true });
 }
 
 beforeAll(() => cleanDir());
@@ -1503,5 +1498,146 @@ describe('Compression', () => {
     const compressedSize = compressed.length;
     const ratio = (originalSize - compressedSize) / originalSize;
     expect(ratio).toBeGreaterThan(0.5); // 至少 50% 压缩率
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// NdtsDatabase C FFI — end-to-end tests (gorilla round-trip, multi-symbol,
+// disk persistence, tombstone, list_symbols)
+// ──────────────────────────────────────────────────────────────────────────────
+describe('NdtsDatabase C FFI', () => {
+  const FFI_DIR = `${TEST_DIR}/ffi-ctest`;
+
+  beforeAll(() => {
+    if (existsSync(FFI_DIR)) rmSync(FFI_DIR, { recursive: true });
+    mkdirSync(FFI_DIR, { recursive: true });
+  });
+
+  it('should report library available', () => {
+    expect(isLibraryAvailable()).toBe(true);
+  });
+
+  it('should open and close without error', () => {
+    const db = new NdtsDatabase(`${FFI_DIR}/open-close`);
+    expect(() => { db.open(); db.close(); }).not.toThrow();
+  });
+
+  it('should insert and queryAll in-memory (no disk flush)', () => {
+    const db = new NdtsDatabase(`${FFI_DIR}/inmem`);
+    db.open();
+    db.insertBatch('BTCUSDT', '1h', [
+      { timestamp: 1700000000000n, open: 100, high: 110, low: 95,  close: 105, volume: 500, flags: 0 },
+      { timestamp: 1700003600000n, open: 105, high: 115, low: 100, close: 110, volume: 600, flags: 0 },
+    ]);
+    const rows = db.queryAll();
+    expect(rows.length).toBe(2);
+    const sorted = rows.slice().sort((a, b) => Number(a.timestamp - b.timestamp));
+    expect(Number(sorted[0].timestamp)).toBe(1700000000000);
+    expect(sorted[0].open).toBeCloseTo(100, 6);
+    expect(sorted[0].close).toBeCloseTo(105, 6);
+    expect(sorted[1].volume).toBeCloseTo(600, 6);
+    db.close();
+  });
+
+  it('should persist data to disk and reload (gorilla round-trip)', () => {
+    const dbPath = `${FFI_DIR}/roundtrip`;
+
+    // Write + flush to disk
+    {
+      const db = new NdtsDatabase(dbPath);
+      db.open();
+      db.insertBatch('ETHUSDT', '1h', [
+        { timestamp: 1700000000000n, open: 2000, high: 2100, low: 1950, close: 2050, volume: 1000, flags: 0 },
+        { timestamp: 1700003600000n, open: 2050, high: 2200, low: 2000, close: 2150, volume: 1200, flags: 0 },
+        { timestamp: 1700007200000n, open: 2150, high: 2300, low: 2100, close: 2250, volume: 1400, flags: 0 },
+      ]);
+      db.close(); // gorilla-compress + write to disk
+    }
+
+    // Reopen from disk
+    {
+      const db = new NdtsDatabase(dbPath);
+      db.open();
+      const rows = db.queryAll().sort((a, b) => Number(a.timestamp - b.timestamp));
+      expect(rows.length).toBe(3);
+      expect(Number(rows[0].timestamp)).toBe(1700000000000);
+      expect(rows[0].open).toBeCloseTo(2000, 6);
+      expect(rows[0].high).toBeCloseTo(2100, 6);
+      expect(rows[0].low).toBeCloseTo(1950, 6);
+      expect(rows[0].close).toBeCloseTo(2050, 6);
+      expect(rows[0].volume).toBeCloseTo(1000, 6);
+      expect(rows[2].close).toBeCloseTo(2250, 6);
+      db.close();
+    }
+  });
+
+  it('should handle multi-symbol queryAll', () => {
+    const db = new NdtsDatabase(`${FFI_DIR}/multisym`);
+    db.open();
+    db.insertBatch('BTCUSDT', '1h', [
+      { timestamp: 1700000000000n, open: 40000, high: 41000, low: 39000, close: 40500, volume: 10, flags: 0 },
+    ]);
+    db.insertBatch('SOLUSDT', '1h', [
+      { timestamp: 1700000000000n, open: 100, high: 110, low: 95, close: 105, volume: 5000, flags: 0 },
+      { timestamp: 1700003600000n, open: 105, high: 115, low: 100, close: 110, volume: 5500, flags: 0 },
+    ]);
+    const rows = db.queryAll();
+    expect(rows.length).toBe(3);
+    db.close();
+  });
+
+  it('should upsert single insert (same timestamp overwrites)', () => {
+    const db = new NdtsDatabase(`${FFI_DIR}/upsert`);
+    db.open();
+    db.insert('BTCUSDT', '1h',
+      { timestamp: 1700000000000n, open: 100, high: 110, low: 95, close: 105, volume: 500, flags: 0 });
+    // Overwrite with different close
+    db.insert('BTCUSDT', '1h',
+      { timestamp: 1700000000000n, open: 100, high: 110, low: 95, close: 999, volume: 500, flags: 0 });
+    const rows = db.queryAll();
+    expect(rows.length).toBe(1);
+    expect(rows[0].close).toBeCloseTo(999, 6);
+    db.close();
+  });
+
+  it('should delete row via tombstone (volume < 0)', () => {
+    const db = new NdtsDatabase(`${FFI_DIR}/tombstone`);
+    db.open();
+    db.insert('BTCUSDT', '1h',
+      { timestamp: 1700000000000n, open: 100, high: 110, low: 95, close: 105, volume: 500, flags: 0 });
+    db.insert('BTCUSDT', '1h',
+      { timestamp: 1700003600000n, open: 105, high: 115, low: 100, close: 110, volume: 600, flags: 0 });
+    // Delete first row via tombstone
+    db.insert('BTCUSDT', '1h',
+      { timestamp: 1700000000000n, open: 0, high: 0, low: 0, close: 0, volume: -1, flags: 0 });
+    const rows = db.queryAll();
+    expect(rows.length).toBe(1);
+    expect(Number(rows[0].timestamp)).toBe(1700003600000);
+    db.close();
+  });
+
+  it('should list symbols via listSymbols()', () => {
+    const db = new NdtsDatabase(`${FFI_DIR}/listsym`);
+    db.open();
+    db.insertBatch('AAVEUSDT', '15m', [
+      { timestamp: 1700000000000n, open: 80, high: 85, low: 78, close: 82, volume: 200, flags: 0 },
+    ]);
+    db.insertBatch('UNIUSDT', '1h', [
+      { timestamp: 1700000000000n, open: 6, high: 7, low: 5.5, close: 6.5, volume: 3000, flags: 0 },
+    ]);
+    const syms = db.listSymbols();
+    expect(syms.length).toBe(2);
+    const pairs = syms.map(s => `${s.symbol}/${s.interval}`).sort();
+    expect(pairs).toContain('AAVEUSDT/15m');
+    expect(pairs).toContain('UNIUSDT/1h');
+    db.close();
+  });
+
+  it('should return getPath() matching the open path', () => {
+    const dbPath = `${FFI_DIR}/getpath`;
+    const db = new NdtsDatabase(dbPath);
+    db.open();
+    expect(db.getPath()).toBe(dbPath);
+    db.close();
   });
 });
