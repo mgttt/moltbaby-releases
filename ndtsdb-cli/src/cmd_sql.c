@@ -8,7 +8,7 @@
 #include <limits.h>
 #include <math.h>
 #include "quickjs.h"
-#include "../../ndtsdb/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
 #include "ndtsdb_lock.h"
 
 // 外部依赖（由 main.c 提供）

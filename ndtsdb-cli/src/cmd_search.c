@@ -5,8 +5,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
-#include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vec.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
 
 // 解析向量字符串 "[0.1,0.2,0.3]"

@@ -75,7 +75,7 @@ off_t ndtsdb_get_db_size(const char* db_path);
 // WAL (Write-Ahead Log)
 // ============================================================
 
-#include "../../ndtsdb/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
 
 /**
  * WAL 魔数

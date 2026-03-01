@@ -3,7 +3,7 @@
 #define CMD_INDICATORS_H
 
 #include <stdint.h>
-#include "../../ndtsdb/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
 
 // 8个技术指标子命令
 int cmd_sma(int argc, char *argv[]);

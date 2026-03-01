@@ -14,6 +14,11 @@ export type { ColumnarType } from './columnar.js';
 
 export { VERSION, VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, getVersion } from './ndts-db-ffi.js';
 
+// ─── 统一入口 ────────────────────────────────────────
+
+export { open, detectFormat } from './ndts-open.js';
+export type { NdtsHandle, NdtsFormat, NdtsQueryParams } from './ndts-open.js';
+
 // ─── 增量写入 + 完整性校验 ───────────────────────────
 
 // FFI 适配层 (与 CLI 格式互通)

@@ -4,7 +4,7 @@
 
 #include <stdbool.h>
 #include "quickjs.h"
-#include "../../ndtsdb/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
 
 // 加载插件
 int load_plugin(const char *plugin_path, NDTSDB *db, JSContext *ctx);

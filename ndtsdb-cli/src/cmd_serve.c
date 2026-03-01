@@ -9,8 +9,8 @@
 #include <signal.h>
 #include <math.h>
 #include "quickjs.h"
-#include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vec.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
 #include "cmd_serve.h"
 #include "common.h"

@@ -386,34 +386,6 @@ export class NdtsDatabase {
     return pathPtr ? new CString(pathPtr) : '';
   }
 
-  /**
-   * 读取分区文件的实际数据
-   *
-   * ⚠️ ndtsdb_read_partition_json (C FFI) 已知返回垃圾数据，委托给 readPartitionFileFFI。
-   * @param filepath 分区文件路径
-   * @returns 解压后的行数组
-   */
-  readPartitionFile(filepath: string): KlineRow[] {
-    // 委托给修复后的 readPartitionFileFFI（使用 ndtsdb-cli subprocess）
-    return readPartitionFileFFI(filepath);
-  }
-
-  /**
-   * 获取分区文件的行数（无需读取所有数据）
-   * @param filepath 分区文件路径
-   * @returns 行数
-   */
-  getPartitionRowCount(filepath: string): number {
-    // ndtsdb_get_partition_row_count 已废弃（骨架实现，已从 .so 移除）
-    // 改用 readPartitionFileHeader 读 header 中的 totalRows
-    try {
-      const { readPartitionFileHeader } = require('./partition-file-reader.js');
-      const header = readPartitionFileHeader(filepath);
-      return header.totalRows || 0;
-    } catch {
-      return 0;
-    }
-  }
 }
 
 // ─── 便捷函数 ───────────────────────────────────────────
@@ -431,94 +403,6 @@ export function isLibraryAvailable(): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * 直接读取分区文件
- *
- * ⚠️ 已知问题：ndtsdb_read_partition_json (C FFI) 会返回垃圾数据（数值严重失真）。
- * 该函数已改用 ndtsdb-cli subprocess 作为可靠路径，与 CLI 共用同一 C 核心逻辑。
- *
- * @param filepath 分区文件路径（格式: <dbPath>/klines-partitioned/<interval>/bucket-N.ndts）
- * @returns 解压后的行数组
- */
-export function readPartitionFileFFI(filepath: string): KlineRow[] {
-  // ndtsdb_read_partition_json 已知返回垃圾数据，不调用
-  // 改用 ndtsdb-cli subprocess
-  const { spawnSync } = require('child_process');
-  const { existsSync } = require('fs');
-  const { join, dirname } = require('path');
-
-  // 查找 ndtsdb-cli
-  const cliCandidates = [
-    join(dirname(import.meta.path), '../../ndtsdb-cli/ndtsdb-cli.com'),
-    join(dirname(import.meta.path), '../../ndtsdb-cli/ndtsdb-cli'),
-    join(process.cwd(), 'ndtsdb-cli/ndtsdb-cli.com'),
-    join(process.cwd(), 'ndtsdb-cli/ndtsdb-cli'),
-    '/home/devali/moltbaby/ndtsdb-cli/ndtsdb-cli.com',
-    '/home/devali/moltbaby/ndtsdb-cli/ndtsdb-cli',
-  ];
-  const cliPath = cliCandidates.find(p => existsSync(p));
-  if (!cliPath) {
-    console.warn('[ndtsdb:ffi] readPartitionFileFFI: ndtsdb-cli not found');
-    return [];
-  }
-
-  // 从路径推断 dbPath 和 interval
-  // 格式: <dbPath>/klines-partitioned/<interval>/bucket-N.ndts
-  const partMatch = filepath.match(/^(.+)\/klines-partitioned\/([^/]+)\/bucket-\d+\.ndts$/);
-  if (!partMatch) {
-    console.warn(`[ndtsdb:ffi] readPartitionFileFFI: cannot parse path: ${filepath}`);
-    return [];
-  }
-
-  const dbPath = partMatch[1];
-  const interval = partMatch[2];
-
-  try {
-    const result = spawnSync(
-      cliPath,
-      ['export', '--database', dbPath, '--interval', interval, '--format', 'json'],
-      { encoding: 'utf-8', maxBuffer: 100 * 1024 * 1024, timeout: 30000 }
-    );
-
-    if (result.status !== 0 || !result.stdout || result.stdout.trim().length === 0) {
-      console.warn(`[ndtsdb:ffi] ndtsdb-cli export failed for ${dbPath}/${interval}: ${result.stderr?.substring(0, 200)}`);
-      return [];
-    }
-
-    const lines = result.stdout.trim().split('\n').filter((l: string) => l.length > 0);
-    const rows: KlineRow[] = [];
-    for (const line of lines) {
-      try {
-        const row = JSON.parse(line);
-        rows.push({
-          timestamp: row.timestamp || 0,
-          open: row.open || 0,
-          high: row.high || 0,
-          low: row.low || 0,
-          close: row.close || 0,
-          volume: row.volume || 0,
-          flags: row.flags || 0,
-        });
-      } catch {}
-    }
-    return rows;
-  } catch (err: any) {
-    console.error('[ndtsdb:ffi] readPartitionFileFFI subprocess error:', err.message);
-    return [];
-  }
-}
-
-/**
- * 获取分区文件的行数
- * @param filepath 分区文件路径
- * @returns 行数
- */
-export function getPartitionRowCountFFI(_filepath: string): number {
-  // ndtsdb_get_partition_row_count was removed from the .so.
-  // Row counts are now obtained via ndtsdb_open + ndtsdb_query_all_json.
-  return 0;
 }
 
 // 自动初始化（dlopen 失败时不阻塞模块加载）

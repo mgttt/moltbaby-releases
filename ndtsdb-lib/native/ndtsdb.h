@@ -1,22 +1,22 @@
 /**
  * ndtsdb.h — N-Dimensional Time Series Database Public API
  *
- * 单进程单写多读的嵌入式时序数据库，专为 OHLCV 行情数据设计。
+ * 单进程嵌入式时序数据库，专为 OHLCV 行情数据设计。
  *
  * 约束：
- *   - 全局单一内存表（g_symbols），同一进程内只能顺序操作一个 DB；
- *     不可同时 open 两个 NDTSDB 实例（第二次 open 会复用全局符号表）。
- *   - ndtsdb_close() 调用后 g_symbols 被清空，可再次 ndtsdb_open()。
- *   - 写操作需独占锁（建议通过 ndtsdb_lock_acquire 获取）。
+ *   - 每个 NDTSDB* 句柄持有独立的 per-handle 符号表（db->symbols）。
+ *   - 多个句柄可并发操作不同目录，无需外部同步。
+ *   - 同一句柄的并发写操作需调用方加锁。
  *   - timestamp 单位：毫秒 epoch（int64_t）。
  *
- * 线程安全：否。多线程使用须外部加锁。
+ * 线程安全：单个句柄非线程安全；不同句柄并发访问不同目录是安全的。
  */
 #ifndef NDTSDB_H
 #define NDTSDB_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include <inttypes.h>   /* PRId64 — used by ndtsdb_query_all_json format strings */
 
 /* ─── 版本信息 ─────────────────────────────────────────── */
 #ifndef NDTSDB_VERSION
@@ -88,15 +88,23 @@ typedef struct {
 /**
  * QueryResult — 查询结果（堆分配，须 ndtsdb_free_result 释放）
  *
- * @field rows      KlineRow 数组（按 timestamp 升序）
+ * @field rows      行数据指针；单 symbol 查询时为 KlineRow[]；多 symbol
+ *                  查询（query_all / query_filtered / query_time_range）时
+ *                  内部为 ResultRow[]（KlineRow + symbol[32] + interval[16]），
+ *                  capacity 字段标记为 NDTSDB_RESULT_EXTENDED。
+ *                  跨语言使用请通过 ndtsdb_query_all_json() 获取结果。
  * @field count     有效行数
- * @field capacity  已分配容量（内部使用）
+ * @field capacity  内部标记：NDTSDB_RESULT_EXTENDED 表示扩展布局（不可按
+ *                  sizeof(KlineRow) 步长迭代 rows）；否则为已分配容量。
  */
 typedef struct {
     KlineRow* rows;
-    uint32_t count;
-    uint32_t capacity;
+    uint32_t  count;
+    uint32_t  capacity;
 } QueryResult;
+
+/** capacity 标记值：QueryResult.rows 指向扩展 ResultRow[] 而非 KlineRow[] */
+#define NDTSDB_RESULT_EXTENDED ((uint32_t)0x45585400u)  /* "EXT\0" */
 
 /** NDTSDB — 数据库句柄（不透明类型）*/
 typedef struct NDTSDB NDTSDB;
@@ -109,7 +117,7 @@ typedef struct NDTSDB NDTSDB;
  * @param path  数据库目录路径（若不存在则创建）
  * @return      数据库句柄，失败返回 NULL
  *
- * 注意：全局单一 g_symbols，同一进程同时只能有一个 open 的实例。
+ * 注意：每个句柄持有独立的 per-handle 符号表；多句柄可并发打开不同路径。
  */
 NDTSDB* ndtsdb_open(const char* path);
 

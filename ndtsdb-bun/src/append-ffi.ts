@@ -4,8 +4,7 @@
 // 本模块将 AppendWriter 的写入操作转发到 libndts (C 核心)
 // 实现 Bun 版与 CLI 版的格式互通
 
-import { NdtsDatabase, KlineRow, openDatabase, isLibraryAvailable, readPartitionFileFFI } from './ndts-db-ffi.js';
-import { readPartitionFileHeader, getTotalRowsInPartitionDir } from './partition-file-reader.js';
+import { NdtsDatabase, KlineRow, openDatabase, isLibraryAvailable } from './ndts-db-ffi.js';
 
 // 列定义映射到 KlineRow
 interface ColumnDef {
@@ -82,8 +81,8 @@ export class AppendWriterFFI {
     // 提取数据库目录路径
     let dbPath: string;
     if (this.path.includes('/bucket-')) {
-      // 分区格式：向上两级
-      dbPath = this.path.replace(/\/[^/]+\/bucket-\d+\.ndts$/, '');
+      // 分区格式：只去掉 bucket-N.ndts，保留 interval 目录
+      dbPath = this.path.replace(/\/bucket-\d+\.ndts$/, '');
     } else if (this.path.match(/[^/]+__[^/.]+\.ndts$/)) {
       // symbol__interval 格式：向上一级
       dbPath = this.path.replace(/\/[^/]+__[^/.]+\.ndts$/, '');
@@ -209,27 +208,11 @@ export class AppendWriterFFI {
   }
   
   /**
-   * 静态方法：读取分区头信息 (获取行数)
-   * 用于 partition.ts 的分区加载逻辑
+   * 静态方法：读取文件头信息 (获取行数)
    */
   static readHeader(path: string): { totalRows: number } {
     try {
-      // 对于分区文件（bucket），直接读取文件头部
-      if (path.includes('/bucket-')) {
-        const header = readPartitionFileHeader(path);
-        if (header.totalRows > 0) {
-          return { totalRows: header.totalRows };
-        }
-      }
-
-      // 对于其他文件格式，尝试 FFI 读取
-      let dbPath: string;
-      if (path.includes('/bucket-')) {
-        dbPath = path.replace(/\/klines-partitioned\/[^/]+\/bucket-\d+\.ndts$/, '');
-      } else {
-        dbPath = path.replace(/\/[^/]+__[^/.]+\.ndts$/, '');
-      }
-
+      const dbPath = path.replace(/\/[^/]+__[^/.]+\.ndts$/, '');
       const db = openDatabase(dbPath);
       try {
         const rows = db.queryAll();
@@ -238,7 +221,6 @@ export class AppendWriterFFI {
         db.close();
       }
     } catch (error: any) {
-      // 如果打开失败（文件不存在或损坏），返回 0
       console.warn(`Failed to read header from ${path}:`, error.message);
       return { totalRows: 0 };
     }
@@ -259,11 +241,6 @@ export class AppendWriterFFI {
    */
   static readAll(path: string): { header: any; data: Map<string, any> } {
     try {
-      // 优先处理分区文件（bucket-*.ndts）
-      if (path.includes('/bucket-')) {
-        return this.readPartitionFile(path);
-      }
-
       // 提取数据库目录路径用于 FFI。
       // 注意：C 核心写入时会按日期分区（YYYY-MM-DD.ndts），不保留原始文件名。
       // 因此我们用目录路径打开 db，扫描目录中所有 .ndts 文件读取数据。
@@ -338,186 +315,6 @@ export class AppendWriterFFI {
     return { header: { totalRows }, data };
   }
 
-  /**
-   * 读取分区文件数据
-   *
-   * 已知问题：ndtsdb_read_partition_json (C FFI) 返回垃圾数据，暂时禁用。
-   * 改用 ndtsdb-cli subprocess 作为可靠路径读取真实解压数据。
-   *
-   * 降级顺序：
-   * 1. ndtsdb-cli subprocess export（可靠，与 CLI 共用同一 C 核心逻辑）
-   * 2. 无法读取时返回 header 元信息 + 空 data（不生成合成数据）
-   */
-  private static readPartitionFile(path: string): { header: any; data: Map<string, any> } {
-    try {
-      // 读取 header（totalRows）
-      const header = readPartitionFileHeader(path);
-
-      // 尝试通过 ndtsdb-cli subprocess 读取真实数据
-      const cliPath = this.findNdtsdbCli();
-      if (cliPath) {
-        try {
-          const { spawnSync } = require('child_process');
-          // 从 bucket 路径推断 dbPath 和 interval
-          // 路径格式: <dbPath>/klines-partitioned/<interval>/bucket-N.ndts
-          const partMatch = path.match(/^(.+)\/klines-partitioned\/([^/]+)\/bucket-\d+\.ndts$/);
-          if (partMatch) {
-            const dbPath = partMatch[1];
-            const interval = partMatch[2];
-            const result = spawnSync(
-              cliPath,
-              ['export', '--database', dbPath, '--interval', interval, '--format', 'json'],
-              { encoding: 'utf-8', maxBuffer: 100 * 1024 * 1024, timeout: 30000 }
-            );
-            if (result.status === 0 && result.stdout && result.stdout.trim().length > 0) {
-              const lines = result.stdout.trim().split('\n').filter((l: string) => l.length > 0);
-              const rows: any[] = [];
-              for (const line of lines) {
-                try { rows.push(JSON.parse(line)); } catch {}
-              }
-              if (rows.length > 0) {
-                return this.rowsToTypedArrays(rows);
-              }
-            } else if (result.stderr) {
-              console.debug(`[append-ffi] ndtsdb-cli export stderr: ${result.stderr.substring(0, 200)}`);
-            }
-          }
-        } catch (cliErr: any) {
-          console.debug(`[append-ffi] ndtsdb-cli subprocess failed: ${cliErr.message}`);
-        }
-      }
-
-      // 无法解压 - 返回 header 元信息但 data 为空（不生成合成数据）
-      if (header.totalRows > 0) {
-        console.warn(`[append-ffi] ⚠️  Partition file ${path} contains ${header.totalRows} rows but cannot be decompressed`);
-        console.warn(`[append-ffi]      ndtsdb-cli 不可用或 export 失败，返回空数据集`);
-      }
-      return { header: { totalRows: header.totalRows }, data: new Map() };
-    } catch (err: any) {
-      console.warn(`[append-ffi] Error reading partition file ${path}:`, err.message);
-      return { header: { totalRows: 0 }, data: new Map() };
-    }
-  }
-
-  /**
-   * 导出单个 symbol 的数据
-   */
-  private static exportSingleSymbol(
-    dbPath: string,
-    symbol: string,
-    interval: string
-  ): { header: any; data: Map<string, any> } {
-    const { spawnSync } = require('child_process');
-    const { existsSync } = require('fs');
-
-    const cliPath = this.findNdtsdbCli();
-    if (!cliPath) {
-      throw new Error('ndtsdb-cli not found');
-    }
-
-    const result = spawnSync(cliPath, ['export', '--database', dbPath, '--symbol', symbol, '--interval', interval, '--format', 'json'], {
-      encoding: 'utf-8',
-      maxBuffer: 50 * 1024 * 1024,
-      timeout: 10000,
-    });
-
-    if (result.status !== 0 || !result.stdout) {
-      throw new Error(`Export failed: ${result.stderr || 'no output'}`);
-    }
-
-    // 解析 JSON Lines 格式
-    const lines = result.stdout.trim().split('\n').filter((l: string) => l.length > 0);
-    const rows: any[] = [];
-
-    for (const line of lines) {
-      try {
-        rows.push(JSON.parse(line));
-      } catch {}
-    }
-
-    return this.rowsToTypedArrays(rows);
-  }
-
-  /**
-   * 将行数组转换为类型化数组
-   */
-  private static rowsToTypedArrays(rows: any[]): {
-    header: any;
-    data: Map<string, any>;
-  } {
-    const data = new Map<string, any>();
-
-    if (rows.length === 0) {
-      return { header: { totalRows: 0 }, data };
-    }
-
-    // 初始化所有可能的列
-    const symbolIds = new Int32Array(rows.length);
-    const timestamps = new BigInt64Array(rows.length);
-    const opens = new Float64Array(rows.length);
-    const highs = new Float64Array(rows.length);
-    const lows = new Float64Array(rows.length);
-    const closes = new Float64Array(rows.length);
-    const volumes = new Float64Array(rows.length);
-    const quoteVolumes = new Float64Array(rows.length);
-    const trades = new Int32Array(rows.length);
-    const takerBuyVolumes = new Float64Array(rows.length);
-    const takerBuyQuoteVolumes = new Float64Array(rows.length);
-
-    // 填充数据
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      symbolIds[i] = row.symbol_id ?? 0;
-      timestamps[i] = BigInt(row.timestamp ?? 0);
-      opens[i] = Number(row.open ?? 0);
-      highs[i] = Number(row.high ?? 0);
-      lows[i] = Number(row.low ?? 0);
-      closes[i] = Number(row.close ?? 0);
-      volumes[i] = Number(row.volume ?? 0);
-      quoteVolumes[i] = Number(row.quoteVolume ?? 0);
-      trades[i] = row.trades ?? 0;
-      takerBuyVolumes[i] = Number(row.takerBuyVolume ?? 0);
-      takerBuyQuoteVolumes[i] = Number(row.takerBuyQuoteVolume ?? 0);
-    }
-
-    data.set('symbol_id', symbolIds);
-    data.set('timestamp', timestamps);
-    data.set('open', opens);
-    data.set('high', highs);
-    data.set('low', lows);
-    data.set('close', closes);
-    data.set('volume', volumes);
-    data.set('quoteVolume', quoteVolumes);
-    data.set('trades', trades);
-    data.set('takerBuyVolume', takerBuyVolumes);
-    data.set('takerBuyQuoteVolume', takerBuyQuoteVolumes);
-
-    return {
-      header: { totalRows: rows.length },
-      data,
-    };
-  }
-
-  /**
-   * 查找 ndtsdb-cli 可执行文件
-   */
-  private static findNdtsdbCli(): string | null {
-    const { existsSync } = require('fs');
-    const paths = [
-      '/home/devali/moltbaby/ndtsdb-cli/ndtsdb-cli',
-      process.cwd() + '/ndtsdb-cli/ndtsdb-cli',
-      '/usr/local/bin/ndtsdb-cli',
-      'ndtsdb-cli',
-    ];
-
-    for (const path of paths) {
-      if (existsSync(path)) {
-        return path;
-      }
-    }
-    return null;
-  }
-  
   /**
    * 检查文件是否存在且有效
    */

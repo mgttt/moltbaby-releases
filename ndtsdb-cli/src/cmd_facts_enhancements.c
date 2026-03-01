@@ -10,8 +10,8 @@
 #include "cmd_facts.h"
 #include "cmd_embed.h"
 #include "ndtsdb_lock.h"
-#include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vec.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb_vec.h"
 
 #define MAX_TEXT 4096
 #define MAX_AGENT_ID 64

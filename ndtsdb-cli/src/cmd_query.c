@@ -7,8 +7,8 @@
 #include <stdint.h>
 #include <limits.h>
 #include "quickjs.h"
-#include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vec.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb_vec.h"
 
 // 外部依赖（由 main.c 提供）
 extern JSContext *ctx;

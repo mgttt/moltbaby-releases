@@ -7,7 +7,7 @@
 #include <dlfcn.h>
 #include <dirent.h>
 #include "ndtsdb_plugin.h"
-#include "../../ndtsdb/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
 #include "quickjs.h"
 
 #define MAX_PLUGINS 16

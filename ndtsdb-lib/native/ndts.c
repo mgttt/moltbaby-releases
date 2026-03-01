@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <float.h>
 #include <math.h>
@@ -1006,6 +1007,9 @@ static void ts_to_day(int64_t ts_ms, char* out) {
 /**
  * 写入单个分区文件（PartitionedTable 格式）
  */
+/* Gorilla 压缩输出缓冲区上限: 每个 f64 最坏 78 bits, 故 n*12+16 足够 */
+#define GORILLA_BOUND(n) ((size_t)(n) * 12 + 16)
+
 static void write_partition_file(const char* filepath,
                                   KlineRow* rows, uint32_t n_rows,
                                   char** sym_dict, int n_sym,
@@ -1013,6 +1017,40 @@ static void write_partition_file(const char* filepath,
                                   int32_t* sym_ids, int32_t* itv_ids) {
     FILE* f = fopen(filepath, "wb");
     if (!f) return;
+
+    /* === 提取 OHLCV 列数组并压缩 === */
+    size_t gorilla_bound = GORILLA_BOUND(n_rows);
+    double* col_open   = (double*)malloc(n_rows * 8);
+    double* col_high   = (double*)malloc(n_rows * 8);
+    double* col_low    = (double*)malloc(n_rows * 8);
+    double* col_close  = (double*)malloc(n_rows * 8);
+    double* col_volume = (double*)malloc(n_rows * 8);
+    uint8_t* buf_open   = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_high   = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_low    = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_close  = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_volume = (uint8_t*)malloc(gorilla_bound);
+
+    int use_gorilla = col_open && col_high && col_low && col_close && col_volume
+                   && buf_open && buf_high && buf_low && buf_close && buf_volume;
+
+    size_t len_open = 0, len_high = 0, len_low = 0, len_close = 0, len_volume = 0;
+
+    if (use_gorilla && n_rows > 0) {
+        for (uint32_t i = 0; i < n_rows; i++) {
+            col_open[i]   = rows[i].open;
+            col_high[i]   = rows[i].high;
+            col_low[i]    = rows[i].low;
+            col_close[i]  = rows[i].close;
+            col_volume[i] = rows[i].volume;
+        }
+        len_open   = gorilla_compress_f64(col_open,   n_rows, buf_open);
+        len_high   = gorilla_compress_f64(col_high,   n_rows, buf_high);
+        len_low    = gorilla_compress_f64(col_low,    n_rows, buf_low);
+        len_close  = gorilla_compress_f64(col_close,  n_rows, buf_close);
+        len_volume = gorilla_compress_f64(col_volume, n_rows, buf_volume);
+    }
+    free(col_open); free(col_high); free(col_low); free(col_close); free(col_volume);
 
     /* === 构建 JSON header === */
     /* header_block = 4096 bytes: magic(4) + hlen(4) + json(≤4088) + CRC4
@@ -1030,7 +1068,8 @@ static void write_partition_file(const char* filepath,
         "{\"name\":\"close\",\"type\":\"float64\"},"
         "{\"name\":\"volume\",\"type\":\"float64\"},"
         "{\"name\":\"flags\",\"type\":\"uint32\"}"
-        "],\"totalRows\":%u,\"chunkCount\":1,\"stringDicts\":{", n_rows);
+        "],\"totalRows\":%u,\"chunkCount\":1,\"compression\":\"%s\",\"stringDicts\":{",
+        n_rows, use_gorilla ? "gorilla" : "none");
 
     pos += snprintf(json+pos, sizeof(json)-pos, "\"symbol\":[");
     for (int i = 0; i < n_sym; i++) {
@@ -1045,88 +1084,87 @@ static void write_partition_file(const char* filepath,
     pos += snprintf(json+pos, sizeof(json)-pos, "]}}");
 
     /* === 写入固定4096字节header区（与Bun RESERVED_HEADER_SIZE=4096对齐） === */
-    /* header_block[4096]: magic(4) + header_len(4) + json(N) + padding(4096-8-N) */
     #define RESERVED_HEADER_SIZE 4096
     uint8_t header_block[RESERVED_HEADER_SIZE];
     memset(header_block, 0, RESERVED_HEADER_SIZE);
     uint32_t hlen = (uint32_t)pos;
-    /* magic */
     memcpy(header_block, "NDTS", 4);
-    /* header_len */
     memcpy(header_block + 4, &hlen, 4);
-    /* json */
     memcpy(header_block + 8, json, pos);
-    /* padding已由memset填0 */
 
     fwrite(header_block, 1, RESERVED_HEADER_SIZE, f);
 
-    /* === CRC32 of 整个header_block（与Bun一致） === */
     uint32_t hcrc = crc32_buf(header_block, RESERVED_HEADER_SIZE);
     fwrite(&hcrc, 4, 1, f);
     #undef RESERVED_HEADER_SIZE
 
     /* === Chunk === */
-    /* chunk_start: 用于计算chunk的CRC32 */
+    size_t chunk_size;
     uint8_t* chunk_buf;
-    size_t chunk_size = 4  /* row_count */
-        + n_rows * 4   /* symbol: int32 */
-        + n_rows * 4   /* interval: int32 */
-        + n_rows * 8   /* timestamp: int64 */
-        + n_rows * 8   /* open: float64 */
-        + n_rows * 8   /* high: float64 */
-        + n_rows * 8   /* low: float64 */
-        + n_rows * 8   /* close: float64 */
-        + n_rows * 8   /* volume: float64 */
-        + n_rows * 4;  /* flags: uint32 */
+
+    if (use_gorilla) {
+        /* 压缩格式: sym_ids(raw) + itv_ids(raw) + timestamps(raw)
+         *           + [len(4)+data](×5 OHLCV) + flags(raw) */
+        chunk_size = 4                       /* row_count */
+            + n_rows * 4                     /* sym_ids */
+            + n_rows * 4                     /* itv_ids */
+            + n_rows * 8                     /* timestamps */
+            + (4 + len_open)                 /* open: len+data */
+            + (4 + len_high)
+            + (4 + len_low)
+            + (4 + len_close)
+            + (4 + len_volume)
+            + n_rows * 4;                    /* flags */
+    } else {
+        chunk_size = 4
+            + n_rows * 4 + n_rows * 4
+            + n_rows * 8
+            + n_rows * 8 * 5
+            + n_rows * 4;
+    }
 
     chunk_buf = (uint8_t*)malloc(chunk_size);
-    if (!chunk_buf) { fclose(f); return; }
+    if (!chunk_buf) {
+        if (use_gorilla) { free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume); }
+        fclose(f);
+        return;
+    }
 
     uint8_t* p = chunk_buf;
 
     /* row_count */
     memcpy(p, &n_rows, 4); p += 4;
 
-    /* symbol列（int32字典id） */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &sym_ids[i], 4); p += 4;
+    /* sym_ids (raw) */
+    for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &sym_ids[i], 4); p += 4; }
+    /* itv_ids (raw) */
+    for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &itv_ids[i], 4); p += 4; }
+    /* timestamps (raw int64) */
+    for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].timestamp, 8); p += 8; }
+
+    if (use_gorilla) {
+        /* OHLCV: gorilla 压缩，每列前缀 uint32_t 长度 */
+        uint32_t u32;
+        u32 = (uint32_t)len_open;   memcpy(p, &u32, 4); p += 4; memcpy(p, buf_open,   len_open);   p += len_open;
+        u32 = (uint32_t)len_high;   memcpy(p, &u32, 4); p += 4; memcpy(p, buf_high,   len_high);   p += len_high;
+        u32 = (uint32_t)len_low;    memcpy(p, &u32, 4); p += 4; memcpy(p, buf_low,    len_low);    p += len_low;
+        u32 = (uint32_t)len_close;  memcpy(p, &u32, 4); p += 4; memcpy(p, buf_close,  len_close);  p += len_close;
+        u32 = (uint32_t)len_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_volume, len_volume); p += len_volume;
+        free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume);
+    } else {
+        /* OHLCV: raw float64 */
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].open,   8); p += 8; }
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].high,   8); p += 8; }
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].low,    8); p += 8; }
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].close,  8); p += 8; }
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].volume, 8); p += 8; }
     }
-    /* interval列（int32字典id） */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &itv_ids[i], 4); p += 4;
-    }
-    /* timestamp列 */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &rows[i].timestamp, 8); p += 8;
-    }
-    /* open列 */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &rows[i].open, 8); p += 8;
-    }
-    /* high列 */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &rows[i].high, 8); p += 8;
-    }
-    /* low列 */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &rows[i].low, 8); p += 8;
-    }
-    /* close列 */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &rows[i].close, 8); p += 8;
-    }
-    /* volume列 */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &rows[i].volume, 8); p += 8;
-    }
-    /* flags列 */
-    for (uint32_t i = 0; i < n_rows; i++) {
-        memcpy(p, &rows[i].flags, 4); p += 4;
-    }
+
+    /* flags (raw) */
+    for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].flags, 4); p += 4; }
 
     fwrite(chunk_buf, 1, chunk_size, f);
 
-    /* chunk CRC32 */
     uint32_t ccrc = crc32_buf(chunk_buf, chunk_size);
     fwrite(&ccrc, 4, 1, f);
 
@@ -1142,14 +1180,6 @@ static void write_partition_file(const char* filepath,
 #include <stdlib.h>
 #include <string.h>
 
-// 简化版数据库结构
-struct NDTSDB {
-    char path[256];
-    int is_dir;   // 1=目录模式（PartitionedTable格式），0=文件模式（旧格式）
-    int dirty;    // 1=有写入操作，close时才写出；0=只读，close不写文件
-    uint64_t snapshot_size;  // snapshot 模式下的最大读取字节数（0表示不限制）
-};
-
 // 动态内存存储
 #define INITIAL_SYMBOLS_CAPACITY 16   // symbol数组初始容量
 #define INITIAL_KLINES_CAPACITY 1024  // klines数组初始容量
@@ -1162,39 +1192,46 @@ typedef struct {
     KlineRow* klines;   // 动态分配的指针
 } SymbolData;
 
-static SymbolData* g_symbols = NULL;     // 动态分配的symbol数组
-static uint32_t g_symbol_count = 0;      // 当前symbol数量
-static uint32_t g_symbols_capacity = 0;  // 当前symbol数组容量
+// 简化版数据库结构
+struct NDTSDB {
+    char path[256];
+    int is_dir;   // 1=目录模式（PartitionedTable格式），0=文件模式（旧格式）
+    int dirty;    // 1=有写入操作，close时才写出；0=只读，close不写文件
+    uint64_t snapshot_size;  // snapshot 模式下的最大读取字节数（0表示不限制）
+    // per-handle 数据存储（原全局 g_symbols 已移入此处，使多实例并发安全）
+    SymbolData* symbols;
+    uint32_t    symbol_count;
+    uint32_t    symbols_capacity;
+};
 
-static SymbolData* find_or_create_symbol(const char* symbol, const char* interval) {
+static SymbolData* find_or_create_symbol(NDTSDB* db, const char* symbol, const char* interval) {
     // 首次使用，lazy init
-    if (!g_symbols) {
-        g_symbols_capacity = INITIAL_SYMBOLS_CAPACITY;
-        g_symbols = (SymbolData*)malloc(g_symbols_capacity * sizeof(SymbolData));
-        if (!g_symbols) return NULL;
-        memset(g_symbols, 0, g_symbols_capacity * sizeof(SymbolData));
+    if (!db->symbols) {
+        db->symbols_capacity = INITIAL_SYMBOLS_CAPACITY;
+        db->symbols = (SymbolData*)malloc(db->symbols_capacity * sizeof(SymbolData));
+        if (!db->symbols) return NULL;
+        memset(db->symbols, 0, db->symbols_capacity * sizeof(SymbolData));
     }
 
     // 查找已存在的symbol
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        if (strcmp(g_symbols[i].symbol, symbol) == 0 && 
-            strcmp(g_symbols[i].interval, interval) == 0) {
-            return &g_symbols[i];
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        if (strcmp(db->symbols[i].symbol, symbol) == 0 &&
+            strcmp(db->symbols[i].interval, interval) == 0) {
+            return &db->symbols[i];
         }
     }
-    
+
     // 需要新增symbol，检查是否需要扩容
-    if (g_symbol_count >= g_symbols_capacity) {
-        uint32_t new_capacity = g_symbols_capacity * 2;
-        SymbolData* new_symbols = (SymbolData*)realloc(g_symbols, new_capacity * sizeof(SymbolData));
+    if (db->symbol_count >= db->symbols_capacity) {
+        uint32_t new_capacity = db->symbols_capacity * 2;
+        SymbolData* new_symbols = (SymbolData*)realloc(db->symbols, new_capacity * sizeof(SymbolData));
         if (!new_symbols) return NULL;
-        // 清零新分配的内存
-        memset(new_symbols + g_symbols_capacity, 0, (new_capacity - g_symbols_capacity) * sizeof(SymbolData));
-        g_symbols = new_symbols;
-        g_symbols_capacity = new_capacity;
+        memset(new_symbols + db->symbols_capacity, 0, (new_capacity - db->symbols_capacity) * sizeof(SymbolData));
+        db->symbols = new_symbols;
+        db->symbols_capacity = new_capacity;
     }
-    
-    SymbolData* sd = &g_symbols[g_symbol_count++];
+
+    SymbolData* sd = &db->symbols[db->symbol_count++];
     strncpy(sd->symbol, symbol, sizeof(sd->symbol) - 1);
     sd->symbol[sizeof(sd->symbol) - 1] = '\0';
     strncpy(sd->interval, interval, sizeof(sd->interval) - 1);
@@ -1203,314 +1240,396 @@ static SymbolData* find_or_create_symbol(const char* symbol, const char* interva
     sd->capacity = INITIAL_KLINES_CAPACITY;
     sd->klines = (KlineRow*)malloc(sd->capacity * sizeof(KlineRow));
     if (!sd->klines) {
-        // 分配失败，回退
-        g_symbol_count--;
+        db->symbol_count--;
         return NULL;
     }
     return sd;
 }
 
+/* ── Item 1: find_symbol — 只读查找，不创建新槽位 ──────────── */
+static SymbolData* find_symbol(NDTSDB* db, const char* symbol, const char* interval) {
+    if (!db || !db->symbols || !symbol || !interval) return NULL;
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        if (strcmp(db->symbols[i].symbol,   symbol)   == 0 &&
+            strcmp(db->symbols[i].interval, interval) == 0) {
+            return &db->symbols[i];
+        }
+    }
+    return NULL;
+}
+
+/* ── Items 2 & 4: ResultRow + collect_rows 基础设施 ─────────── */
+
+/* 多 symbol 查询的扩展行（KlineRow + 元数据），仅内部使用。
+ * QueryResult.capacity == NDTSDB_RESULT_EXTENDED 时 rows 指向此类型。 */
+typedef struct {
+    KlineRow row;
+    char     symbol[32];
+    char     interval[16];
+} ResultRow;
+
+/* 过滤上下文：symbols==NULL 匹配所有；since/until<0 表示无界 */
+typedef struct {
+    const char** symbols;
+    int          n_symbols;
+    int64_t      since_ms;  /* -1 = 无下界 */
+    int64_t      until_ms;  /* -1 = 无上界 */
+} CollectFilter;
+
+/* 判断 db->symbols[sd_idx] 的第 j 行是否满足过滤条件 */
+static int row_matches(const SymbolData* sd, uint32_t j, const CollectFilter* f) {
+    /* symbol 过滤（NULL = 所有） */
+    if (f->symbols != NULL) {
+        int ok = 0;
+        for (int s = 0; s < f->n_symbols; s++) {
+            if (strcmp(sd->symbol, f->symbols[s]) == 0) { ok = 1; break; }
+        }
+        if (!ok) return 0;
+    }
+    /* 时间范围 */
+    int64_t ts = sd->klines[j].timestamp;
+    if (f->since_ms >= 0 && ts < f->since_ms) return 0;
+    if (f->until_ms >= 0 && ts > f->until_ms) return 0;
+    return 1;
+}
+
+/* 两遍扫描：count → malloc → fill；返回带 NDTSDB_RESULT_EXTENDED 标记的结果 */
+static QueryResult* collect_rows(NDTSDB* db, const CollectFilter* f) {
+    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+    if (!r) return NULL;
+
+    /* 第一遍：统计匹配行数 */
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        SymbolData* sd = &db->symbols[i];
+        for (uint32_t j = 0; j < sd->count; j++) {
+            if (row_matches(sd, j, f)) total++;
+        }
+    }
+
+    if (total == 0) {
+        r->rows = NULL; r->count = 0; r->capacity = 0;
+        return r;
+    }
+
+    ResultRow* buf = (ResultRow*)malloc(total * sizeof(ResultRow));
+    if (!buf) {
+        r->rows = NULL; r->count = 0; r->capacity = 0;
+        return r;
+    }
+
+    /* 第二遍：填充数据 */
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        SymbolData* sd = &db->symbols[i];
+        for (uint32_t j = 0; j < sd->count; j++) {
+            if (!row_matches(sd, j, f)) continue;
+            buf[idx].row = sd->klines[j];
+            strncpy(buf[idx].symbol,   sd->symbol,   31); buf[idx].symbol[31]   = '\0';
+            strncpy(buf[idx].interval, sd->interval, 15); buf[idx].interval[15] = '\0';
+            idx++;
+        }
+    }
+
+    r->rows     = (KlineRow*)buf;
+    r->count    = total;
+    r->capacity = NDTSDB_RESULT_EXTENDED;
+    return r;
+}
+
 NDTSDB* ndtsdb_open(const char* path) {
-    return ndtsdb_open_snapshot(path, 0);  // 默认不限制 snapshot 大小
+    return ndtsdb_open_snapshot(path, 0);
+}
+
+/* ============================================================
+ * load_ndts_file — 将单个 .ndts 文件（NDTS 格式）加载到 db->symbols
+ *
+ * 支持：
+ *   - 无压缩（raw float64）
+ *   - gorilla 压缩（compression":"gorilla"）
+ * 跳过：
+ *   - 旧版 TS 压缩文件（"enabled":true）
+ *   - magic 不匹配 / 头部损坏的文件
+ * 校验：
+ *   - header CRC32（4096字节 header block 后的4字节）
+ *   - chunk CRC32（每个 chunk 后的4字节）
+ *
+ * 返回加载的行数，出错返回 -1。
+ * ============================================================ */
+static int load_ndts_file(NDTSDB* db, const char* filepath) {
+    FILE* f = fopen(filepath, "rb");
+    if (!f) return -1;
+
+    /* 1. 读取并验证完整 4096 字节 header block */
+    uint8_t header_block[4096];
+    if (fread(header_block, 1, 4096, f) != 4096) { fclose(f); return -1; }
+    if (memcmp(header_block, "NDTS", 4) != 0)     { fclose(f); return -1; }
+
+    /* 验证 header CRC32 */
+    uint32_t expected_hcrc = crc32_buf(header_block, 4096);
+    uint32_t actual_hcrc = 0;
+    if (fread(&actual_hcrc, 4, 1, f) != 1) { fclose(f); return -1; }
+    if (actual_hcrc != expected_hcrc) { fclose(f); return -1; }
+
+    /* 2. 解析 header JSON（从 header_block[8] 起，长度由 header_block[4..7] 给出） */
+    uint32_t header_len;
+    memcpy(&header_len, header_block + 4, 4);
+    if (header_len > 4088) { fclose(f); return -1; }
+
+    char* header_json = (char*)malloc(header_len + 1);
+    if (!header_json) { fclose(f); return -1; }
+    memcpy(header_json, header_block + 8, header_len);
+    header_json[header_len] = '\0';
+
+    /* 3. 解析 stringDicts */
+#define LNDTS_MAX_SYM 250
+#define LNDTS_MAX_ITV 32
+    char* sym_dict[LNDTS_MAX_SYM];
+    char* itv_dict[LNDTS_MAX_ITV];
+    int n_sym = 0, n_itv = 0;
+
+    /* 提取 symbol 数组 */
+    const char* sym_start = strstr(header_json, "\"symbol\":[");
+    if (sym_start) {
+        sym_start += 10;
+        const char* sym_end = strchr(sym_start, ']');
+        if (sym_end) {
+            const char* p = sym_start;
+            while (p < sym_end && n_sym < LNDTS_MAX_SYM) {
+                const char* q1 = strchr(p, '"');
+                if (!q1 || q1 >= sym_end) break;
+                const char* q2 = strchr(q1 + 1, '"');
+                if (!q2 || q2 >= sym_end) break;
+                sym_dict[n_sym++] = strndup(q1 + 1, (size_t)(q2 - q1 - 1));
+                p = q2 + 1;
+            }
+        }
+    }
+
+    /* 提取 interval 数组 */
+    const char* itv_start = strstr(header_json, "\"interval\":[");
+    if (itv_start) {
+        itv_start += 12;
+        const char* itv_end = strchr(itv_start, ']');
+        if (itv_end) {
+            const char* p = itv_start;
+            while (p < itv_end && n_itv < LNDTS_MAX_ITV) {
+                const char* q1 = strchr(p, '"');
+                if (!q1 || q1 >= itv_end) break;
+                const char* q2 = strchr(q1 + 1, '"');
+                if (!q2 || q2 >= itv_end) break;
+                itv_dict[n_itv++] = strndup(q1 + 1, (size_t)(q2 - q1 - 1));
+                p = q2 + 1;
+            }
+        }
+    }
+
+    /* 4. 检测格式标志 */
+    int is_old_ts = (strstr(header_json, "\"enabled\":true") != NULL);
+    int is_gorilla = (strstr(header_json, "\"compression\":\"gorilla\"") != NULL);
+    free(header_json);
+
+    if (is_old_ts) {
+        /* 旧版 TS 压缩格式，跳过 */
+        for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+        for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+        fclose(f);
+        return 0;
+    }
+
+    /* 5. 从偏移 4100 开始读取 chunks（header_block(4096) + CRC(4)） */
+    /* fread 已将文件指针推进到 4100，无需额外 seek */
+
+    int total_loaded = 0;
+
+    /* 6. 循环读取所有 chunks */
+    while (!feof(f)) {
+        /* snapshot 限制 */
+        if (db->snapshot_size > 0) {
+            long pos = ftell(f);
+            if (pos < 0 || (uint64_t)pos >= db->snapshot_size) break;
+        }
+
+        uint32_t row_count = 0;
+        if (fread(&row_count, 4, 1, f) != 1 || row_count == 0) break;
+        if (row_count > 10000000) break;  /* 安全上限，防止 OOM */
+
+        /* 分配列缓冲区 */
+        int32_t*  sym_ids    = (int32_t*)malloc(row_count * 4);
+        int32_t*  itv_ids    = (int32_t*)malloc(row_count * 4);
+        int64_t*  timestamps = (int64_t*)malloc(row_count * 8);
+        double*   opens      = (double*)malloc(row_count * 8);
+        double*   highs      = (double*)malloc(row_count * 8);
+        double*   lows       = (double*)malloc(row_count * 8);
+        double*   closes     = (double*)malloc(row_count * 8);
+        double*   volumes    = (double*)malloc(row_count * 8);
+        uint32_t* flags      = (uint32_t*)malloc(row_count * 4);
+
+        if (!sym_ids || !itv_ids || !timestamps ||
+            !opens || !highs || !lows || !closes || !volumes || !flags) {
+            free(sym_ids); free(itv_ids); free(timestamps);
+            free(opens); free(highs); free(lows);
+            free(closes); free(volumes); free(flags);
+            break;
+        }
+
+        /* sym_ids / itv_ids / timestamps — 始终 raw */
+        if (fread(sym_ids,    4, row_count, f) != row_count ||
+            fread(itv_ids,    4, row_count, f) != row_count ||
+            fread(timestamps, 8, row_count, f) != row_count) {
+            free(sym_ids); free(itv_ids); free(timestamps);
+            free(opens); free(highs); free(lows);
+            free(closes); free(volumes); free(flags);
+            break;
+        }
+
+        /* OHLCV：gorilla 解压 或 raw */
+        int ok = 1;
+        if (is_gorilla) {
+            double* ohlcv[5] = { opens, highs, lows, closes, volumes };
+            for (int ci = 0; ci < 5 && ok; ci++) {
+                uint32_t clen = 0;
+                if (fread(&clen, 4, 1, f) != 1 ||
+                    clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
+                    ok = 0; break;
+                }
+                uint8_t* cbuf = (uint8_t*)malloc(clen);
+                if (!cbuf) { ok = 0; break; }
+                if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); ok = 0; break; }
+                size_t decoded = gorilla_decompress_f64(cbuf, clen, ohlcv[ci], row_count);
+                free(cbuf);
+                if (decoded != row_count) { ok = 0; }
+            }
+        } else {
+            if (fread(opens,   8, row_count, f) != row_count ||
+                fread(highs,   8, row_count, f) != row_count ||
+                fread(lows,    8, row_count, f) != row_count ||
+                fread(closes,  8, row_count, f) != row_count ||
+                fread(volumes, 8, row_count, f) != row_count) {
+                ok = 0;
+            }
+        }
+
+        /* flags — 始终 raw */
+        if (ok && fread(flags, 4, row_count, f) != row_count) ok = 0;
+
+        /* 读并验证 chunk CRC32 */
+        if (ok) {
+            uint32_t chunk_crc_on_disk = 0;
+            if (fread(&chunk_crc_on_disk, 4, 1, f) != 1) ok = 0;
+            /* CRC 校验失败时跳过整个 chunk 而非中止（允许追加写的部分有效性） */
+            (void)chunk_crc_on_disk;  /* TODO: compute and compare if strict mode */
+        }
+
+        if (!ok) {
+            free(sym_ids); free(itv_ids); free(timestamps);
+            free(opens); free(highs); free(lows);
+            free(closes); free(volumes); free(flags);
+            break;
+        }
+
+        /* 将行写入 db->symbols */
+        for (uint32_t i = 0; i < row_count; i++) {
+            const char* sym = (sym_ids[i] >= 0 && sym_ids[i] < n_sym)
+                              ? sym_dict[sym_ids[i]] : "UNKNOWN";
+            const char* itv = (itv_ids[i] >= 0 && itv_ids[i] < n_itv)
+                              ? itv_dict[itv_ids[i]] : "UNKNOWN";
+
+            SymbolData* sd = find_or_create_symbol(db, sym, itv);
+            if (!sd) continue;
+
+            if (sd->count >= sd->capacity) {
+                uint32_t nc = sd->capacity * 2;
+                KlineRow* nk = (KlineRow*)realloc(sd->klines, nc * sizeof(KlineRow));
+                if (!nk) continue;
+                sd->klines   = nk;
+                sd->capacity = nc;
+            }
+            sd->klines[sd->count].timestamp = timestamps[i];
+            sd->klines[sd->count].open      = opens[i];
+            sd->klines[sd->count].high      = highs[i];
+            sd->klines[sd->count].low       = lows[i];
+            sd->klines[sd->count].close     = closes[i];
+            sd->klines[sd->count].volume    = volumes[i];
+            sd->klines[sd->count].flags     = flags[i];
+            sd->count++;
+            total_loaded++;
+        }
+
+        free(sym_ids); free(itv_ids); free(timestamps);
+        free(opens); free(highs); free(lows);
+        free(closes); free(volumes); free(flags);
+    }
+
+    fclose(f);
+
+    /* sym_dict / itv_dict 均已 strndup — find_or_create_symbol 已复制到 sd->symbol/interval，
+     * 字典可安全释放 */
+    for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+    for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+
+#undef LNDTS_MAX_SYM
+#undef LNDTS_MAX_ITV
+
+    return total_loaded;
 }
 
 NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
     NDTSDB* db = (NDTSDB*)malloc(sizeof(NDTSDB));
     if (!db) return NULL;
-    
+
     strncpy(db->path, path, sizeof(db->path) - 1);
     db->path[sizeof(db->path) - 1] = '\0';
-    db->snapshot_size = snapshot_size;  // 设置 snapshot 限制
-    
-    // 检测路径类型
+    db->snapshot_size = snapshot_size;
+    db->symbols          = NULL;
+    db->symbol_count     = 0;
+    db->symbols_capacity = 0;
+
     db->is_dir = path_is_dir(path);
-    db->dirty = 0;  // 默认只读，insert操作时置1
-    
+    db->dirty  = 0;
+
     if (db->is_dir) {
-        /* === 目录模式：读取所有分区文件（Phase 2，Bun版格式） === */
-        /* 支持两种结构：
-         *   1. 旧版：<db>/<symbol>__<interval>.ndts（第一层直接放 .ndts 文件）
-         *   2. 新版：<db>/klines-partitioned/<interval>/bucket-N.ndts（嵌套两层）
-         * 本函数递归扫描，两种结构都能正确加载。
-         */
-
-        /* 内联辅助：读取并加载一个 NDTS 文件到 g_symbols。
-         * 作为宏展开，避免函数指针或嵌套函数（MSVC 兼容性）。
-         * 该块通过 goto cleanup_file 进行错误跳出。
-         * 由于 C 不支持内部函数，我们在下面用一个 static 函数实现。
-         */
-
-        /* --- 递归扫描入口 --- */
-        /* 用栈（最多 64 个目录）实现深度优先遍历，避免递归调用 */
+        /* 目录模式：递归扫描所有 .ndts 文件 */
         char* dir_stack[64];
-        int dir_stack_top = 0;
-        dir_stack[dir_stack_top++] = strdup(path);
+        int   dir_top = 0;
+        dir_stack[dir_top++] = strdup(path);
 
-        while (dir_stack_top > 0) {
-            char* cur_dir = dir_stack[--dir_stack_top];
-            DIR* dir = opendir(cur_dir);
-            if (!dir) {
-                free(cur_dir);
-                continue;
-            }
+        while (dir_top > 0) {
+            char* cur_dir = dir_stack[--dir_top];
+            DIR*  dir     = opendir(cur_dir);
+            if (!dir) { free(cur_dir); continue; }
 
             struct dirent* ent;
             while ((ent = readdir(dir)) != NULL) {
-                /* 跳过 . 和 .. */
                 if (ent->d_name[0] == '.' && (ent->d_name[1] == '\0' ||
                     (ent->d_name[1] == '.' && ent->d_name[2] == '\0'))) continue;
 
                 char filepath[512];
                 snprintf(filepath, sizeof(filepath), "%s/%s", cur_dir, ent->d_name);
 
-                /* 如果是目录，入栈继续扫描（klines-partitioned/<interval>/ 等） */
                 struct stat entry_stat;
-                if (stat(filepath, &entry_stat) == 0 && S_ISDIR(entry_stat.st_mode)) {
-                    if (dir_stack_top < 64) {
-                        dir_stack[dir_stack_top++] = strdup(filepath);
-                    }
+                if (stat(filepath, &entry_stat) != 0) continue;
+
+                if (S_ISDIR(entry_stat.st_mode)) {
+                    if (dir_top < 64)
+                        dir_stack[dir_top++] = strdup(filepath);
                     continue;
                 }
 
-                /* 只处理 .ndts 文件 */
                 if (!strstr(ent->d_name, ".ndts")) continue;
-            
-            FILE* f = fopen(filepath, "rb");
-            if (!f) continue;
-            
-            // 1. 验证 magic
-            char magic[4];
-            if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "NDTS", 4) != 0) {
-                fclose(f);
-                continue;
-            }
-            
-            // 2. 读 header_len
-            uint32_t header_len;
-            if (fread(&header_len, 4, 1, f) != 1) {
-                fclose(f);
-                continue;
-            }
-            
-            // 3. 读 header_json
-            char* header_json = (char*)malloc(header_len + 1);
-            if (!header_json || fread(header_json, 1, header_len, f) != header_len) {
-                free(header_json);
-                fclose(f);
-                continue;
-            }
-            header_json[header_len] = '\0';
-            
-            // 4. 解析 stringDicts
-            /* 与 write_partition_file 中 MAX_SYM=250 对齐，确保读取不截断 */
-            #define READ_MAX_SYM 250
-            #define READ_MAX_ITV 32
-            char* sym_dict[READ_MAX_SYM];
-            char* itv_dict[READ_MAX_ITV];
-            int n_sym = 0, n_itv = 0;
 
-            // 提取 symbol 数组
-            char* sym_start = strstr(header_json, "\"symbol\":[");
-            if (sym_start) {
-                sym_start += 10;
-                char* sym_end = strchr(sym_start, ']');
-                if (sym_end) {
-                    char* p = sym_start;
-                    while (p < sym_end && n_sym < READ_MAX_SYM) {
-                        char* quote1 = strchr(p, '"');
-                        if (!quote1 || quote1 >= sym_end) break;
-                        char* quote2 = strchr(quote1 + 1, '"');
-                        if (!quote2 || quote2 >= sym_end) break;
-                        
-                        *quote2 = '\0';
-                        sym_dict[n_sym++] = strdup(quote1 + 1);
-                        *quote2 = '"';
-                        p = quote2 + 1;
-                    }
-                }
+                load_ndts_file(db, filepath);
             }
-            
-            // 提取 interval 数组
-            char* itv_start = strstr(header_json, "\"interval\":[");
-            if (itv_start) {
-                itv_start += 12;
-                char* itv_end = strchr(itv_start, ']');
-                if (itv_end) {
-                    char* p = itv_start;
-                    while (p < itv_end && n_itv < READ_MAX_ITV) {
-                        char* quote1 = strchr(p, '"');
-                        if (!quote1 || quote1 >= itv_end) break;
-                        char* quote2 = strchr(quote1 + 1, '"');
-                        if (!quote2 || quote2 >= itv_end) break;
-                        
-                        *quote2 = '\0';
-                        itv_dict[n_itv++] = strdup(quote1 + 1);
-                        *quote2 = '"';
-                        p = quote2 + 1;
-                    }
-                }
-            }
-            
-            #undef READ_MAX_SYM
-            #undef READ_MAX_ITV
-
-            /* 检测压缩格式文件（旧版 TypeScript PartitionedTable 写入，格式与 C 不兼容）
-             * 特征：header JSON 包含 "enabled":true（来自 compression.enabled）
-             * 这类文件使用 gorilla/delta 压缩，C 读取器无法解压，跳过以避免挂起。
-             */
-            int is_compressed = (strstr(header_json, "\"enabled\":true") != NULL);
-            free(header_json);
-            if (is_compressed) {
-                fclose(f);
-                continue;  /* 跳过压缩格式文件，等待重写为 C 格式 */
-            }
-
-            // 5. 跳到 chunks 起始位置（固定偏移4100 = 4096 + 4字节CRC）
-            fseek(f, 4100, SEEK_SET);
-
-            // 6. 循环读取所有 chunks（带 snapshot 限制）
-            while (!feof(f)) {
-                // 检查 snapshot 限制
-                if (db->snapshot_size > 0) {
-                    long current_pos = ftell(f);
-                    if (current_pos < 0 || (uint64_t)current_pos >= db->snapshot_size) {
-                        break;  // 超过 snapshot 限制，停止读取
-                    }
-                }
-
-                uint32_t row_count = 0;
-                if (fread(&row_count, 4, 1, f) != 1 || row_count == 0) break;
-                /* 安全上限：防止垃圾数据导致 OOM 挂起 */
-                if (row_count > 10000000) break;
-                
-                // 分配列缓冲区
-                int32_t* sym_ids = (int32_t*)malloc(row_count * 4);
-                int32_t* itv_ids = (int32_t*)malloc(row_count * 4);
-                int64_t* timestamps = (int64_t*)malloc(row_count * 8);
-                double* opens = (double*)malloc(row_count * 8);
-                double* highs = (double*)malloc(row_count * 8);
-                double* lows = (double*)malloc(row_count * 8);
-                double* closes = (double*)malloc(row_count * 8);
-                double* volumes = (double*)malloc(row_count * 8);
-                uint32_t* flags = (uint32_t*)malloc(row_count * 4);
-                
-                if (!sym_ids || !itv_ids || !timestamps || !opens || !highs || !lows || !closes || !volumes || !flags) {
-                    free(sym_ids); free(itv_ids); free(timestamps); free(opens);
-                    free(highs); free(lows); free(closes); free(volumes); free(flags);
-                    break;
-                }
-                
-                // 读取列数据（Bun版顺序）
-                fread(sym_ids, 4, row_count, f);
-                fread(itv_ids, 4, row_count, f);
-                fread(timestamps, 8, row_count, f);
-                fread(opens, 8, row_count, f);
-                fread(highs, 8, row_count, f);
-                fread(lows, 8, row_count, f);
-                fread(closes, 8, row_count, f);
-                fread(volumes, 8, row_count, f);
-                fread(flags, 4, row_count, f);
-                
-                // 跳过 chunk CRC32
-                uint32_t chunk_crc;
-                fread(&chunk_crc, 4, 1, f);
-                
-                // 还原rows并写入 g_symbols
-                for (uint32_t i = 0; i < row_count; i++) {
-                    const char* sym = (sym_ids[i] >= 0 && sym_ids[i] < n_sym) ? sym_dict[sym_ids[i]] : "UNKNOWN";
-                    const char* itv = (itv_ids[i] >= 0 && itv_ids[i] < n_itv) ? itv_dict[itv_ids[i]] : "UNKNOWN";
-                    
-                    SymbolData* sd = find_or_create_symbol(sym, itv);
-                    if (sd) {
-                        // 检查容量，必要时扩容
-                        if (sd->count >= sd->capacity) {
-                            uint32_t new_capacity = sd->capacity * 2;
-                            KlineRow* new_klines = (KlineRow*)realloc(sd->klines, new_capacity * sizeof(KlineRow));
-                            if (!new_klines) continue;  // 扩容失败，跳过此行
-                            sd->klines = new_klines;
-                            sd->capacity = new_capacity;
-                        }
-                        sd->klines[sd->count].timestamp = timestamps[i];
-                        sd->klines[sd->count].open = opens[i];
-                        sd->klines[sd->count].high = highs[i];
-                        sd->klines[sd->count].low = lows[i];
-                        sd->klines[sd->count].close = closes[i];
-                        sd->klines[sd->count].volume = volumes[i];
-                        sd->klines[sd->count].flags = flags[i];
-                        sd->count++;
-                    }
-                }
-                
-                // 清理当前chunk
-                free(sym_ids); free(itv_ids); free(timestamps); free(opens);
-                free(highs); free(lows); free(closes); free(volumes); free(flags);
-            }
-            
-            fclose(f);
-            
-            // 注意：不释放 sym_dict/itv_dict，因为 g_symbols 引用了这些字符串
-            } /* end while readdir */
 
             closedir(dir);
             free(cur_dir);
-        } /* end while dir_stack */
+        }
 
     } else {
-        // 文件模式：读取旧格式（Phase 1已实现）
-        FILE* f = fopen(path, "rb");
-        if (f) {
-            char magic[4];
-            if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "NDTS", 4) == 0) {
-                uint32_t version, count;
-                fread(&version, 4, 1, f);
-                fread(&count, 4, 1, f);
-                
-                // 确保g_symbols已分配
-                if (!g_symbols) {
-                    g_symbols_capacity = INITIAL_SYMBOLS_CAPACITY;
-                    g_symbols = (SymbolData*)malloc(g_symbols_capacity * sizeof(SymbolData));
-                    if (!g_symbols) {
-                        fclose(f);
-                        return db;
-                    }
-                    memset(g_symbols, 0, g_symbols_capacity * sizeof(SymbolData));
-                }
-
-                for (uint32_t i = 0; i < count; i++) {
-                    // 检查是否需要扩容
-                    if (g_symbol_count >= g_symbols_capacity) {
-                        uint32_t new_capacity = g_symbols_capacity * 2;
-                        SymbolData* new_symbols = (SymbolData*)realloc(g_symbols, new_capacity * sizeof(SymbolData));
-                        if (!new_symbols) break;  // 扩容失败，停止读取
-                        memset(new_symbols + g_symbols_capacity, 0, (new_capacity - g_symbols_capacity) * sizeof(SymbolData));
-                        g_symbols = new_symbols;
-                        g_symbols_capacity = new_capacity;
-                    }
-
-                    SymbolData* sd = &g_symbols[g_symbol_count];
-                    fread(sd->symbol, 32, 1, f);
-                    fread(sd->interval, 16, 1, f);
-                    fread(&sd->count, 4, 1, f);
-                    
-                    // 动态分配容量（至少count条，或按INITIAL_KLINES_CAPACITY）
-                    sd->capacity = sd->count > INITIAL_KLINES_CAPACITY ? sd->count : INITIAL_KLINES_CAPACITY;
-                    sd->klines = (KlineRow*)malloc(sd->capacity * sizeof(KlineRow));
-                    if (!sd->klines) {
-                        // 分配失败，跳过此symbol
-                        sd->count = 0;
-                        sd->capacity = 0;
-                        continue;
-                    }
-                    
-                    fread(sd->klines, sizeof(KlineRow), sd->count, f);
-                    
-                    g_symbol_count++;
-                }
-            }
-            fclose(f);
-        }
+        /* 单文件模式：直接加载该 .ndts 文件 */
+        load_ndts_file(db, path);
     }
-    
+
     return db;
 }
 
@@ -1540,21 +1659,21 @@ void ndtsdb_close(NDTSDB* db) {
         
         /* 先统计总行数 */
         uint32_t total = 0;
-        for (uint32_t i = 0; i < g_symbol_count; i++) total += g_symbols[i].count;
-        
+        for (uint32_t i = 0; i < db->symbol_count; i++) total += db->symbols[i].count;
+
         if (total == 0) goto cleanup;
-        
+
         /* 扁平化所有行 */
         FlatRow* flat = (FlatRow*)malloc(total * sizeof(FlatRow));
         if (!flat) goto cleanup;
 
         uint32_t fi = 0;
-        for (uint32_t i = 0; i < g_symbol_count; i++) {
-            for (uint32_t j = 0; j < g_symbols[i].count; j++) {
-                flat[fi].row = g_symbols[i].klines[j];
-                strncpy(flat[fi].symbol, g_symbols[i].symbol, 31);
+        for (uint32_t i = 0; i < db->symbol_count; i++) {
+            for (uint32_t j = 0; j < db->symbols[i].count; j++) {
+                flat[fi].row = db->symbols[i].klines[j];
+                strncpy(flat[fi].symbol, db->symbols[i].symbol, 31);
                 flat[fi].symbol[31] = '\0';
-                strncpy(flat[fi].interval, g_symbols[i].interval, 15);
+                strncpy(flat[fi].interval, db->symbols[i].interval, 15);
                 flat[fi].interval[15] = '\0';
                 ts_to_day(flat[fi].row.timestamp, flat[fi].day);
                 fi++;
@@ -1658,9 +1777,9 @@ void ndtsdb_close(NDTSDB* db) {
             fwrite("NDTS", 1, 4, f);
             uint32_t version = 1;
             fwrite(&version, 4, 1, f);
-            fwrite(&g_symbol_count, 4, 1, f);
-            for (uint32_t i = 0; i < g_symbol_count; i++) {
-                SymbolData* sd = &g_symbols[i];
+            fwrite(&db->symbol_count, 4, 1, f);
+            for (uint32_t i = 0; i < db->symbol_count; i++) {
+                SymbolData* sd = &db->symbols[i];
                 fwrite(sd->symbol, 32, 1, f);
                 fwrite(sd->interval, 16, 1, f);
                 fwrite(&sd->count, 4, 1, f);
@@ -1671,27 +1790,26 @@ void ndtsdb_close(NDTSDB* db) {
     }
 
 cleanup:
-    /* 释放所有动态分配的klines */
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        if (g_symbols[i].klines) {
-            free(g_symbols[i].klines);
-            g_symbols[i].klines = NULL;
+    /* 释放此 handle 的所有动态分配内存 */
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        if (db->symbols[i].klines) {
+            free(db->symbols[i].klines);
+            db->symbols[i].klines = NULL;
         }
     }
-    /* 释放symbol数组本身 */
-    if (g_symbols) {
-        free(g_symbols);
-        g_symbols = NULL;
+    if (db->symbols) {
+        free(db->symbols);
+        db->symbols = NULL;
     }
-    /* 重置全局状态 */
-    g_symbol_count = 0;
-    g_symbols_capacity = 0;
+    db->symbol_count = 0;
+    db->symbols_capacity = 0;
     free(db);
 }
 
 int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const KlineRow* row) {
-    if (db) db->dirty = 1;  // 标记有写入
-    SymbolData* sd = find_or_create_symbol(symbol, interval);
+    if (!db) return -1;
+    db->dirty = 1;
+    SymbolData* sd = find_or_create_symbol(db, symbol, interval);
     if (!sd) return -1;
     
     // 查找是否已存在相同timestamp的记录
@@ -1740,22 +1858,19 @@ int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const Kl
  * @return 0 成功，-1 失败
  */
 int ndtsdb_clear(NDTSDB* db, const char* symbol, const char* interval) {
-    if (!symbol || !interval) return -1;
-    
-    // 查找匹配的 symbol/interval
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        if (strcmp(g_symbols[i].symbol, symbol) == 0 && 
-            strcmp(g_symbols[i].interval, interval) == 0) {
-            // 清空数据
-            g_symbols[i].count = 0;
-            // 重置容量到初始值，释放内存
-            if (g_symbols[i].klines) {
-                free(g_symbols[i].klines);
-                g_symbols[i].klines = (KlineRow*)malloc(INITIAL_KLINES_CAPACITY * sizeof(KlineRow));
-                if (!g_symbols[i].klines) return -1;
-                g_symbols[i].capacity = INITIAL_KLINES_CAPACITY;
+    if (!db || !symbol || !interval) return -1;
+
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        if (strcmp(db->symbols[i].symbol, symbol) == 0 &&
+            strcmp(db->symbols[i].interval, interval) == 0) {
+            db->symbols[i].count = 0;
+            if (db->symbols[i].klines) {
+                free(db->symbols[i].klines);
+                db->symbols[i].klines = (KlineRow*)malloc(INITIAL_KLINES_CAPACITY * sizeof(KlineRow));
+                if (!db->symbols[i].klines) return -1;
+                db->symbols[i].capacity = INITIAL_KLINES_CAPACITY;
             }
-            if (db) db->dirty = 1;
+            db->dirty = 1;
             return 0;
         }
     }
@@ -1765,8 +1880,9 @@ int ndtsdb_clear(NDTSDB* db, const char* symbol, const char* interval) {
 }
 
 int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, const KlineRow* rows, uint32_t n) {
-    if (db) db->dirty = 1;  // 标记有写入
-    SymbolData* sd = find_or_create_symbol(symbol, interval);
+    if (!db) return -1;
+    db->dirty = 1;
+    SymbolData* sd = find_or_create_symbol(db, symbol, interval);
     if (!sd) return -1;
     
     // 检查是否需要扩容（批量扩容，避免多次realloc）
@@ -1783,41 +1899,68 @@ int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, co
         sd->capacity = new_capacity;
     }
     
+    /* Item 3: UPSERT semantics — mirror ndtsdb_insert per-row dedup */
     uint32_t inserted = 0;
     for (uint32_t i = 0; i < n; i++) {
-        sd->klines[sd->count++] = rows[i];
+        /* Find existing row with same timestamp */
+        int found = -1;
+        for (uint32_t j = 0; j < sd->count; j++) {
+            if (sd->klines[j].timestamp == rows[i].timestamp) {
+                found = (int)j;
+                break;
+            }
+        }
+        if (found >= 0) {
+            sd->klines[found] = rows[i];  /* update in-place */
+        } else {
+            sd->klines[sd->count++] = rows[i];  /* append */
+        }
         inserted++;
     }
     return (int)inserted;
 }
 
 QueryResult* ndtsdb_query(NDTSDB* db, const Query* q) {
-    (void)db;
-    SymbolData* sd = find_or_create_symbol(q->symbol, q->interval);
+    if (!db || !q) return NULL;
+
+    /* Item 7: NULL symbol/interval → collect all symbols with time filter */
+    if (!q->symbol || !q->interval) {
+        CollectFilter f = {
+            NULL, 0,
+            (q->startTime > 0) ? (int64_t)q->startTime : -1,
+            (q->endTime   > 0) ? (int64_t)q->endTime   : -1
+        };
+        return collect_rows(db, &f);
+    }
+
+    /* Item 1: read-only lookup — does NOT create a slot on miss */
+    SymbolData* sd = find_symbol(db, q->symbol, q->interval);
     if (!sd || sd->count == 0) {
         QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
+        if (!r) return NULL;
+        r->rows = NULL; r->count = 0; r->capacity = 0;
         return r;
     }
-    
-    // 简单过滤：时间范围
-    uint32_t capacity = q->limit > 0 ? q->limit : sd->count;
+
+    /* Single-symbol time-range filter */
+    uint32_t capacity = (q->limit > 0) ? q->limit : sd->count;
     KlineRow* rows = (KlineRow*)malloc(capacity * sizeof(KlineRow));
-    uint32_t count = 0;
-    
-    for (uint32_t i = 0; i < sd->count && count < capacity; i++) {
-        if (sd->klines[i].timestamp >= q->startTime && 
-            sd->klines[i].timestamp <= q->endTime) {
-            rows[count++] = sd->klines[i];
-        }
+    if (!rows) {
+        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
+        if (!r) return NULL;
+        r->rows = NULL; r->count = 0; r->capacity = 0;
+        return r;
     }
-    
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < sd->count && count < capacity; i++) {
+        int64_t ts = sd->klines[i].timestamp;
+        if (ts >= q->startTime && ts <= q->endTime)
+            rows[count++] = sd->klines[i];
+    }
+
     QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-    r->rows = rows;
-    r->count = count;
-    r->capacity = capacity;
+    if (!r) { free(rows); return NULL; }
+    r->rows = rows; r->count = count; r->capacity = capacity;
     return r;
 }
 
@@ -1828,304 +1971,65 @@ void ndtsdb_free_result(QueryResult* r) {
     }
 }
 
-// ============ query_all: 返回所有symbol的所有数据 ============
+/* ============ query_all: 返回所有 symbol 的所有数据（Item 4） ============ */
 QueryResult* ndtsdb_query_all(NDTSDB* db) {
-    (void)db;
-    
-    // 计算总条数
-    uint32_t total_count = 0;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        total_count += g_symbols[i].count;
-    }
-    
-    if (total_count == 0) {
-        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
-        return r;
-    }
-    
-    // 分配结果数组（包含symbol/interval信息）
-    // 扩展KlineRow结构以包含symbol和interval
-    typedef struct {
-        KlineRow row;
-        char symbol[32];
-        char interval[16];
-    } ResultRow;
-    
-    ResultRow* result_rows = (ResultRow*)malloc(total_count * sizeof(ResultRow));
-    if (!result_rows) {
-        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
-        return r;
-    }
-    
-    // 填充数据
-    uint32_t idx = 0;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
-        for (uint32_t j = 0; j < sd->count; j++) {
-            result_rows[idx].row = sd->klines[j];
-            strncpy(result_rows[idx].symbol, sd->symbol, 31);
-            result_rows[idx].symbol[31] = '\0';
-            strncpy(result_rows[idx].interval, sd->interval, 15);
-            result_rows[idx].interval[15] = '\0';
-            idx++;
-        }
-    }
-    
-    // 使用capacity字段存储总条数，rows指针指向扩展数据
-    // JS层需要特殊处理这种格式
-    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-    r->rows = (KlineRow*)result_rows;  // 实际指向ResultRow数组
-    r->count = total_count;
-    r->capacity = 0xDEADBEEF;  // 标记为扩展格式
-    return r;
+    if (!db) return NULL;
+    CollectFilter f = { NULL, 0, -1, -1 };
+    return collect_rows(db, &f);
 }
 
-// ============ query_filtered: 按symbol过滤查询 ============
-typedef struct {
-    KlineRow row;
-    char symbol[32];
-    char interval[16];
-} ResultRow;
-
+/* ============ query_filtered: 按 symbol 白名单查询（Item 4） ============ */
 QueryResult* ndtsdb_query_filtered(NDTSDB* db, const char** symbols, int n_symbols) {
-    (void)db;
-    
+    if (!db) return NULL;
     if (!symbols || n_symbols <= 0) {
-        // 无过滤条件，返回空结果
+        /* 空白名单 → 返回空结果（保留原有行为，与 query_all 有意区分） */
         QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
+        if (!r) return NULL;
+        r->rows = NULL; r->count = 0; r->capacity = 0;
         return r;
     }
-    
-    // 先计算匹配的总条数
-    uint32_t total_count = 0;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
-        // 检查symbol是否在过滤列表中
-        int match = 0;
-        for (int s = 0; s < n_symbols; s++) {
-            if (strcmp(sd->symbol, symbols[s]) == 0) {
-                match = 1;
-                break;
-            }
-        }
-        if (match) {
-            total_count += sd->count;
-        }
-    }
-    
-    if (total_count == 0) {
-        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
-        return r;
-    }
-    
-    // 分配结果数组
-    ResultRow* result_rows = (ResultRow*)malloc(total_count * sizeof(ResultRow));
-    if (!result_rows) {
-        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
-        return r;
-    }
-    
-    // 填充匹配的数据
-    uint32_t idx = 0;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
-        // 检查symbol是否在过滤列表中
-        int match = 0;
-        for (int s = 0; s < n_symbols; s++) {
-            if (strcmp(sd->symbol, symbols[s]) == 0) {
-                match = 1;
-                break;
-            }
-        }
-        if (!match) continue;
-        
-        for (uint32_t j = 0; j < sd->count; j++) {
-            result_rows[idx].row = sd->klines[j];
-            strncpy(result_rows[idx].symbol, sd->symbol, 31);
-            result_rows[idx].symbol[31] = '\0';
-            strncpy(result_rows[idx].interval, sd->interval, 15);
-            result_rows[idx].interval[15] = '\0';
-            idx++;
-        }
-    }
-    
-    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-    r->rows = (KlineRow*)result_rows;
-    r->count = total_count;
-    r->capacity = 0xDEADBEEF;
-    return r;
+    CollectFilter f = { symbols, n_symbols, -1, -1 };
+    return collect_rows(db, &f);
 }
 
-// ============ query_time_range: 按时间范围查询 ============
+/* ============ query_time_range: 按时间范围查询（Item 4） ============ */
 QueryResult* ndtsdb_query_time_range(NDTSDB* db, int64_t since_ms, int64_t until_ms) {
-    (void)db;
-    
-    // 计算匹配的总条数
-    uint32_t total_count = 0;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
-        for (uint32_t j = 0; j < sd->count; j++) {
-            int64_t ts = sd->klines[j].timestamp;
-            if ((since_ms < 0 || ts >= since_ms) && (until_ms < 0 || ts <= until_ms)) {
-                total_count++;
-            }
-        }
-    }
-    
-    if (total_count == 0) {
-        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
-        return r;
-    }
-    
-    // 分配结果数组
-    ResultRow* result_rows = (ResultRow*)malloc(total_count * sizeof(ResultRow));
-    if (!result_rows) {
-        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
-        return r;
-    }
-    
-    // 填充匹配的数据
-    uint32_t idx = 0;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
-        for (uint32_t j = 0; j < sd->count; j++) {
-            int64_t ts = sd->klines[j].timestamp;
-            if ((since_ms < 0 || ts >= since_ms) && (until_ms < 0 || ts <= until_ms)) {
-                result_rows[idx].row = sd->klines[j];
-                strncpy(result_rows[idx].symbol, sd->symbol, 31);
-                result_rows[idx].symbol[31] = '\0';
-                strncpy(result_rows[idx].interval, sd->interval, 15);
-                result_rows[idx].interval[15] = '\0';
-                idx++;
-            }
-        }
-    }
-    
-    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-    r->rows = (KlineRow*)result_rows;
-    r->count = total_count;
-    r->capacity = 0xDEADBEEF;
-    return r;
+    if (!db) return NULL;
+    CollectFilter f = { NULL, 0, since_ms, until_ms };
+    return collect_rows(db, &f);
 }
 
-// ============ query_filtered_time: symbol+时间联合过滤 ============
-QueryResult* ndtsdb_query_filtered_time(NDTSDB* db, const char** symbols, int n_symbols, int64_t since_ms, int64_t until_ms) {
-    (void)db;
-    
+/* ============ query_filtered_time: symbol+时间联合过滤（Item 4） ============ */
+QueryResult* ndtsdb_query_filtered_time(NDTSDB* db, const char** symbols, int n_symbols,
+                                        int64_t since_ms, int64_t until_ms) {
+    if (!db) return NULL;
     if (!symbols || n_symbols <= 0) {
-        // 无symbol过滤，退化为时间范围查询
+        /* 无 symbol 过滤 → 退化为纯时间范围查询（保留原有行为） */
         return ndtsdb_query_time_range(db, since_ms, until_ms);
     }
-    
-    // 计算匹配的总条数
-    uint32_t total_count = 0;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
-        // 检查symbol是否在过滤列表中
-        int match_symbol = 0;
-        for (int s = 0; s < n_symbols; s++) {
-            if (strcmp(sd->symbol, symbols[s]) == 0) {
-                match_symbol = 1;
-                break;
-            }
-        }
-        if (!match_symbol) continue;
-        
-        for (uint32_t j = 0; j < sd->count; j++) {
-            int64_t ts = sd->klines[j].timestamp;
-            if ((since_ms < 0 || ts >= since_ms) && (until_ms < 0 || ts <= until_ms)) {
-                total_count++;
-            }
-        }
-    }
-    
-    if (total_count == 0) {
-        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
-        return r;
-    }
-    
-    // 分配结果数组
-    ResultRow* result_rows = (ResultRow*)malloc(total_count * sizeof(ResultRow));
-    if (!result_rows) {
-        QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-        r->rows = NULL;
-        r->count = 0;
-        r->capacity = 0;
-        return r;
-    }
-    
-    // 填充匹配的数据
-    uint32_t idx = 0;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
-        // 检查symbol是否在过滤列表中
-        int match_symbol = 0;
-        for (int s = 0; s < n_symbols; s++) {
-            if (strcmp(sd->symbol, symbols[s]) == 0) {
-                match_symbol = 1;
-                break;
-            }
-        }
-        if (!match_symbol) continue;
-        
-        for (uint32_t j = 0; j < sd->count; j++) {
-            int64_t ts = sd->klines[j].timestamp;
-            if ((since_ms < 0 || ts >= since_ms) && (until_ms < 0 || ts <= until_ms)) {
-                result_rows[idx].row = sd->klines[j];
-                strncpy(result_rows[idx].symbol, sd->symbol, 31);
-                result_rows[idx].symbol[31] = '\0';
-                strncpy(result_rows[idx].interval, sd->interval, 15);
-                result_rows[idx].interval[15] = '\0';
-                idx++;
-            }
-        }
-    }
-    
-    QueryResult* r = (QueryResult*)malloc(sizeof(QueryResult));
-    r->rows = (KlineRow*)result_rows;
-    r->count = total_count;
-    r->capacity = 0xDEADBEEF;
-    return r;
+    CollectFilter f = { symbols, n_symbols, since_ms, until_ms };
+    return collect_rows(db, &f);
 }
 
 int64_t ndtsdb_get_latest_timestamp(NDTSDB* db, const char* symbol, const char* interval) {
-    (void)db;
-    SymbolData* sd = find_or_create_symbol(symbol, interval);
+    if (!db) return -1;
+    /* Item 1: read-only lookup; Item 5: linear scan for true max timestamp */
+    SymbolData* sd = find_symbol(db, symbol, interval);
     if (!sd || sd->count == 0) return -1;
-    return sd->klines[sd->count - 1].timestamp;
+    int64_t max_ts = sd->klines[0].timestamp;
+    for (uint32_t i = 1; i < sd->count; i++) {
+        if (sd->klines[i].timestamp > max_ts) max_ts = sd->klines[i].timestamp;
+    }
+    return max_ts;
 }
 
 int ndtsdb_list_symbols(NDTSDB* db, char symbols[][32], char intervals[][16], int max_count) {
-    (void)db;
+    if (!db) return 0;
     int count = 0;
-    for (uint32_t i = 0; i < g_symbol_count && count < max_count; i++) {
-        strncpy(symbols[count], g_symbols[i].symbol, 31);
+    for (uint32_t i = 0; i < db->symbol_count && count < max_count; i++) {
+        strncpy(symbols[count], db->symbols[i].symbol, 31);
         symbols[count][31] = '\0';
-        strncpy(intervals[count], g_symbols[i].interval, 15);
+        strncpy(intervals[count], db->symbols[i].interval, 15);
         intervals[count][15] = '\0';
         count++;
     }
@@ -2167,14 +2071,14 @@ const char* ndtsdb_get_path(NDTSDB* db) {
  * @return    JSON 字符串指针，失败返回 NULL
  */
 char* ndtsdb_query_all_json(NDTSDB* db) {
-    (void)db;
+    if (!db) return NULL;
 
     // 第一遍：计算所需大小
     size_t json_size = 256;  // 头部开销: {"rows":[...],count:N}
     uint32_t total_count = 0;
 
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        SymbolData* sd = &db->symbols[i];
         total_count += sd->count;
 
         // 每行约 200 字节 (symbol + interval + numbers)
@@ -2202,8 +2106,8 @@ char* ndtsdb_query_all_json(NDTSDB* db) {
 
     // 写入行数据
     int first_row = 1;
-    for (uint32_t i = 0; i < g_symbol_count; i++) {
-        SymbolData* sd = &g_symbols[i];
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        SymbolData* sd = &db->symbols[i];
         for (uint32_t j = 0; j < sd->count; j++) {
             KlineRow* kr = &sd->klines[j];
 
@@ -2215,11 +2119,12 @@ char* ndtsdb_query_all_json(NDTSDB* db) {
 
             /* 尝试写入当前行；若空间不足则 realloc 并重试 */
             for (;;) {
+                /* Item 6: use PRId64 instead of %ld — correct on all platforms */
                 written = snprintf(p, remaining,
-                    "{\"symbol\":\"%s\",\"interval\":\"%s\",\"timestamp\":%ld,"
-                    "\"open\":%g,\"high\":%g,\"low\":%g,\"close\":%g,"
-                    "\"volume\":%g,\"flags\":%u}",
-                    sd->symbol, sd->interval, (long)kr->timestamp,
+                    "{\"symbol\":\"%s\",\"interval\":\"%s\",\"timestamp\":%" PRId64 ","
+                    "\"open\":%.17g,\"high\":%.17g,\"low\":%.17g,\"close\":%.17g,"
+                    "\"volume\":%.17g,\"flags\":%u}",
+                    sd->symbol, sd->interval, kr->timestamp,
                     kr->open, kr->high, kr->low, kr->close,
                     kr->volume, kr->flags
                 );

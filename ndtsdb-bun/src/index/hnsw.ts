@@ -517,7 +517,9 @@ export class HNSWIndex {
    */
   serializeBinary(): Uint8Array {
     // 计算总大小
-    let totalSize = 32; // Header
+    // Header: magic(4) + version(4) + M(4) + efConstruction(4) + efSearch(4)
+    //       + dimension(4) + entryPoint(4) + maxLevel(4) + size(4) = 36 bytes
+    let totalSize = 36; // Header
     
     for (const [id, node] of this.nodes) {
       totalSize += 8; // id + numLevels

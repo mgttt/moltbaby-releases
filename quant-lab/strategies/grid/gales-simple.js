@@ -112,7 +112,7 @@ const CONFIG = {
   emergencyLean: 'auto',  // auto/long/short/neutral
 
   // 市场状态检测（ADX趋势强度）
-  enableMarketRegime: true,   // 是否启用市场状态检测
+  enableMarketRegime: false,  // 是否启用市场状态检测
   adxPeriod: 14,              // ADX计算周期
   adxTrendingThreshold: 25,   // 强趋势阈值
   adxStrongTrendThreshold: 40, // 极强趋势阈值

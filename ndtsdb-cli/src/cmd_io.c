@@ -8,8 +8,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <math.h>
-#include "../../ndtsdb/native/ndtsdb.h"
-#include "../../ndtsdb/native/ndtsdb_vec.h"
+#include "../../ndtsdb-lib/native/ndtsdb.h"
+#include "../../ndtsdb-lib/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
 
 #ifdef _WIN32
