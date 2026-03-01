@@ -1,8 +1,8 @@
 # Makefile for ndtsdb-cli
 # 正式构建: make cosmo-docker → ndtsdb-cli.com (APE 跨平台, podman + cosmocc)
 
-# 版本号优先级: 1) 传入的 VERSION 参数 2) ../ndtsdb/VERSION 3) 默认值
-VERSION := $(if $(VERSION),$(VERSION),$(shell cat ../ndtsdb/VERSION 2>/dev/null || echo "1.0.0.1"))
+# 版本号优先级: 1) 传入的 VERSION 参数 2) ../ndtsdb-lib/VERSION 3) ../ndtsdb/VERSION (向后兼容) 4) 默认值
+VERSION := $(if $(VERSION),$(VERSION),$(shell cat ../ndtsdb-lib/VERSION 2>/dev/null || cat ../ndtsdb/VERSION 2>/dev/null || echo "1.0.0.1"))
 
 # ============================================================================
 # 正式构建: Cosmocc (podman 容器, APE 跨平台二进制)
@@ -27,8 +27,8 @@ COSMO_SOURCES = \
 	ndtsdb-cli/src/cmd_facts_enhancements.c \
 	ndtsdb-cli/src/ndtsdb_lock.c \
 	ndtsdb-cli/src/bindings/qjs_ndtsdb.c \
-	ndtsdb/native/ndts.c \
-	ndtsdb/native/ndtsdb_vec.c \
+	ndtsdb-lib/native/ndts.c \
+	ndtsdb-lib/native/ndtsdb_vec.c \
 	ndtsdb-cli/vendor/quickjs-2024-01-13/quickjs.c \
 	ndtsdb-cli/vendor/quickjs-2024-01-13/libregexp.c \
 	ndtsdb-cli/vendor/quickjs-2024-01-13/libunicode.c \
@@ -39,7 +39,7 @@ COSMO_FLAGS = \
 	-O2 \
 	-I./ndtsdb-cli/src/bindings \
 	-I./ndtsdb-cli/include \
-	-I./ndtsdb/native \
+	-I./ndtsdb-lib/native \
 	-I./ndtsdb-cli/vendor/quickjs-2024-01-13 \
 	-DCONFIG_VERSION=\"2024-01-13\" \
 	-D_GNU_SOURCE \
@@ -97,7 +97,7 @@ cosmo:
 	@rm -f $(COSMO_BINARY)
 	@podman run --rm \
 		-v $$(pwd):/workspace \
-		-v $$(pwd)/../ndtsdb:/ndtsdb \
+		-v $$(pwd)/../ndtsdb-lib:/ndtsdb-lib \
 		$(COSMO_IMAGE) \
 		cosmocc -o $(COSMO_BINARY) \
 			src/main.c src/common.c src/cmd_query.c \
@@ -105,13 +105,13 @@ cosmo:
 			src/cmd_plugin.c src/cmd_embed.c src/cmd_search.c \
 			src/cmd_facts.c src/ndtsdb_lock.c \
 			src/bindings/qjs_ndtsdb.c \
-			/ndtsdb/native/ndts.c /ndtsdb/native/ndtsdb_vec.c \
+			/ndtsdb-lib/native/ndts.c /ndtsdb-lib/native/ndtsdb_vec.c \
 			vendor/quickjs-2024-01-13/quickjs.c \
 			vendor/quickjs-2024-01-13/libregexp.c \
 			vendor/quickjs-2024-01-13/libunicode.c \
 			vendor/quickjs-2024-01-13/cutils.c \
 			vendor/quickjs-2024-01-13/libbf.c \
-			-I./src/bindings -I./include -I/ndtsdb/native \
+			-I./src/bindings -I./include -I/ndtsdb-lib/native \
 			-I./vendor/quickjs-2024-01-13 \
 			-DCONFIG_VERSION=\"2024-01-13\" -D_GNU_SOURCE -DCONFIG_BIGNUM -lm
 	@echo "✓ APE binary: $(COSMO_BINARY)  ($$(ls -lh $(COSMO_BINARY) | awk '{print $$5}'))"

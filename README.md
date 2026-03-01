@@ -4,15 +4,21 @@
 
 ## 📦 产品列表
 
-### 1. ndtsdb
-**N-Dimensional Time Series Database** — 多维时序数据库
+### 1. ndtsdb-lib
+**N-Dimensional Time Series Database (C Core)** — C 核心库
+
+- 高性能 C 实现（NDTS 文件格式）
+- Tick 8.9M/s, Snapshot 487K/s
+- 供 ndtsdb-bun (FFI) 和 ndtsdb-cli (静态编译) 共用
+
+### 2. ndtsdb-bun
+**NDTS TypeScript/Bun FFI Wrapper** — Bun FFI 封装
 
 ```bash
-bun add github:mgttt/ndtsdb-releases#ndtsdb
+bun add github:mgttt/ndtsdb-releases#ndtsdb-bun
 ```
 
-- 高性能嵌入式时序数据库
-- Tick 8.9M/s, Snapshot 487K/s
+- TypeScript FFI 封装，调用 ndtsdb-lib C 核心
 - 8 平台预编译（lnx/osx/win × x86/arm）
 
 ### 2. ndtsdb-cli

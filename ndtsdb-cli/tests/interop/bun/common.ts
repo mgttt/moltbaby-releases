@@ -1,4 +1,4 @@
-import { PartitionedTable } from '../../../../ndtsdb/src/index.ts';
+import { PartitionedTable } from '../../../../ndtsdb-bun/src/index.ts';
 
 export const columns = [
   { name: 'symbol', type: 'string' },

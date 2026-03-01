@@ -29,7 +29,7 @@
   "dependencies": {
     "@moltbaby/workpool-lib": "workspace:*",
     "https-proxy-agent": "^7.0.6",
-    "ndtsdb": "file:../ndtsdb",
+    "ndtsdb": "file:../ndtsdb-bun",
     "undici": "^6.20.1",
     "ws": "^8.16.0"
   },

@@ -20,7 +20,7 @@ const logger = createLogger('BarCacheLayer');
 
 import { env } from '../config/env';
 
-import { AppendWriter } from '../../../ndtsdb/src/append.ts';
+import { AppendWriter } from '../../../ndtsdb-bun/src/append-ffi.ts';
 import { existsSync, mkdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';

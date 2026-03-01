@@ -1,0 +1,25 @@
+# ndtsdb
+
+# Dependencies
+node_modules/
+
+# Test data (generated)
+data/
+
+# Rust/WASM build intermediates (NOT the final .wasm artifact)
+wasm/target/
+
+# OS
+.DS_Store
+
+docs/poc/qjs-ndtsdb-rpc
+
+# Debug/link artifacts
+*.pdb
+*.lib
+
+# NOTE: These ARE tracked (prebuilt artifacts):
+# - src/simd.wasm           (WASM SIMD module)
+# - native/dist/*.so|*.dylib|*.dll  (6-platform C FFI libs)
+# - native/libsimd.so       (current platform lib)
+pdb/lib

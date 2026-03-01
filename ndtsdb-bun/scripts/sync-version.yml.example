@@ -1,0 +1,56 @@
+# ============================================================
+# GitHub Actions 示例: 版本号自动同步
+# 文件: .github/workflows/sync-version.yml
+# ============================================================
+#
+# 将此文件复制到 ndtsdb-release 仓库的 .github/workflows/ 目录下
+# 功能: 当 VERSION 文件变更时，自动同步到 README.md 和 package.json
+#
+
+name: Sync Version
+
+on:
+  push:
+    paths:
+      - 'VERSION'
+    branches:
+      - main
+
+jobs:
+  sync-version:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        
+    - name: Install jq
+      run: sudo apt-get update && sudo apt-get install -y jq
+      
+    - name: Sync version
+      run: |
+        chmod +x scripts/sync-version.sh
+        ./scripts/sync-version.sh
+        
+    - name: Check for changes
+      id: check-changes
+      run: |
+        if git diff --quiet; then
+          echo "changed=false" >> $GITHUB_OUTPUT
+        else
+          echo "changed=true" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Commit and push changes
+      if: steps.check-changes.outputs.changed == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add README.md package.json
+        git commit -m "chore: sync version to $VERSION [ci skip]"
+        git push

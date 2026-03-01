@@ -1,6 +1,6 @@
 // Bun查询空数据
 import { createTable } from './common.ts';
-import { PartitionedTable } from '../../../../ndtsdb/src/index.ts';
+import { PartitionedTable } from '../../../../ndtsdb-bun/src/index.ts';
 
 const dataDir = process.env.NDTS_DATA_DIR || './data';
 const table = createTable(dataDir);
