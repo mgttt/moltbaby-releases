@@ -57,30 +57,51 @@ export function readPartitionFileHeader(filePath: string): {
   try {
     const buf = readFileSync(filePath);
 
-    if (buf.length < HEADER_BLOCK_SIZE) {
+    if (buf.length < 8) {
       return { totalRows: 0, columns: [] };
     }
 
-    const headerBlock = buf.subarray(0, HEADER_BLOCK_SIZE);
-    const magic = headerBlock.subarray(0, 4).toString('utf-8');
+    const magic = buf.subarray(0, 4).toString('utf-8');
 
-    if (magic !== 'NDTS') {
-      return { totalRows: 0, columns: [] };
-    }
-
-    const headerLen = headerBlock.readUInt32LE(4);
-    const jsonStr = headerBlock.subarray(8, 8 + headerLen).toString('utf-8');
-
-    try {
-      const headerJson = JSON.parse(jsonStr);
-      return {
-        totalRows: headerJson.totalRows || 0,
-        columns: headerJson.columns || [],
-        symbol: headerJson.symbol,
-        interval: headerJson.interval,
-      };
-    } catch (e) {
-      return { totalRows: 0, columns: [] };
+    if (magic === 'NDTS') {
+      // 新版格式: NDTS(4) + headerLen(4) + JSON(headerLen) + padding
+      const headerLen = buf.readUInt32LE(4);
+      if (8 + headerLen > buf.length) {
+        return { totalRows: 0, columns: [] };
+      }
+      const jsonStr = buf.subarray(8, 8 + headerLen).toString('utf-8');
+      try {
+        const headerJson = JSON.parse(jsonStr);
+        return {
+          totalRows: headerJson.totalRows || 0,
+          columns: headerJson.columns || [],
+          symbol: headerJson.symbol,
+          interval: headerJson.interval,
+        };
+      } catch (e) {
+        return { totalRows: 0, columns: [] };
+      }
+    } else {
+      // 旧版格式: headerLen(4, LE) + JSON(headerLen)
+      // magic 字节实际上是 headerLen 的低4字节
+      const headerLen = buf.readUInt32LE(0);
+      if (4 + headerLen > buf.length) {
+        return { totalRows: 0, columns: [] };
+      }
+      const jsonStr = buf.subarray(4, 4 + headerLen).toString('utf-8');
+      try {
+        const headerJson = JSON.parse(jsonStr);
+        // 旧版 header 字段名: rowCount
+        const totalRows = headerJson.totalRows ?? headerJson.rowCount ?? 0;
+        return {
+          totalRows,
+          columns: headerJson.columns || [],
+          symbol: headerJson.symbol,
+          interval: headerJson.interval,
+        };
+      } catch (e) {
+        return { totalRows: 0, columns: [] };
+      }
     }
   } catch (err) {
     return { totalRows: 0, columns: [] };
@@ -106,31 +127,10 @@ export function readPartitionFile(filePath: string): PartitionData {
     return result;
   }
 
-  try {
-    const buf = readFileSync(filePath);
-
-    // 尝试提取一些基本的数据点
-    // 这是一个简化的方法：我们读取未压缩的部分
-    // 对于实际生产，需要实现完整的 delta/gorilla 解压
-
-    // 从文件中提取一些样本行（如果能找到的话）
-    // 这是一个最小化的实现，只是为了让系统不完全失败
-
-    // 创建虚拟行来表示数据存在
-    for (let i = 0; i < Math.min(header.totalRows, 10); i++) {
-      result.rows.push({
-        symbol_id: 0,
-        timestamp: Date.now() - (header.totalRows - i) * 900000, // 15分钟间隔
-        open: 0,
-        high: 0,
-        low: 0,
-        close: 0,
-        volume: 0,
-      });
-    }
-  } catch (err) {
-    // Silently fail
-  }
+  // 注意：此处不生成合成数据。
+  // 实际数据解压需要通过 FFI (readPartitionFileFFI) 或 ndtsdb-cli subprocess 进行。
+  // 此函数仅返回 header 元信息（totalRows 等），rows 保持为空。
+  // 调用方应使用 readPartitionFileFFI 或 ndtsdb-cli 获取真实数据。
 
   return result;
 }

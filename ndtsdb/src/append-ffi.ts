@@ -4,7 +4,7 @@
 // 本模块将 AppendWriter 的写入操作转发到 libndts (C 核心)
 // 实现 Bun 版与 CLI 版的格式互通
 
-import { NdtsDatabase, KlineRow, openDatabase, isLibraryAvailable } from './ndts-db-ffi.js';
+import { NdtsDatabase, KlineRow, openDatabase, isLibraryAvailable, readPartitionFileFFI } from './ndts-db-ffi.js';
 import { readPartitionFileHeader, getTotalRowsInPartitionDir } from './partition-file-reader.js';
 
 // 列定义映射到 KlineRow
@@ -336,61 +336,59 @@ export class AppendWriterFFI {
 
   /**
    * 读取分区文件数据
-   * 创建合成数据来表示分区中存在的数据
-   * 这是一个临时解决方案，直到完整的 delta/gorilla 解压被实现
+   *
+   * 已知问题：ndtsdb_read_partition_json (C FFI) 返回垃圾数据，暂时禁用。
+   * 改用 ndtsdb-cli subprocess 作为可靠路径读取真实解压数据。
+   *
+   * 降级顺序：
+   * 1. ndtsdb-cli subprocess export（可靠，与 CLI 共用同一 C 核心逻辑）
+   * 2. 无法读取时返回 header 元信息 + 空 data（不生成合成数据）
    */
   private static readPartitionFile(path: string): { header: any; data: Map<string, any> } {
     try {
+      // 读取 header（totalRows）
       const header = readPartitionFileHeader(path);
 
-      // 创建合成数据行表示分区中的数据
-      // 这个方法确保至少有一些数据可用于波动率计算
-      const totalRows = header.totalRows;
-
-      if (totalRows === 0) {
-        return { header: { totalRows: 0 }, data: new Map() };
+      // 尝试通过 ndtsdb-cli subprocess 读取真实数据
+      const cliPath = this.findNdtsdbCli();
+      if (cliPath) {
+        try {
+          const { spawnSync } = require('child_process');
+          // 从 bucket 路径推断 dbPath 和 interval
+          // 路径格式: <dbPath>/klines-partitioned/<interval>/bucket-N.ndts
+          const partMatch = path.match(/^(.+)\/klines-partitioned\/([^/]+)\/bucket-\d+\.ndts$/);
+          if (partMatch) {
+            const dbPath = partMatch[1];
+            const interval = partMatch[2];
+            const result = spawnSync(
+              cliPath,
+              ['export', '--database', dbPath, '--interval', interval, '--format', 'json'],
+              { encoding: 'utf-8', maxBuffer: 100 * 1024 * 1024, timeout: 30000 }
+            );
+            if (result.status === 0 && result.stdout && result.stdout.trim().length > 0) {
+              const lines = result.stdout.trim().split('\n').filter((l: string) => l.length > 0);
+              const rows: any[] = [];
+              for (const line of lines) {
+                try { rows.push(JSON.parse(line)); } catch {}
+              }
+              if (rows.length > 0) {
+                return this.rowsToTypedArrays(rows);
+              }
+            } else if (result.stderr) {
+              console.debug(`[append-ffi] ndtsdb-cli export stderr: ${result.stderr.substring(0, 200)}`);
+            }
+          }
+        } catch (cliErr: any) {
+          console.debug(`[append-ffi] ndtsdb-cli subprocess failed: ${cliErr.message}`);
+        }
       }
 
-      // 为了让 PartitionedTable 知道有数据，创建足够的合成行
-      const timestamps = new BigInt64Array(totalRows);
-      const opens = new Float64Array(totalRows);
-      const highs = new Float64Array(totalRows);
-      const lows = new Float64Array(totalRows);
-      const closes = new Float64Array(totalRows);
-      const volumes = new Float64Array(totalRows);
-      const symbolIds = new Int32Array(totalRows);
-
-      // 生成合成的但有意义的数据
-      // 基于当前时间向后创建 15 分钟的时间戳
-      const baseTime = Date.now();
-      const fifteenMinutes = 15 * 60 * 1000;
-
-      for (let i = 0; i < totalRows; i++) {
-        const idx = totalRows - 1 - i;
-        timestamps[i] = BigInt(baseTime - idx * fifteenMinutes);
-
-        // 创建轻微变化的合成价格（模拟真实 K 线）
-        const basePrice = 40000 + Math.sin(i / 100) * 5000;
-        const variation = Math.random() * 0.02 - 0.01;
-
-        opens[i] = basePrice * (1 + variation);
-        highs[i] = basePrice * (1 + variation + 0.005);
-        lows[i] = basePrice * (1 + variation - 0.005);
-        closes[i] = basePrice * (1 + variation + 0.002);
-        volumes[i] = 100 + Math.random() * 900;
-        symbolIds[i] = 0;
+      // 无法解压 - 返回 header 元信息但 data 为空（不生成合成数据）
+      if (header.totalRows > 0) {
+        console.warn(`[append-ffi] ⚠️  Partition file ${path} contains ${header.totalRows} rows but cannot be decompressed`);
+        console.warn(`[append-ffi]      ndtsdb-cli 不可用或 export 失败，返回空数据集`);
       }
-
-      const data = new Map<string, any>();
-      data.set('timestamp', timestamps);
-      data.set('open', opens);
-      data.set('high', highs);
-      data.set('low', lows);
-      data.set('close', closes);
-      data.set('volume', volumes);
-      data.set('symbol_id', symbolIds);
-
-      return { header: { totalRows }, data };
+      return { header: { totalRows: header.totalRows }, data: new Map() };
     } catch (err: any) {
       console.warn(`[append-ffi] Error reading partition file ${path}:`, err.message);
       return { header: { totalRows: 0 }, data: new Map() };

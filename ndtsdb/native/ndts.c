@@ -1226,16 +1226,52 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
     
     if (db->is_dir) {
         /* === 目录模式：读取所有分区文件（Phase 2，Bun版格式） === */
-        DIR* dir = opendir(path);
-        if (!dir) return db;  // 目录不存在，返回空DB（后续写入时创建）
-        
-        struct dirent* ent;
-        while ((ent = readdir(dir)) != NULL) {
-            // 只处理 .ndts 文件
-            if (!strstr(ent->d_name, ".ndts")) continue;
-            
-            char filepath[512];
-            snprintf(filepath, sizeof(filepath), "%s/%s", path, ent->d_name);
+        /* 支持两种结构：
+         *   1. 旧版：<db>/<symbol>__<interval>.ndts（第一层直接放 .ndts 文件）
+         *   2. 新版：<db>/klines-partitioned/<interval>/bucket-N.ndts（嵌套两层）
+         * 本函数递归扫描，两种结构都能正确加载。
+         */
+
+        /* 内联辅助：读取并加载一个 NDTS 文件到 g_symbols。
+         * 作为宏展开，避免函数指针或嵌套函数（MSVC 兼容性）。
+         * 该块通过 goto cleanup_file 进行错误跳出。
+         * 由于 C 不支持内部函数，我们在下面用一个 static 函数实现。
+         */
+
+        /* --- 递归扫描入口 --- */
+        /* 用栈（最多 64 个目录）实现深度优先遍历，避免递归调用 */
+        char* dir_stack[64];
+        int dir_stack_top = 0;
+        dir_stack[dir_stack_top++] = strdup(path);
+
+        while (dir_stack_top > 0) {
+            char* cur_dir = dir_stack[--dir_stack_top];
+            DIR* dir = opendir(cur_dir);
+            if (!dir) {
+                free(cur_dir);
+                continue;
+            }
+
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                /* 跳过 . 和 .. */
+                if (ent->d_name[0] == '.' && (ent->d_name[1] == '\0' ||
+                    (ent->d_name[1] == '.' && ent->d_name[2] == '\0'))) continue;
+
+                char filepath[512];
+                snprintf(filepath, sizeof(filepath), "%s/%s", cur_dir, ent->d_name);
+
+                /* 如果是目录，入栈继续扫描（klines-partitioned/<interval>/ 等） */
+                struct stat entry_stat;
+                if (stat(filepath, &entry_stat) == 0 && S_ISDIR(entry_stat.st_mode)) {
+                    if (dir_stack_top < 64) {
+                        dir_stack[dir_stack_top++] = strdup(filepath);
+                    }
+                    continue;
+                }
+
+                /* 只处理 .ndts 文件 */
+                if (!strstr(ent->d_name, ".ndts")) continue;
             
             FILE* f = fopen(filepath, "rb");
             if (!f) continue;
@@ -1310,11 +1346,20 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
                 }
             }
             
+            /* 检测压缩格式文件（旧版 TypeScript PartitionedTable 写入，格式与 C 不兼容）
+             * 特征：header JSON 包含 "enabled":true（来自 compression.enabled）
+             * 这类文件使用 gorilla/delta 压缩，C 读取器无法解压，跳过以避免挂起。
+             */
+            int is_compressed = (strstr(header_json, "\"enabled\":true") != NULL);
             free(header_json);
-            
+            if (is_compressed) {
+                fclose(f);
+                continue;  /* 跳过压缩格式文件，等待重写为 C 格式 */
+            }
+
             // 5. 跳到 chunks 起始位置（固定偏移4100 = 4096 + 4字节CRC）
             fseek(f, 4100, SEEK_SET);
-            
+
             // 6. 循环读取所有 chunks（带 snapshot 限制）
             while (!feof(f)) {
                 // 检查 snapshot 限制
@@ -1324,9 +1369,11 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
                         break;  // 超过 snapshot 限制，停止读取
                     }
                 }
-                
+
                 uint32_t row_count = 0;
                 if (fread(&row_count, 4, 1, f) != 1 || row_count == 0) break;
+                /* 安全上限：防止垃圾数据导致 OOM 挂起 */
+                if (row_count > 10000000) break;
                 
                 // 分配列缓冲区
                 int32_t* sym_ids = (int32_t*)malloc(row_count * 4);
@@ -1394,9 +1441,12 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
             fclose(f);
             
             // 注意：不释放 sym_dict/itv_dict，因为 g_symbols 引用了这些字符串
-        }
-        
-        closedir(dir);
+            } /* end while readdir */
+
+            closedir(dir);
+            free(cur_dir);
+        } /* end while dir_stack */
+
     } else {
         // 文件模式：读取旧格式（Phase 1已实现）
         FILE* f = fopen(path, "rb");
