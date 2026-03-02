@@ -108,7 +108,12 @@ export {
   StreamingRSI,
   StreamingMACD,
   StreamingBollingerBands,
+  StreamingATR,
+  StreamingOBV,
+  StreamingVWAP,
 } from './stream.js';
+export { NdtsVecDatabase } from './vector-ffi.js';
+export type { VecRecord, VecSearchResult } from './vector-ffi.js';
 export { SymbolTable } from './symbol.js';
 export { WAL } from './wal.js';
 

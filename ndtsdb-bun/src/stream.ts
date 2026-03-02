@@ -348,6 +348,127 @@ export class StreamingBollingerBands {
 }
 
 /**
+ * 流式 ATR（Average True Range）
+ * TR = max(high-low, |high-prevClose|, |low-prevClose|)
+ * ATR = EMA(TR, period)
+ */
+export class StreamingATR {
+  private period: number;
+  private alpha: number;
+  private prevClose: number | null = null;
+  private atr: number | null = null;
+  private trValues: number[] = [];
+
+  constructor(period = 14) {
+    this.period = period;
+    this.alpha = 2 / (period + 1);
+  }
+
+  add(high: number, low: number, close: number): number | null {
+    const tr = this.prevClose == null
+      ? high - low
+      : Math.max(high - low, Math.abs(high - this.prevClose), Math.abs(low - this.prevClose));
+
+    this.prevClose = close;
+
+    if (this.atr === null) {
+      this.trValues.push(tr);
+      if (this.trValues.length >= this.period) {
+        this.atr = this.trValues.reduce((a, b) => a + b, 0) / this.trValues.length;
+        this.trValues = [];
+      }
+    } else {
+      this.atr = this.alpha * tr + (1 - this.alpha) * this.atr;
+    }
+
+    return this.atr;
+  }
+
+  reset(): void {
+    this.prevClose = null;
+    this.atr = null;
+    this.trValues = [];
+  }
+
+  getValue(): number | null { return this.atr; }
+}
+
+/**
+ * 流式 OBV（On-Balance Volume）
+ * OBV 累计：close > prevClose → +volume；close < prevClose → -volume；相等 → 不变
+ */
+export class StreamingOBV {
+  private obv = 0;
+  private prevClose: number | null = null;
+
+  add(close: number, volume: number): number {
+    if (this.prevClose !== null) {
+      if (close > this.prevClose) this.obv += volume;
+      else if (close < this.prevClose) this.obv -= volume;
+      // close === prevClose: OBV unchanged
+    }
+    this.prevClose = close;
+    return this.obv;
+  }
+
+  reset(): void {
+    this.obv = 0;
+    this.prevClose = null;
+  }
+
+  getValue(): number { return this.obv; }
+}
+
+/**
+ * 流式 VWAP（Volume Weighted Average Price）
+ * 典型价格 = (high + low + close) / 3
+ * VWAP = Σ(典型价格 × 成交量) / Σ成交量
+ * 可选 period：不为 null 时使用滑动窗口（session VWAP = period=null）
+ */
+export class StreamingVWAP {
+  private period: number | null;
+  private window: Array<{ tp: number; vol: number }> = [];
+  private cumTPV = 0;
+  private cumVol = 0;
+
+  constructor(period: number | null = null) {
+    this.period = period;
+  }
+
+  add(high: number, low: number, close: number, volume: number): number | null {
+    const tp = (high + low + close) / 3;
+
+    if (this.period !== null) {
+      // 滑动窗口
+      this.window.push({ tp, vol: volume });
+      if (this.window.length > this.period) {
+        const evicted = this.window.shift()!;
+        this.cumTPV -= evicted.tp * evicted.vol;
+        this.cumVol -= evicted.vol;
+      }
+      this.cumTPV += tp * volume;
+      this.cumVol += volume;
+    } else {
+      // Session（累计，不滑动）
+      this.cumTPV += tp * volume;
+      this.cumVol += volume;
+    }
+
+    return this.cumVol === 0 ? null : this.cumTPV / this.cumVol;
+  }
+
+  reset(): void {
+    this.window = [];
+    this.cumTPV = 0;
+    this.cumVol = 0;
+  }
+
+  getValue(): number | null {
+    return this.cumVol === 0 ? null : this.cumTPV / this.cumVol;
+  }
+}
+
+/**
  * 多指标流式计算器（组合多个聚合器）
  */
 export class StreamingAggregator {

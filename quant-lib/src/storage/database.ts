@@ -1,37 +1,20 @@
 // ============================================================
-// ndtsdb 数据库管理 - 基于 PartitionedTable
+// ndtsdb 数据库管理 - 直接使用 NdtsDatabase FFI（C 库）
 //
-// 架构：每个 interval 一个 PartitionedTable，按 symbol_id 哈希分区
-// 文件数：300 个文件（3 intervals × 100 partitions）vs 旧架构 9000 个文件
+// 架构：直接调用 ndtsdb-bun 的 NdtsDatabase，以真实 symbol 名存储
+// 之前用 PartitionedTable 的方式会以 bucket-N 为 symbol 名存储，导致无法按 symbol 查询
 // ============================================================
 
-import { PartitionedTable, SymbolTable } from 'ndtsdb';
+import { openDatabase } from 'ndtsdb';
+import type { KlineRow, NdtsDatabase } from 'ndtsdb';
 import type { Kline } from '../types/kline';
 import type { DatabaseConfig } from '../types/common';
 import { existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
-
-const KLINE_COLUMNS = [
-  { name: 'symbol_id', type: 'int32' },
-  { name: 'timestamp', type: 'int64' },
-  { name: 'open', type: 'float64' },
-  { name: 'high', type: 'float64' },
-  { name: 'low', type: 'float64' },
-  { name: 'close', type: 'float64' },
-  { name: 'volume', type: 'float64' },
-  { name: 'quoteVolume', type: 'float64' },
-  { name: 'trades', type: 'int32' },
-  { name: 'takerBuyVolume', type: 'float64' },
-  { name: 'takerBuyQuoteVolume', type: 'float64' },
-] as const;
-
-const PARTITION_BUCKETS = 100; // 100 个分区
 
 export class KlineDatabase {
   private dataDir: string;
-  private symbols: SymbolTable;
-  private tables: Map<string, PartitionedTable> = new Map(); // interval -> PartitionedTable
   private config: DatabaseConfig;
+  private db: NdtsDatabase | null = null;
 
   constructor(config: DatabaseConfig | string = `${process.env.HOME}/.quant-lib/data/ndtsdb-v2`) {
     if (typeof config === 'string') {
@@ -50,56 +33,16 @@ export class KlineDatabase {
       this.dataDir = config.path || `${process.env.HOME}/.quant-lib/data/ndtsdb-v2`;
     }
 
-    // 确保目录存在
     if (!existsSync(this.dataDir)) {
       mkdirSync(this.dataDir, { recursive: true });
     }
-
-    // 初始化 SymbolTable
-    this.symbols = new SymbolTable(join(this.dataDir, 'symbols.json'));
-  }
-
-  /**
-   * 获取或创建 interval 的 PartitionedTable
-   */
-  private getTable(interval: string): PartitionedTable {
-    if (this.tables.has(interval)) {
-      return this.tables.get(interval)!;
-    }
-
-    const tablePath = join(this.dataDir, 'klines-partitioned', interval);
-    const table = new PartitionedTable(
-      tablePath,
-      KLINE_COLUMNS.map(c => ({ name: c.name, type: c.type })),
-      { type: 'hash', column: 'symbol_id', buckets: PARTITION_BUCKETS },
-      {
-        compression: {
-          enabled: true,
-          algorithms: {
-            symbol_id: 'delta',
-            timestamp: 'delta',
-            open: 'gorilla',
-            high: 'gorilla',
-            low: 'gorilla',
-            close: 'gorilla',
-            volume: 'gorilla',
-            quoteVolume: 'gorilla',
-            trades: 'delta',
-            takerBuyVolume: 'gorilla',
-            takerBuyQuoteVolume: 'gorilla',
-          },
-        },
-      }
-    );
-
-    this.tables.set(interval, table);
-    return table;
   }
 
   /**
    * 初始化数据库
    */
   async init(): Promise<void> {
+    this.db = openDatabase(this.dataDir);
     console.log('[KlineDatabase] 初始化完成:', this.dataDir);
   }
 
@@ -114,155 +57,108 @@ export class KlineDatabase {
    * 关闭数据库
    */
   async close(): Promise<void> {
-    this.symbols.save();
-    // PartitionedTable 会在内部自动管理 writer.close()
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
   }
 
   /**
-   * 插入 K线数据
+   * 插入 K线数据（按 symbol+interval 分组批量写入）
    */
   async insertKlines(klines: Kline[]): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized. Call init() first.');
     if (klines.length === 0) return;
 
-    // 按 interval 分组
-    const groups = new Map<string, Kline[]>();
-    for (const kline of klines) {
-      if (!groups.has(kline.interval)) {
-        groups.set(kline.interval, []);
+    // 按 (symbol, interval) 分组
+    const groups = new Map<string, { symbol: string; interval: string; rows: KlineRow[] }>();
+    for (const k of klines) {
+      const key = `${k.symbol}:${k.interval}`;
+      if (!groups.has(key)) {
+        groups.set(key, { symbol: k.symbol, interval: k.interval, rows: [] });
       }
-      groups.get(kline.interval)!.push(kline);
+      groups.get(key)!.rows.push({
+        timestamp: k.timestamp, // 保持调用方的单位（通常 ms）
+        open: k.open,
+        high: k.high,
+        low: k.low,
+        close: k.close,
+        volume: k.volume,
+        flags: 0,
+      });
     }
 
-    // 每个 interval 写入对应的 PartitionedTable
-    for (const [interval, groupKlines] of groups) {
-      const table = this.getTable(interval);
-
-      const rows = groupKlines.map(k => {
-        const symbolId = this.symbols.getOrCreateId(k.symbol);
-        return {
-          symbol_id: symbolId,
-          timestamp: BigInt(k.timestamp),
-          open: k.open,
-          high: k.high,
-          low: k.low,
-          close: k.close,
-          volume: k.volume,
-          quoteVolume: k.quoteVolume || 0,
-          trades: k.trades || 0,
-          takerBuyVolume: k.takerBuyVolume || 0,
-          takerBuyQuoteVolume: k.takerBuyQuoteVolume || 0,
-        };
-      });
-
-      table.append(rows);
+    for (const { symbol, interval, rows } of groups.values()) {
+      this.db.insertBatch(symbol, interval, rows);
     }
   }
 
   /**
-   * UPSERT K线数据（去重）
+   * UPSERT K线数据（去重，只写入比最新时间戳更新的数据）
    */
   async upsertKlines(klines: Kline[]): Promise<void> {
     if (klines.length === 0) return;
 
-    // 按 symbol + interval 分组
+    // 按 (symbol, interval) 分组
     const groups = new Map<string, Kline[]>();
-    for (const kline of klines) {
-      const key = `${kline.symbol}:${kline.interval}`;
-      if (!groups.has(key)) {
-        groups.set(key, []);
-      }
-      groups.get(key)!.push(kline);
+    for (const k of klines) {
+      const key = `${k.symbol}:${k.interval}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(k);
     }
 
-    for (const [key, groupKlines] of groups) {
-      const [symbol, interval] = key.split(':');
+    for (const [key, group] of groups) {
+      const colonIdx = key.indexOf(':');
+      const symbol = key.slice(0, colonIdx);
+      const interval = key.slice(colonIdx + 1);
 
-      // 排序 + 去重
-      const sorted = groupKlines
-        .slice()
-        .sort((a, b) => a.timestamp - b.timestamp);
-
+      const sorted = group.slice().sort((a, b) => a.timestamp - b.timestamp);
       const latest = await this.getLatestTimestamp(symbol, interval);
-      const filtered = latest == null
-        ? sorted
-        : sorted.filter(k => k.timestamp > latest);
+      const toInsert = latest == null ? sorted : sorted.filter(k => k.timestamp > latest);
 
-      if (filtered.length === 0) continue;
-
-      await this.insertKlines(filtered);
+      if (toInsert.length > 0) {
+        await this.insertKlines(toInsert);
+      }
     }
   }
 
   /**
-   * 获取最新 timestamp（高效实现，避免全表扫描）
-   * 
-   * 优化：使用 PartitionedTable.getMax() API + partitionHint
-   * - 哈希分区：只扫描 symbol_id 对应的 bucket（~100x 加速）
-   * - 时间分区：只扫描最新分区
+   * 获取最新 timestamp（O(n) 全表扫描，数据量小时可用）
    */
   async getLatestTimestamp(symbol: string, interval: string): Promise<number | null> {
-    const symbolId = this.symbols.getId(symbol);
-    if (symbolId === undefined) return null;
+    if (!this.db) return null;
 
-    const table = this.getTable(interval);
-
-    // 使用高效的 getMax API（传递 partitionHint 定位 bucket）
-    const maxTs = table.getMax(
-      'timestamp',
-      row => row.symbol_id === symbolId,
-      { symbol_id: symbolId } // partitionHint：直接定位到对应 bucket
-    );
-
-    if (maxTs === null) return null;
-
-    // 转换 bigint → number
-    return typeof maxTs === 'bigint' ? Number(maxTs) : maxTs;
+    const rows = this.db.queryAll();
+    let max: number | null = null;
+    for (const r of rows) {
+      if (r.symbol === symbol && r.interval === interval) {
+        if (max === null || r.timestamp > max) max = r.timestamp;
+      }
+    }
+    return max;
   }
 
   /**
-   * 别名：getMaxTimestamp
+   * 别名
    */
   async getMaxTimestamp(symbol: string, interval: string): Promise<number | null> {
     return this.getLatestTimestamp(symbol, interval);
   }
 
   /**
-   * 获取最新一根 K线（优化：利用 reverse + limit=1）
+   * 获取最新一根 K线
    */
   async getLatestKline(symbol: string, interval: string): Promise<Kline | null> {
-    const symbolId = this.symbols.getId(symbol);
-    if (symbolId === undefined) return null;
+    if (!this.db) return null;
 
-    const table = this.getTable(interval);
-    
-    // 优化：倒序扫描 + limit=1（只查一条）
-    const rows = table.query(
-      row => row.symbol_id === symbolId,
-      { reverse: true, limit: 1 }
-    );
-
-    if (rows.length === 0) return null;
-
-    const latest = rows[0];
-    const [baseCurrency, quoteCurrency] = symbol.split('/');
-    
-    return {
-      symbol,
-      exchange: 'OTHER',
-      baseCurrency,
-      quoteCurrency,
-      interval,
-      timestamp: Number(latest.timestamp),
-      open: Number(latest.open),
-      high: Number(latest.high),
-      low: Number(latest.low),
-      close: Number(latest.close),
-      volume: Number(latest.volume),
-      quoteVolume: Number(latest.quoteVolume ?? 0),
-      trades: Number(latest.trades ?? 0),
-      takerBuyVolume: Number(latest.takerBuyVolume ?? 0),
-      takerBuyQuoteVolume: Number(latest.takerBuyQuoteVolume ?? 0),
-    } as any;
+    const rows = this.db.queryAll();
+    let latest: KlineRow | null = null;
+    for (const r of rows) {
+      if (r.symbol === symbol && r.interval === interval) {
+        if (!latest || r.timestamp > latest.timestamp) latest = r;
+      }
+    }
+    return latest ? rowToKline(latest, symbol, interval) : null;
   }
 
   /**
@@ -275,55 +171,21 @@ export class KlineDatabase {
     endTime?: number;
     limit?: number;
   }): Promise<Kline[]> {
-    const symbolId = this.symbols.getId(options.symbol);
-    if (symbolId === undefined) return [];
+    if (!this.db) throw new Error('Database not initialized. Call init() first.');
 
-    const table = this.getTable(options.interval);
-
-    // 构建过滤条件
-    const startTs = options.startTime ? BigInt(options.startTime) : undefined;
-    const endTs = options.endTime ? BigInt(options.endTime) : undefined;
-
-    const rows = table.query(
-      row => {
-        if (row.symbol_id !== symbolId) return false;
-        if (startTs && row.timestamp < startTs) return false;
-        if (endTs && row.timestamp > endTs) return false;
-        return true;
-      },
-      { min: startTs, max: endTs } // 优化分区扫描（仅用于时间分区，哈希分区会忽略）
+    const rows = this.db.queryAll();
+    let filtered = rows.filter(r =>
+      r.symbol === options.symbol &&
+      r.interval === options.interval &&
+      (options.startTime == null || r.timestamp >= options.startTime) &&
+      (options.endTime == null || r.timestamp <= options.endTime)
     );
 
-    // 转换为 Kline
-    const klines: Kline[] = rows.map(row => {
-      const [baseCurrency, quoteCurrency] = options.symbol.split('/');
-      return {
-        symbol: options.symbol,
-        exchange: 'OTHER',
-        baseCurrency,
-        quoteCurrency,
-        interval: options.interval,
-        timestamp: Number(row.timestamp),
-        open: Number(row.open),
-        high: Number(row.high),
-        low: Number(row.low),
-        close: Number(row.close),
-        volume: Number(row.volume),
-        quoteVolume: Number(row.quoteVolume ?? 0),
-        trades: Number(row.trades ?? 0),
-        takerBuyVolume: Number(row.takerBuyVolume ?? 0),
-        takerBuyQuoteVolume: Number(row.takerBuyQuoteVolume ?? 0),
-      } as any;
-    });
+    filtered.sort((a, b) => a.timestamp - b.timestamp);
 
-    // 排序 + limit
-    klines.sort((a, b) => a.timestamp - b.timestamp);
+    if (options.limit) filtered = filtered.slice(0, options.limit);
 
-    if (options.limit) {
-      return klines.slice(0, options.limit);
-    }
-
-    return klines;
+    return filtered.map(r => rowToKline(r, options.symbol, options.interval));
   }
 
   /**
@@ -335,22 +197,40 @@ export class KlineDatabase {
     symbols: string[];
     intervals: string[];
   }> {
-    const symbols = this.symbols.getAllSymbols();
-    const intervals = Array.from(this.tables.keys());
+    if (!this.db) return { totalSymbols: 0, totalBars: 0, symbols: [], intervals: [] };
 
-    let totalBars = 0;
-    for (const table of this.tables.values()) {
-      const partitions = (table as any).partitions as Map<string, any>;
-      for (const meta of partitions.values()) {
-        totalBars += meta.rows;
-      }
-    }
+    const rows = this.db.queryAll();
+    const symbols = new Set(rows.map(r => r.symbol || ''));
+    const intervals = new Set(rows.map(r => r.interval || ''));
 
     return {
-      totalSymbols: symbols.length,
-      totalBars,
-      symbols,
-      intervals,
+      totalSymbols: symbols.size,
+      totalBars: rows.length,
+      symbols: [...symbols].filter(Boolean),
+      intervals: [...intervals].filter(Boolean),
     };
   }
+}
+
+function rowToKline(r: KlineRow, symbol: string, interval: string): Kline {
+  const parts = symbol.split('/');
+  const baseCurrency = parts[0] || symbol;
+  const quoteCurrency = parts[1] || 'USDT';
+  return {
+    symbol,
+    exchange: 'OTHER',
+    baseCurrency,
+    quoteCurrency,
+    interval,
+    timestamp: r.timestamp,
+    open: Number(r.open),
+    high: Number(r.high),
+    low: Number(r.low),
+    close: Number(r.close),
+    volume: Number(r.volume),
+    quoteVolume: 0,
+    trades: 0,
+    takerBuyVolume: 0,
+    takerBuyQuoteVolume: 0,
+  } as any;
 }

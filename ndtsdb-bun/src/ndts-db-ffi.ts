@@ -315,13 +315,96 @@ export class NdtsDatabase {
   
   clear(symbol: string, interval: string): void {
     if (!lib || !this.handle) throw new Error('Database not open');
-    
+
     const symBuf = Buffer.from(symbol + '\0');
     const intBuf = Buffer.from(interval + '\0');
-    
+
     lib.symbols.ndtsdb_clear(this.handle, ptr(symBuf), ptr(intBuf));
   }
-  
+
+  // ── #83 Delete / Tombstone ───────────────────────────────────────────
+  // C 层约定：volume < 0 的行为 tombstone（软删除）。
+  // queryAll() 仍会返回这些行；上层过滤或使用下方 queryFiltered/queryTimeRange。
+
+  delete(symbol: string, interval: string, timestamp: number): void {
+    this.insert(symbol, interval, {
+      timestamp, open: 0, high: 0, low: 0, close: 0, volume: -1, flags: 0,
+    });
+  }
+
+  deleteRange(symbol: string, interval: string, fromMs: number, toMs: number): void {
+    const rows = this.queryAll().filter(r =>
+      r.symbol === symbol && r.interval === interval &&
+      r.timestamp >= fromMs && r.timestamp <= toMs &&
+      (r.volume ?? 0) >= 0  // skip existing tombstones
+    );
+    for (const r of rows) {
+      this.delete(symbol, interval, r.timestamp);
+    }
+  }
+
+  // ── #84 Filtered / TimeRange queries (JS-side, tombstones excluded) ─
+
+  queryFiltered(symbols: string[], interval?: string): KlineRow[] {
+    const symSet = new Set(symbols);
+    return this.queryAll().filter(r =>
+      symSet.has(r.symbol) &&
+      (interval == null || r.interval === interval) &&
+      (r.volume ?? 0) >= 0
+    );
+  }
+
+  queryTimeRange(fromMs: number, toMs: number, symbol?: string, interval?: string): KlineRow[] {
+    return this.queryAll().filter(r =>
+      r.timestamp >= fromMs && r.timestamp <= toMs &&
+      (symbol == null || r.symbol === symbol) &&
+      (interval == null || r.interval === interval) &&
+      (r.volume ?? 0) >= 0
+    );
+  }
+
+  queryFilteredTime(symbols: string[], fromMs: number, toMs: number, interval?: string): KlineRow[] {
+    const symSet = new Set(symbols);
+    return this.queryAll().filter(r =>
+      symSet.has(r.symbol) &&
+      r.timestamp >= fromMs && r.timestamp <= toMs &&
+      (interval == null || r.interval === interval) &&
+      (r.volume ?? 0) >= 0
+    );
+  }
+
+  // ── #87 Convenience: head / tail / count ─────────────────────────────
+
+  head(n: number, symbol?: string, interval?: string): KlineRow[] {
+    const rows = this.queryAll()
+      .filter(r =>
+        (symbol == null || r.symbol === symbol) &&
+        (interval == null || r.interval === interval) &&
+        (r.volume ?? 0) >= 0
+      )
+      .sort((a, b) => a.timestamp - b.timestamp);
+    return rows.slice(0, n);
+  }
+
+  tail(n: number, symbol?: string, interval?: string): KlineRow[] {
+    const rows = this.queryAll()
+      .filter(r =>
+        (symbol == null || r.symbol === symbol) &&
+        (interval == null || r.interval === interval) &&
+        (r.volume ?? 0) >= 0
+      )
+      .sort((a, b) => a.timestamp - b.timestamp);
+    return rows.slice(-n);
+  }
+
+  count(symbol?: string, interval?: string): number {
+    return this.queryAll().filter(r =>
+      (symbol == null || r.symbol === symbol) &&
+      (interval == null || r.interval === interval) &&
+      (r.volume ?? 0) >= 0
+    ).length;
+  }
+
   queryAll(): KlineRow[] {
     if (!lib || !this.handle) throw new Error('Database not open');
 
