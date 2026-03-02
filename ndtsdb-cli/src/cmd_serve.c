@@ -864,10 +864,10 @@ static void handle_http_request(int client_fd, const char *request, const char *
                     
                     // 构建JSON响应
                     char json_buf[65536] = {0};
-                    strcat(json_buf, "[");
+                    int jlen = 0;
+                    jlen += snprintf(json_buf + jlen, sizeof(json_buf) - jlen, "[");
                     for (int i = 0; i < return_count; i++) {
-                        char item[512];
-                        snprintf(item, sizeof(item), 
+                        jlen += snprintf(json_buf + jlen, sizeof(json_buf) - jlen,
                             "%s{\"agent_id\":\"%s\",\"type\":\"%s\",\"similarity\":%.6f,\"timestamp\":%ld,\"confidence\":%.4f}",
                             i > 0 ? "," : "",
                             matches[i].agent_id,
@@ -875,9 +875,9 @@ static void handle_http_request(int client_fd, const char *request, const char *
                             matches[i].similarity,
                             matches[i].timestamp,
                             matches[i].confidence);
-                        strcat(json_buf, item);
+                        if (jlen >= (int)sizeof(json_buf) - 2) break;
                     }
-                    strcat(json_buf, "]");
+                    snprintf(json_buf + jlen, sizeof(json_buf) - jlen, "]");
                     
                     strncpy(response_body, json_buf, sizeof(response_body) - 1);
                     response_body[sizeof(response_body) - 1] = '\0';
@@ -1008,18 +1008,18 @@ static void handle_http_request(int client_fd, const char *request, const char *
                 
                 // 构建JSON响应
                 char json_buf[32768] = {0};
-                strcat(json_buf, "[");
+                int jlen = 0;
+                jlen += snprintf(json_buf + jlen, sizeof(json_buf) - jlen, "[");
                 for (int i = 0; i < stat_count; i++) {
-                    char item[256];
-                    snprintf(item, sizeof(item), 
+                    jlen += snprintf(json_buf + jlen, sizeof(json_buf) - jlen,
                         "%s{\"symbol\":\"%s\",\"interval\":\"%s\",\"count\":%d}",
                         i > 0 ? "," : "",
                         stats[i].symbol,
                         stats[i].interval,
                         stats[i].count);
-                    strcat(json_buf, item);
+                    if (jlen >= (int)sizeof(json_buf) - 2) break;
                 }
-                strcat(json_buf, "]");
+                snprintf(json_buf + jlen, sizeof(json_buf) - jlen, "]");
                 
                 strncpy(response_body, json_buf, sizeof(response_body) - 1);
                 response_body[sizeof(response_body) - 1] = '\0';

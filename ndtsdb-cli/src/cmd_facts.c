@@ -633,7 +633,7 @@ static int cmd_facts_list(int argc, char **argv) {
         char preview[81] = "";
         strncpy(preview, text_val, 80);
         preview[80] = '\0';
-        if (strlen(text_val) > 80) strcat(preview, "…");
+        if (strlen(text_val) > 80) { preview[77] = '.'; preview[78] = '.'; preview[79] = '.'; preview[80] = '\0'; }
 
         printf("[%d] ts=%lld agent=%s type=%s", ++count, ts, agent_val, type_val);
         if (key_val[0]) printf(" key=%s", key_val);

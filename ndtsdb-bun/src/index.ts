@@ -1,0 +1,27 @@
+/**
+ * ndtsdb-bun/src/index.ts — Public API
+ *
+ * Main entry point for the ndtsdb TypeScript/Bun FFI package.
+ */
+
+// ─── Core database ───────────────────────────────────────────────────────────
+export { NdtsDatabase, openDatabase } from './ndts-db.ts';
+export type { KlineRow, NDTSRow, SymbolInfo } from './ndts-db.ts';
+
+// ─── AppendWriter (single-file/path, columnar read) ──────────────────────────
+export { AppendWriter } from './append-ffi.ts';
+export type { ColumnDef as AppendColumnDef, ReadAllResult } from './append-ffi.ts';
+
+// ─── PartitionedTable (multi-symbol, time-partitioned) ───────────────────────
+export { PartitionedTable } from './partition.ts';
+export type {
+  ColumnDef,
+  PartitionStrategy,
+  TimePartitionStrategy,
+  QueryOptions,
+  TimeRange,
+} from './partition.ts';
+
+// ─── SQL ─────────────────────────────────────────────────────────────────────
+export { parseSQL, SQLExecutor, ColumnarTable } from './sql.ts';
+export type { ParsedSQL, SelectData, QueryResult } from './sql.ts';
