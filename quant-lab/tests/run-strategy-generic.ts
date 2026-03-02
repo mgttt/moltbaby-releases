@@ -137,8 +137,14 @@ async function main() {
   logger.info('   通用策略启动器');
   logger.info('======================================================================\n');
 
-  // 检查 DRY_RUN 环境变量
-  const isDryRun = process.env.DRY_RUN !== 'false';
+  // 改进逻辑：--live 应该自动启用实盘，不要依赖环境变量
+  // 只有在 --live 未指定时，才看 DRY_RUN 环境变量
+  const isDryRun = liveMode ? false : (process.env.DRY_RUN !== 'false');
+
+  // 防护：如果用户仍然设置了 DRY_RUN=true 并用 --live，给予警告
+  if (liveMode && process.env.DRY_RUN === 'true') {
+    logger.warn('⚠️  [警告] --live 模式覆盖 DRY_RUN=true，强制切换到实盘');
+  }
 
   logger.info('[配置]', {
     strategyFile,
@@ -149,19 +155,6 @@ async function main() {
     demoMode,
     isDryRun,
   });
-
-  // P0修复：fail-fast检查，防止误启纸盘冒充实盘
-  if (liveMode && isDryRun) {
-    const allowPaperOnLive = process.env.ALLOW_PAPER_ON_LIVE === 'true';
-    if (!allowPaperOnLive) {
-      logger.error('❌ [P0 fail-fast] --live 模式但 DRY_RUN=true（纸盘）');
-      logger.error('   如确实需要在live模式使用纸盘，请设置环境变量:');
-      logger.error('   ALLOW_PAPER_ON_LIVE=true bun tests/run-strategy-generic.ts ...');
-      logger.error('   否则请设置 DRY_RUN=false 启用真实订单流');
-      process.exit(1);
-    }
-    logger.warn('⚠️  [ALLOW_PAPER_ON_LIVE] --live 模式但 DRY_RUN=true，将使用 Paper Trade');
-  }
 
   if (liveMode && !isDryRun) {
     logger.warn('🔴 [实盘模式] 连接真实订单流！');

@@ -23,4 +23,7 @@ module.exports = {
 
   // 紧急倾向控制
   emergencyLean: 'manual',
+
+  // P0修复：生产场景允许关闭追涨追跌拦截（短仓防止追跌停摆）
+  disableAutoRecenterBlockade: true,
 };
