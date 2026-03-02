@@ -132,6 +132,29 @@ uninstall:
 	@rm -f $(BINDIR)/ndtsdb-cli
 	@echo "✓ Removed: $(BINDIR)/ndtsdb-cli"
 
+# 生成 SQL 引擎 C 头文件（从 src/sql_engine.js → src/sql_engine_js.h）
+gen-sql-header:
+	@echo "=== Generating sql_engine_js.h from src/sql_engine.js ==="
+	@python3 -c "
+import sys
+data = open('ndtsdb-cli/src/sql_engine.js', 'rb').read()
+lines = ['/* AUTO-GENERATED — do not edit by hand. Run: make gen-sql-header */\n',
+         '/* Source: src/sql_engine.js */\n',
+         'static const char sql_engine_js[] = {\n']
+row = []
+for i, b in enumerate(data):
+    row.append(f'0x{b:02x}')
+    if len(row) == 16:
+        lines.append('    ' + ','.join(row) + ',\n')
+        row = []
+if row:
+    lines.append('    ' + ','.join(row) + ',\n')
+lines.append('    0x00\n};\n')
+lines.append(f'static const size_t sql_engine_js_len = {len(data)};\n')
+open('ndtsdb-cli/src/sql_engine_js.h', 'w').writelines(lines)
+print(f'✓ sql_engine_js.h ({len(data)} bytes → ndtsdb-cli/src/sql_engine_js.h)')
+"
+
 # 清理
 clean:
 	@rm -rf build/*.o
@@ -148,12 +171,13 @@ help:
 	@echo "  make install      → 安装 ndtsdb-cli.com 到 ~/.local/bin"
 	@echo "  make install PREFIX=/usr/local → 安装到 /usr/local/bin"
 	@echo "  make clean        → 清理构建产物"
+	@echo "  make gen-sql-header → 从 src/sql_engine.js 重新生成 sql_engine_js.h"
 	@echo "  make help         → 显示此帮助"
 	@echo ""
 	@echo "前提: podman image localhost/cosmocc:latest 已就绪"
 	@echo "      如需重建镜像: podman build -f podman/ndtsdb-cli-cosmo/Dockerfile -t cosmocc:latest ."
 
-.PHONY: all cosmo cosmo-docker install uninstall clean help
+.PHONY: all cosmo cosmo-docker install uninstall clean help gen-sql-header
 
 # ============================================================================
 # [已归档] Legacy 构建目标 (gcc/zig) —— 已禁用，仅作历史参考
