@@ -123,19 +123,12 @@ export class KlineDatabase {
   }
 
   /**
-   * 获取最新 timestamp（O(n) 全表扫描，数据量小时可用）
+   * 获取最新 timestamp（直接调用 C 层索引，O(1)）
    */
   async getLatestTimestamp(symbol: string, interval: string): Promise<number | null> {
     if (!this.db) return null;
-
-    const rows = this.db.queryAll();
-    let max: number | null = null;
-    for (const r of rows) {
-      if (r.symbol === symbol && r.interval === interval) {
-        if (max === null || r.timestamp > max) max = r.timestamp;
-      }
-    }
-    return max;
+    const ts = this.db.getLatestTimestamp(symbol, interval);
+    return ts === -1n ? null : Number(ts);
   }
 
   /**
@@ -151,14 +144,14 @@ export class KlineDatabase {
   async getLatestKline(symbol: string, interval: string): Promise<Kline | null> {
     if (!this.db) return null;
 
+    const maxTs = await this.getLatestTimestamp(symbol, interval);
+    if (maxTs === null) return null;
+
     const rows = this.db.queryAll();
-    let latest: KlineRow | null = null;
-    for (const r of rows) {
-      if (r.symbol === symbol && r.interval === interval) {
-        if (!latest || r.timestamp > latest.timestamp) latest = r;
-      }
-    }
-    return latest ? rowToKline(latest, symbol, interval) : null;
+    const r = rows.find(r =>
+      r.symbol === symbol && r.interval === interval && Number(r.timestamp) === maxTs
+    );
+    return r ? rowToKline(r, symbol, interval) : null;
   }
 
   /**
