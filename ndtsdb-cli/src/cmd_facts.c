@@ -18,6 +18,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <time.h>
+#include <dirent.h>
 #include "../../ndtsdb-lib/native/ndtsdb.h"
 #include "../../ndtsdb-lib/native/ndtsdb_vec.h"
 #include "ndtsdb_lock.h"
@@ -46,51 +47,86 @@ void cache_clear(void) {
 
 void cache_add(const VecRecord* rec, const char* scope) {
     if (!g_vec_cache.items) cache_init();
+    /* Fix: cache_init may fail (calloc returns NULL) — guard before any use */
+    if (!g_vec_cache.items) return;
+
     if (g_vec_cache.count >= g_vec_cache.capacity) {
-        // 扩容
+        /* 扩容 */
         int new_cap = g_vec_cache.capacity * 2;
         CachedVector* new_items = (CachedVector*)realloc(g_vec_cache.items, new_cap * sizeof(CachedVector));
         if (!new_items) return;
         g_vec_cache.items = new_items;
         g_vec_cache.capacity = new_cap;
     }
-    CachedVector* cv = &g_vec_cache.items[g_vec_cache.count++];
+
+    /* Fix: allocate embedding BEFORE incrementing count so the slot is only
+     * committed to the cache on success.  If malloc fails we simply drop the
+     * record rather than leaving a NULL-embedding entry that would crash
+     * later cosine-similarity loops.                                         */
+    CachedVector* cv = &g_vec_cache.items[g_vec_cache.count]; /* not yet committed */
     cv->dim = rec->embedding_dim;
     cv->ts = rec->timestamp;
     strncpy(cv->agent_id, rec->agent_id, 31); cv->agent_id[31] = '\0';
     strncpy(cv->type, rec->type, 15); cv->type[15] = '\0';
-    strncpy(cv->scope, scope, 63); cv->scope[63] = '\0';
+    strncpy(cv->scope, scope ? scope : "", 63); cv->scope[63] = '\0';
     cv->confidence = rec->confidence;
     cv->embedding = (float*)malloc(rec->embedding_dim * sizeof(float));
-    if (cv->embedding) {
-        memcpy(cv->embedding, rec->embedding, rec->embedding_dim * sizeof(float));
-    }
+    if (!cv->embedding) return; /* OOM — discard; count stays unchanged */
+    memcpy(cv->embedding, rec->embedding, rec->embedding_dim * sizeof(float));
+    g_vec_cache.count++; /* commit only after successful allocation */
 }
 
-// 加载所有 .ndtv 到缓存
+/* 加载所有 .ndtv 到缓存 */
 void cache_load_all(const char* database) {
+    /* Fix: NULL database would crash both strcmp and strncpy below */
+    if (!database || !*database) return;
     if (g_vec_cache.loaded && strcmp(g_vec_cache.db_path, database) == 0) return;
-    
+
     cache_clear();
     strncpy(g_vec_cache.db_path, database, 511);
     g_vec_cache.db_path[511] = '\0';
-    
+
     NDTSDB* db = ndtsdb_open(database);
     if (!db) return;
-    
-    // 枚举所有 scope/type 分区
-    char syms[256][32], itvs[256][16];
-    int n = ndtsdb_list_symbols(db, syms, itvs, 256);
-    
-    for (int s = 0; s < n; s++) {
-        VecQueryResult* vr = ndtsdb_vec_query(db, syms[s], itvs[s]);
-        if (!vr) continue;
-        for (uint32_t i = 0; i < vr->count; i++) {
-            cache_add(&vr->records[i], syms[s]);
+
+    /* Enumerate .ndtv files directly — ndtsdb_list_symbols() returns kline
+     * symbol/interval pairs, which are empty when only vector facts exist.
+     * Vector files are named "{scope}__{type}.ndtv"; parse them to get
+     * the correct scope and type for ndtsdb_vec_query(). */
+    DIR *d = opendir(database);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            const char *name = ent->d_name;
+            size_t len = strlen(name);
+            if (len < 7 || strcmp(name + len - 5, ".ndtv") != 0) continue;
+
+            /* Parse "{scope}__{type}.ndtv" */
+            char scope[64] = "shared", type[32] = "fact";
+            const char *sep = strstr(name, "__");
+            if (sep) {
+                size_t sl = sep - name;
+                if (sl > 0 && sl < sizeof(scope)) {
+                    strncpy(scope, name, sl);
+                    scope[sl] = '\0';
+                }
+                size_t tl = len - 5 - (sep - name) - 2; /* subtract ".ndtv" and "__" */
+                if (tl > 0 && tl < sizeof(type)) {
+                    strncpy(type, sep + 2, tl);
+                    type[tl] = '\0';
+                }
+            }
+
+            VecQueryResult* vr = ndtsdb_vec_query(db, scope, type);
+            if (!vr) continue;
+            for (uint32_t i = 0; i < vr->count; i++) {
+                cache_add(&vr->records[i], scope);
+            }
+            ndtsdb_vec_free_result(vr);
         }
-        ndtsdb_vec_free_result(vr);
+        closedir(d);
     }
-    
+
     ndtsdb_close(db);
     g_vec_cache.loaded = true;
 }
@@ -576,7 +612,21 @@ static int cmd_facts_list(int argc, char **argv) {
 
     FILE *fp = fopen(path, "r");
     if (!fp) {
-        printf("No facts found (sidecar missing: %s)\n", path);
+        // Sidecar missing: fall back to listing embedding-only records from vector cache
+        cache_load_all(database);
+        if (g_vec_cache.count == 0) {
+            printf("No facts found (sidecar missing: %s)\n", path);
+            return 0;
+        }
+        int shown = 0;
+        for (int i = 0; i < g_vec_cache.count; i++) {
+            CachedVector *cv = &g_vec_cache.items[i];
+            if (agent_filter && strcmp(cv->scope, agent_filter) != 0) continue;
+            printf("{\"ts\":%lld,\"agent_id\":\"%s\",\"type\":\"%s\",\"dim\":%d,\"text\":\"\"}\n",
+                   (long long)cv->ts, cv->agent_id, cv->type, cv->dim);
+            shown++;
+        }
+        printf("Total: %d facts (embedding-only, no text sidecar)\n", shown);
         return 0;
     }
 
@@ -739,7 +789,13 @@ static int cmd_facts_search(int argc, char **argv) {
         if (query_dim == 0) { fprintf(stderr, "Error: empty query vector\n"); return 1; }
     }
 
-    // 打开 ndtsdb，扫描所有 scope/type 分区
+    // Load vector cache FIRST (opens+closes its own db handle, releases flock)
+    // Must happen before ndtsdb_open() to avoid double-LOCK_EX on the same .lock file:
+    // flock treats each open() fd as independent — two LOCK_EX|LOCK_NB from the same
+    // process on the same file will deadlock the second call with EWOULDBLOCK.
+    cache_load_all(database);
+
+    // Now acquire the outer lock and open db (for ndtsdb_close at end)
     int lock_fd = ndtsdb_lock_acquire(database, false);
     if (lock_fd < 0) { fprintf(stderr, "Error: cannot acquire lock\n"); return 1; }
 
@@ -749,9 +805,6 @@ static int cmd_facts_search(int argc, char **argv) {
         fprintf(stderr, "Error: cannot open database: %s\n", database);
         return 1;
     }
-
-    // 使用内存缓存进行搜索
-    cache_load_all(database);
     
     Hit hits[4096];
     int hit_count = 0;
@@ -810,7 +863,7 @@ static int cmd_facts_search(int argc, char **argv) {
             char text_val[MAX_TEXT] = "";
             text_index_find(database, hits[i].ts, text_val, sizeof(text_val));
 
-            printf("[%d] %.4f  %s / %s  (ts=%lld)\n",
+            printf("[%d] sim=%.4f  %s / %s  (ts=%lld)\n",
                    i+1, hits[i].sim, hits[i].agent_id, hits[i].type, hits[i].ts);
             if (text_val[0]) printf("    %s\n", text_val);
             printf("\n");

@@ -420,64 +420,59 @@ int cmd_write_json(int argc, char *argv[]) {
             int64_t timestamp = 0;
             double open = 0, high = 0, low = 0, close = 0, volume = 0;
             
-            // 单次扫描解析（极速版 - 假设字段顺序固定）
-            char *p = line;
-            // 跳过 {"symbol":"
-            while (*p && *p != '"') p++; p++; 
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != '"') p++; p++;
-            int i = 0; while (*p && *p != '"' && i < 63) symbol[i++] = *p++;
-            symbol[i] = '\0'; 
-            
-            // 跳过 ","interval":"
-            while (*p && *p != '"') p++; p++; 
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != '"') p++; p++;
-            i = 0; while (*p && *p != '"' && i < 15) interval[i++] = *p++;
-            interval[i] = '\0';
-            
-            // 跳过 ","timestamp":
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != ':') p++; p++;
-            while (*p == ' ' || *p == '\t') p++;  // 跳过可能的空格
-            timestamp = 0; while (*p >= '0' && *p <= '9') timestamp = timestamp * 10 + (*p++ - '0');
-            
-            // 跳过 ","open":
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != ':') p++; p++;
-            open = strtod(p, &p);
-            
-            // 跳过 ","high":
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != ':') p++; p++;
-            high = strtod(p, &p);
-            
-            // 跳过 ","low":
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != ':') p++; p++;
-            low = strtod(p, &p);
-            
-            // 跳过 ","close":
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != ':') p++; p++;
-            close = strtod(p, &p);
-            
-            // 跳过 ","volume":
-            while (*p && *p != '"') p++; p++;
-            while (*p && *p != ':') p++; p++;
-            volume = strtod(p, &p);
+            // 使用 json_find_key() 按 key 名查找字段（字段顺序无关）
+            {
+                const char *v;
+                v = json_find_key(line, "symbol");
+                if (!v) { errors++; continue; }
+                json_get_string(v, symbol, sizeof(symbol));
+
+                v = json_find_key(line, "interval");
+                if (!v) { errors++; continue; }
+                json_get_string(v, interval, sizeof(interval));
+
+                v = json_find_key(line, "timestamp");
+                if (!v) { errors++; continue; }  /* missing timestamp — skip row */
+                timestamp = json_get_int64(v);
+
+                v = json_find_key(line, "open");
+                open = json_get_double(v);
+
+                v = json_find_key(line, "high");
+                high = json_get_double(v);
+
+                v = json_find_key(line, "low");
+                low = json_get_double(v);
+
+                v = json_find_key(line, "close");
+                close = json_get_double(v);
+
+                v = json_find_key(line, "volume");
+                volume = json_get_double(v);
+            }
             
             // delete模式：设置tombstone标志
             if (delete_mode) {
                 volume = -1.0;
             }
             
-            // 验证必要字段
+            /* 验证必要字段 */
             if (symbol[0] == '\0' || interval[0] == '\0' || timestamp == 0) {
                 errors++;
                 continue;
             }
+            /* Fix: guard against symbol/interval that were silently truncated by
+             * json_get_string — a 63-char symbol means the field may be longer
+             * than the 64-byte buffer and the key would be stored incorrectly.  */
+            if (strnlen(symbol, sizeof(symbol)) >= sizeof(symbol) - 1 ||
+                strnlen(interval, sizeof(interval)) >= sizeof(interval) - 1) {
+                fprintf(stderr, "Warning: symbol or interval too long (>63 chars), skipping row\n");
+                errors++;
+                continue;
+            }
+            /* Note: no ms-epoch range check here — synthetic/test data may use
+             * small integer timestamps (0, 1, 2…).  Callers are responsible for
+             * passing valid epoch-millisecond values in production use. */
             
             // UPSERT 模式：延迟加载现有数据
             if (upsert_mode && existing_count == 0 && upsert_symbol[0] == '\0') {
@@ -706,123 +701,49 @@ int cmd_write_vector(int argc, char *argv[]) {
     char line[8192];
     int count = 0;
     int errors = 0;
-    
+
+    /* Fix: write-vector previously used a fragile strstr-based hand-rolled
+     * parser that skipped escaped quotes, ignored field-order sensitivity, and
+     * had no NULL-checks for atoll()/atof() on missing colons.
+     * Replaced with parse_vector_record() which uses json_find_key() — the
+     * same robust parser already used by the write-json command.            */
     while (fgets(line, sizeof(line), stdin)) {
-        // 去掉末尾换行
+        /* strip trailing newline/CR */
         size_t len = strlen(line);
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
             line[--len] = '\0';
-        }
-        
         if (len == 0) continue;
-        
-        // 解析向量 JSON
+
         VecRecord vrec;
         memset(&vrec, 0, sizeof(vrec));
-        
-        // 解析 agent_id
-        const char *p = strstr(line, "\"agent_id\"");
-        if (p) {
-            p = strstr(p, ":");
-            if (p) {
-                p++;
-                while (*p == ' ' || *p == '\t') p++;
-                if (*p == '"') {
-                    p++;
-                    int i = 0;
-                    while (p && *p && *p != '"' && i < 31) vrec.agent_id[i++] = *p++;
-                    vrec.agent_id[i] = '\0';
-                }
-            }
+
+        if (!parse_vector_record(line, &vrec)) {
+            fprintf(stderr, "Warning: failed to parse vector record: %.80s\n", line);
+            errors++;
+            if (vrec.embedding) free(vrec.embedding);
+            continue;
         }
-        
-        // 解析 type
-        p = strstr(line, "\"type\"");
-        if (p) {
-            p = strstr(p, ":");
-            if (p) {
-                p++;
-                while (*p == ' ' || *p == '\t') p++;
-                if (*p == '"') {
-                    p++;
-                    int i = 0;
-                    while (p && *p && *p != '"' && i < 15) vrec.type[i++] = *p++;
-                    vrec.type[i] = '\0';
-                }
-            }
-        }
-        
-        // 解析 timestamp
-        p = strstr(line, "\"timestamp\"");
-        if (p) {
-            p = strchr(p, ':');
-            if (p) vrec.timestamp = atoll(p + 1);
-        }
-        
-        // 解析 confidence
-        p = strstr(line, "\"confidence\"");
-        if (p) {
-            p = strchr(p, ':');
-            if (p) vrec.confidence = (float)atof(p + 1);
-        }
-        
-        // 解析 embedding
-        p = strstr(line, "\"embedding\"");
-        if (p) {
-            p = strchr(p, '[');
-            if (p) {
-                p++;
-                float emb[4096];
-                int dim = 0;
-                while (p && *p && *p != ']' && dim < 4096) {
-                    char *end;
-                    float v = strtof(p, &end);
-                    if (end == p) { p++; continue; }
-                    emb[dim++] = v;
-                    p = end;
-                    while (*p == ' ' || *p == ',') p++;
-                }
-                if (dim > 0) {
-                    vrec.embedding = malloc(dim * sizeof(float));
-                    if (vrec.embedding) {
-                        memcpy(vrec.embedding, emb, dim * sizeof(float));
-                        vrec.embedding_dim = dim;
-                    }
-                } else {
-                    // 空 embedding 时分配一个默认值（占位）
-                    vrec.embedding = malloc(sizeof(float));
-                    if (vrec.embedding) {
-                        vrec.embedding[0] = 0.0f;
-                        vrec.embedding_dim = 1;
-                    }
-                }
-            }
-        }
-        
-        // 验证并写入
-        if (vrec.timestamp > 0 && vrec.agent_id[0] && vrec.embedding && vrec.embedding_dim > 0) {
-            int ok = ndtsdb_vec_insert(db, vrec.agent_id, vrec.type, &vrec);
-            if (ok == 0) {
-                // 写入标记行
-                KlineRow marker = {
-                    .timestamp = vrec.timestamp,
-                    .open = vrec.confidence,
-                    .high = (double)vrec.embedding_dim,
-                    .low = 0.0,
-                    .close = 0.0,
-                    .volume = 0.0,
-                    .flags = 0x01
-                };
-                ndtsdb_insert(db, vrec.agent_id, vrec.type, &marker);
-                count++;
-            } else {
-                errors++;
-            }
+
+        int ok = ndtsdb_vec_insert(db, vrec.agent_id, vrec.type, &vrec);
+        if (ok == 0) {
+            /* Write a KlineRow marker for index purposes (flags=0x01) */
+            KlineRow marker = {
+                .timestamp = vrec.timestamp,
+                .open      = vrec.confidence,
+                .high      = (double)vrec.embedding_dim,
+                .low       = 0.0,
+                .close     = 0.0,
+                .volume    = 0.0,
+                .flags     = 0x01
+            };
+            ndtsdb_insert(db, vrec.agent_id, vrec.type, &marker);
+            count++;
         } else {
+            fprintf(stderr, "Warning: failed to insert vector row ts=%lld\n",
+                    (long long)vrec.timestamp);
             errors++;
         }
-        
-        if (vrec.embedding) free(vrec.embedding);
+        free(vrec.embedding);
     }
     
     ndtsdb_close(db);

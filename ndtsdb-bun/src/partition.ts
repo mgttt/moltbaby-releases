@@ -9,6 +9,8 @@ import { mkdirSync } from 'fs';
 import { openDatabase, type NDTSRow } from './ndts-db.ts';
 import type { KlineRow } from './ndts-db-ffi.ts';
 
+export type { KlineRow };
+
 export interface ColumnDef {
   name: string;
   type: 'int64' | 'float64' | 'string';
@@ -53,11 +55,14 @@ export class PartitionedTable {
    * Append rows to the table. Each row may include 'symbol' and 'interval'
    * fields; if absent, defaults to '_' / '_'.
    * Opens the database, inserts, and closes (flushes to disk) atomically.
+   *
+   * @returns total number of rows successfully inserted
    */
-  append(rows: AnyRow[]): void {
-    if (!rows.length) return;
+  append(rows: AnyRow[]): number {
+    if (!rows.length) return 0;
 
     const db = openDatabase(this._basePath);
+    let totalInserted = 0;
     try {
       // Group by symbol+interval
       const groups = new Map<string, { symbol: string; interval: string; klines: KlineRow[] }>();
@@ -87,8 +92,27 @@ export class PartitionedTable {
       }
 
       for (const { symbol, interval, klines } of groups.values()) {
-        db.insertBatch(symbol, interval, klines);
+        const n = db.insertBatch(symbol, interval, klines);
+        // insertBatch returns inserted count (≥0) or -1 on error
+        if (n >= 0) totalInserted += n;
       }
+    } finally {
+      db.close();
+    }
+    return totalInserted;
+  }
+
+  /**
+   * Type-safe fast path for pre-validated KlineRow data.
+   * Skips the AnyRow→KlineRow conversion overhead.
+   *
+   * @returns number of rows inserted, or -1 on failure
+   */
+  appendBatch(symbol: string, interval: string, rows: KlineRow[]): number {
+    if (!rows.length) return 0;
+    const db = openDatabase(this._basePath);
+    try {
+      return db.insertBatch(symbol, interval, rows);
     } finally {
       db.close();
     }

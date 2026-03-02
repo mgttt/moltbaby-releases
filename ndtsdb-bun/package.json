@@ -1,6 +1,6 @@
 {
   "name": "ndtsdb",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TypeScript/Bun FFI bindings for ndtsdb C library",
   "type": "module",
   "main": "./src/index.ts",

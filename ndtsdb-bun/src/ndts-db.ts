@@ -57,38 +57,52 @@ export class NdtsDatabase {
 
   // ── Write ────────────────────────────────────────────────────────────────
 
+  private _assertOpen(): void {
+    if (!this._ptr) throw new Error('NdtsDatabase is already closed');
+  }
+
   insert(symbol: string, interval: string, row: KlineRow): boolean {
+    this._assertOpen();
     return ffi_insert(this._ptr, symbol, interval, row);
   }
 
   insertBatch(symbol: string, interval: string, rows: KlineRow[]): number {
+    this._assertOpen();
     return ffi_insert_batch(this._ptr, symbol, interval, rows);
   }
 
   clear(symbol: string, interval: string): boolean {
+    this._assertOpen();
     return ffi_clear(this._ptr, symbol, interval);
   }
 
   // ── Query ────────────────────────────────────────────────────────────────
 
-  /** Query all rows. Each row includes symbol and interval. */
+  /** Query all rows, sorted by timestamp ascending. Each row includes symbol and interval. */
   queryAll(): NDTSRow[] {
+    this._assertOpen();
     const json = ffi_query_all_json(this._ptr);
     if (!json) return [];
     try {
-      return parseQueryAllJson(json);
-    } catch {
+      const rows = parseQueryAllJson(json);
+      rows.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+      return rows;
+    } catch (e) {
+      // Log instead of silently swallowing — JSON corruption or FFI bug should be visible
+      console.error('[ndtsdb] queryAll parse error:', e instanceof Error ? e.message : e);
       return [];
     }
   }
 
   /** List all (symbol, interval) pairs stored in this database. */
   listSymbols(): SymbolInfo[] {
+    this._assertOpen();
     const json = ffi_list_symbols_json(this._ptr);
     if (!json) return [];
     try {
       return parseListSymbolsJson(json);
-    } catch {
+    } catch (e) {
+      console.error('[ndtsdb] listSymbols parse error:', e instanceof Error ? e.message : e);
       return [];
     }
   }
@@ -98,6 +112,7 @@ export class NdtsDatabase {
    * Returns -1n if no data exists.
    */
   getLatestTimestamp(symbol: string, interval: string): bigint {
+    this._assertOpen();
     return ffi_get_latest_timestamp(this._ptr, symbol, interval);
   }
 

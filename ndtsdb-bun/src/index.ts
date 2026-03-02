@@ -25,3 +25,10 @@ export type {
 // ─── SQL ─────────────────────────────────────────────────────────────────────
 export { parseSQL, SQLExecutor, ColumnarTable } from './sql.ts';
 export type { ParsedSQL, SelectData, QueryResult } from './sql.ts';
+
+// ─── NDTV Vector (knowledge base, cosine similarity) ─────────────────────────
+export {
+  ffi_vec_open, ffi_vec_close,
+  ffi_vec_insert, ffi_vec_query, ffi_vec_search,
+} from './vec-ffi.ts';
+export type { VecRecord } from './vec-ffi.ts';

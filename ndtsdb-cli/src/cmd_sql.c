@@ -21,13 +21,18 @@ extern void print_exception(JSContext *ctx);
 static char *quote_string(const char *str) {
     if (!str) return strdup("null");
     size_t len = strlen(str);
-    char *escaped = (char *)malloc(len * 2 + 3);
+    /* Worst case: every char needs 2-char escape + surrounding quotes + NUL */
+    char *escaped = (char *)malloc(len * 4 + 3);
     if (!escaped) return NULL;
     escaped[0] = '\"';
     size_t j = 1;
     for (size_t i = 0; i < len; i++) {
-        if (str[i] == '\"' || str[i] == '\\') escaped[j++] = '\\';
-        escaped[j++] = str[i];
+        unsigned char c = (unsigned char)str[i];
+        if (c == '\"' || c == '\\') { escaped[j++] = '\\'; escaped[j++] = c; }
+        else if (c == '\n') { escaped[j++] = '\\'; escaped[j++] = 'n'; }
+        else if (c == '\r') { escaped[j++] = '\\'; escaped[j++] = 'r'; }
+        else if (c == '\t') { escaped[j++] = '\\'; escaped[j++] = 't'; }
+        else { escaped[j++] = c; }
     }
     escaped[j++] = '\"';
     escaped[j] = '\0';

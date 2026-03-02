@@ -133,12 +133,11 @@ uninstall:
 	@echo "✓ Removed: $(BINDIR)/ndtsdb-cli"
 
 # 生成 SQL 引擎 C 头文件（从 src/sql_engine.js → src/sql_engine_js.h）
-gen-sql-header:
-	@echo "=== Generating sql_engine_js.h from src/sql_engine.js ==="
-	@python3 -c "
+# 使用 define/endef 避免多行 Python 内联脚本的 Makefile tab 缩进问题
+define GEN_SQL_HEADER_PY
 import sys
 data = open('ndtsdb-cli/src/sql_engine.js', 'rb').read()
-lines = ['/* AUTO-GENERATED — do not edit by hand. Run: make gen-sql-header */\n',
+lines = ['/* AUTO-GENERATED - do not edit by hand. Run: make gen-sql-header */\n',
          '/* Source: src/sql_engine.js */\n',
          'static const char sql_engine_js[] = {\n']
 row = []
@@ -152,8 +151,13 @@ if row:
 lines.append('    0x00\n};\n')
 lines.append(f'static const size_t sql_engine_js_len = {len(data)};\n')
 open('ndtsdb-cli/src/sql_engine_js.h', 'w').writelines(lines)
-print(f'✓ sql_engine_js.h ({len(data)} bytes → ndtsdb-cli/src/sql_engine_js.h)')
-"
+print(f'OK sql_engine_js.h ({len(data)} bytes -> ndtsdb-cli/src/sql_engine_js.h)')
+endef
+export GEN_SQL_HEADER_PY
+
+gen-sql-header:
+	@echo "=== Generating sql_engine_js.h from src/sql_engine.js ==="
+	@python3 -c "$$GEN_SQL_HEADER_PY"
 
 # ============================================================================
 # gcc-linux: Native Linux x86-64 ELF build (no podman required)

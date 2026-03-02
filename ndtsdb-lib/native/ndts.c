@@ -629,6 +629,8 @@ size_t gorilla_decompress_f64(
                 leading = (int)READ_BITS(6);
                 meaningful = (int)READ_BITS(6);
                 prev_leading = leading;
+                // #Bug3: 损坏数据可能使 leading+meaningful > 64，导致负移位 UB
+                if ((uint32_t)leading + (uint32_t)meaningful > 64) return 0;
                 prev_trailing = 64 - leading - meaningful;
             }
             
@@ -1205,7 +1207,14 @@ static void write_partition_file(const char* filepath,
     /* flags (raw) */
     for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].flags, 4); p += 4; }
 
-    fwrite(chunk_buf, 1, chunk_size, f);
+    size_t written = fwrite(chunk_buf, 1, chunk_size, f);
+    if (written != chunk_size) {
+        free(chunk_buf);
+        fclose(f);
+        unlink(tmppath);
+        fprintf(stderr, "[ndtsdb] ERROR: fwrite partial (%zu/%zu) — disk full?\n", written, chunk_size);
+        return;
+    }
 
     uint32_t ccrc = crc32_buf(chunk_buf, chunk_size);
     fwrite(&ccrc, 4, 1, f);
@@ -2002,6 +2011,8 @@ int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const Kl
         sd->capacity = new_capacity;
     }
     
+    // #Bug2: 防止 count 到 UINT32_MAX 时 count++ 溢出
+    if (sd->count >= UINT32_MAX) return -1;
     sd->klines[sd->count++] = *row;
     return 0;
 }
@@ -2039,6 +2050,8 @@ int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, co
     if (!sd) return -1;
     
     // 检查是否需要扩容（批量扩容，避免多次realloc）
+    // #Bug2: 防止 uint32_t 加法溢出绕过容量检查
+    if (n > 0 && sd->count > UINT32_MAX - n) return -1;
     uint32_t required = sd->count + n;
     if (required > sd->capacity) {
         // 计算新的capacity（至少翻倍，或满足需求）

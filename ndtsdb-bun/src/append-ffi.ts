@@ -104,6 +104,10 @@ export class AppendWriter {
       const rows = db.queryAll();
       const n = rows.length;
 
+      if (n === 0) {
+        return { data: new Map() };
+      }
+
       const timestamps = new BigInt64Array(n);
       const opens      = new Float64Array(n);
       const highs      = new Float64Array(n);
