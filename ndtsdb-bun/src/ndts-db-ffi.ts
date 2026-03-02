@@ -58,7 +58,7 @@ function findLibrary(): string {
   } else if (arch === 'arm') {
     cpu = 'arm';
     bits = '32';
-  } else if (arch === 'ia32' || arch === 'x86') {
+  } else if (arch === 'ia32') {
     cpu = 'x86';
     bits = '32';
   } else {
@@ -304,12 +304,12 @@ export class NdtsDatabase {
       ptr(intBuf),
       ptr(batchBuf),
       rows.length
-    );
-    
+    ) as number;
+
     if (result < 0) {
       throw new Error(`Batch insert failed for ${symbol}/${interval} (${rows.length} rows)`);
     }
-    
+
     return result;
   }
   
@@ -332,7 +332,7 @@ export class NdtsDatabase {
 
       if (!jsonPtr) return [];
 
-      const jsonStr = new CString(jsonPtr as number).toString();
+      const jsonStr = new CString(jsonPtr as any).toString();
 
       try {
         lib.symbols.ndtsdb_free_json(jsonPtr);
@@ -388,14 +388,14 @@ export class NdtsDatabase {
     if (!lib || !this.handle) return '';
     const pathPtr = lib.symbols.ndtsdb_get_path(this.handle);
     if (!pathPtr) return '';
-    return new CString(pathPtr as number).toString();
+    return new CString(pathPtr as any).toString();
   }
 
   listSymbols(): Array<{ symbol: string; interval: string }> {
     if (!lib || !this.handle) throw new Error('Database not open');
     const jsonPtr = lib.symbols.ndtsdb_list_symbols_json(this.handle);
     if (!jsonPtr) return [];
-    const jsonStr = new CString(jsonPtr as number).toString();
+    const jsonStr = new CString(jsonPtr as any).toString();
     try {
       lib.symbols.ndtsdb_free_json(jsonPtr);
     } catch { /* best-effort */ }

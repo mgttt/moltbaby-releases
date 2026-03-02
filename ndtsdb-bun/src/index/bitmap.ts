@@ -3,7 +3,7 @@
 // 空间效率高，支持快速 AND/OR 查询
 // ============================================================
 
-import { ColumnarTable } from './columnar.js';
+import { ColumnarTable } from '../columnar.js';
 
 /**
  * Roaring Bitmap 简化版

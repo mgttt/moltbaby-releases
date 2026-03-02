@@ -35,7 +35,7 @@ function findLibrary(): string {
   } else if (arch === 'arm') {
     cpu = 'arm';
     bits = '32';
-  } else if (arch === 'ia32' || arch === 'x86') {
+  } else if (arch === 'ia32') {
     cpu = 'x86';
     bits = '32';
   } else {
@@ -76,40 +76,40 @@ try {
   lib = dlopen(libPath, {
     // 类型转换
     int64_to_f64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64],
       returns: FFIType.void,
     },
     f64_to_int64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64],
       returns: FFIType.void,
     },
     
     // Counting Sort
     counting_sort_apply: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.f64, FFIType.ptr, FFIType.usize, FFIType.ptr],
+      args: [FFIType.ptr, FFIType.u64, FFIType.f64, FFIType.ptr, FFIType.u64, FFIType.ptr],
       returns: FFIType.void,
     },
     
     // Min/Max
     minmax_f64: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.ptr, FFIType.ptr],
+      args: [FFIType.ptr, FFIType.u64, FFIType.ptr, FFIType.ptr],
       returns: FFIType.void,
     },
     
     // 数据重排列
     gather_f64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize, FFIType.ptr],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.ptr],
       returns: FFIType.void,
     },
     gather_i32: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize, FFIType.ptr],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.ptr],
       returns: FFIType.void,
     },
     gather_batch4: {
       args: [
         FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr,  // src arrays
         FFIType.ptr,                                          // indices
-        FFIType.usize,                                        // n
+        FFIType.u64,                                        // n
         FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr,  // out arrays
       ],
       returns: FFIType.void,
@@ -117,42 +117,42 @@ try {
     
     // Snapshot 边界
     find_snapshot_boundaries: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.ptr],
-      returns: FFIType.usize,
+      args: [FFIType.ptr, FFIType.u64, FFIType.ptr],
+      returns: FFIType.u64,
     },
     
     // 原有 SIMD 操作
     filter_f64_gt: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.f64, FFIType.ptr],
-      returns: FFIType.usize,
+      args: [FFIType.ptr, FFIType.u64, FFIType.f64, FFIType.ptr],
+      returns: FFIType.u64,
     },
     sum_f64: {
-      args: [FFIType.ptr, FFIType.usize],
+      args: [FFIType.ptr, FFIType.u64],
       returns: FFIType.f64,
     },
     aggregate_f64: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.ptr],
+      args: [FFIType.ptr, FFIType.u64, FFIType.ptr],
       returns: FFIType.void,
     },
     filter_price_volume: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize, FFIType.f64, FFIType.i32, FFIType.ptr],
-      returns: FFIType.usize,
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.f64, FFIType.i32, FFIType.ptr],
+      returns: FFIType.u64,
     },
     
     // Gorilla 压缩
     gorilla_compress_f64: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.ptr],
-      returns: FFIType.usize,
+      args: [FFIType.ptr, FFIType.u64, FFIType.ptr],
+      returns: FFIType.u64,
     },
     gorilla_decompress_f64: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.ptr, FFIType.usize],
-      returns: FFIType.usize,
+      args: [FFIType.ptr, FFIType.u64, FFIType.ptr, FFIType.u64],
+      returns: FFIType.u64,
     },
     
     // io_uring (Linux only)
     uring_ctx_size: {
       args: [],
-      returns: FFIType.usize,
+      returns: FFIType.u64,
     },
     uring_init: {
       args: [FFIType.ptr],
@@ -163,7 +163,7 @@ try {
       returns: FFIType.void,
     },
     uring_batch_read: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.usize],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64],
       returns: FFIType.i32,
     },
     uring_available: {
@@ -173,45 +173,45 @@ try {
     
     // 二分查找
     binary_search_i64: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.i64],
-      returns: FFIType.usize,
+      args: [FFIType.ptr, FFIType.u64, FFIType.i64],
+      returns: FFIType.u64,
     },
     binary_search_batch_i64: {
-      args: [FFIType.ptr, FFIType.usize, FFIType.ptr, FFIType.usize, FFIType.ptr],
+      args: [FFIType.ptr, FFIType.u64, FFIType.ptr, FFIType.u64, FFIType.ptr],
       returns: FFIType.void,
     },
     
     // 累积和 & 差分
     prefix_sum_f64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64],
       returns: FFIType.void,
     },
     delta_encode_f64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64],
       returns: FFIType.void,
     },
     delta_decode_f64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64],
       returns: FFIType.void,
     },
     
     // 技术指标
     ema_f64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize, FFIType.f64],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.f64],
       returns: FFIType.void,
     },
     sma_f64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize, FFIType.usize],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.u64],
       returns: FFIType.void,
     },
     rolling_std_f64: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize, FFIType.usize],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.u64],
       returns: FFIType.void,
     },
     
     // OHLCV 聚合
     ohlcv_aggregate: {
-      args: [FFIType.ptr, FFIType.ptr, FFIType.usize, FFIType.usize, FFIType.ptr, FFIType.ptr],
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.u64, FFIType.ptr, FFIType.ptr],
       returns: FFIType.void,
     },
   });
@@ -406,7 +406,7 @@ export function filterF64GT(data: Float64Array, threshold: number): Uint32Array 
 
 export function sumF64(data: Float64Array): number {
   if (lib) {
-    return lib.symbols.sum_f64(ptr(data), data.length);
+    return lib.symbols.sum_f64(ptr(data), data.length) as number;
   }
   let sum = 0;
   for (let i = 0; i < data.length; i++) sum += data[i];

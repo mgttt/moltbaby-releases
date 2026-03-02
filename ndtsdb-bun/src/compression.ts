@@ -202,17 +202,6 @@ export class GorillaDecompressor {
   }
 }
 
-function countTrailingZeros64(n: bigint): number {
-  n = BigInt.asUintN(64, n);
-  if (n === 0n) return 64;
-  let count = 0;
-  while ((n & 1n) === 0n) {
-    n >>= 1n;
-    count++;
-  }
-  return count;
-}
-
 /**
  * Delta-of-Delta 时间戳压缩
  * 适合规律的时间序列（如每秒一个数据点）
@@ -519,7 +508,7 @@ class VarintReader {
 }
 
 // 辅助函数: double <-> bits
-function DoubleToBits(value: number): number {
+function DoubleToBits(value: number): bigint {
   const arr = new Float64Array(1);
   arr[0] = value;
   return new BigInt64Array(arr.buffer)[0];

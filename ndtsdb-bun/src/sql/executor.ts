@@ -122,7 +122,7 @@ export class SQLExecutor {
       case 'CREATE TABLE':
         return this.executeCreateTable(statement.data);
       default:
-        throw new Error(`Unsupported statement type: ${statement.type}`);
+        throw new Error(`Unsupported statement type: ${(statement as any).type}`);
     }
   }
 

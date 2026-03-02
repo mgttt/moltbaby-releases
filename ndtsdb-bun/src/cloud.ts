@@ -3,6 +3,8 @@
 // 自动分层: 热数据本地, 冷数据云端
 // ============================================================
 
+import { ColumnarTable } from './columnar.js';
+
 export interface S3Config {
   endpoint: string;
   region: string;

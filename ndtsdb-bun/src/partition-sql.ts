@@ -112,7 +112,7 @@ export function queryPartitionedTableToColumnar(
   const timeRange = extractTimeRange(whereExpr, timeColumn);
 
   // 查询分区表
-  const rows = partitionedTable.query(undefined, timeRange ?? undefined);
+  const rows = (partitionedTable as any).query(undefined, timeRange ?? undefined);
 
   // 转换为 ColumnarTable
   if (rows.length === 0) {
@@ -137,7 +137,7 @@ export function queryPartitionedTableToColumnar(
     columns.push({ name, type });
   }
 
-  const table = new ColumnarTable(columns);
+  const table = new ColumnarTable(columns as any);
   table.appendBatch(rows as any);
   return table;
 }

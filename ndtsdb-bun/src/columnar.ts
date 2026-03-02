@@ -296,7 +296,7 @@ export class ColumnarTable {
     const col = this.columns.get(column);
     if (!col) throw new Error(`Column ${column} not found`);
 
-    const arr = col.subarray(0, this.rowCount);
+    const arr = (col as TypedNumericArray).subarray(0, this.rowCount);
     
     switch (op) {
       case 'sum':
@@ -345,7 +345,7 @@ export class ColumnarTable {
         const col = this.columns.get(agg.column);
         if (!col) continue;
 
-        const values = indices.map(i => this.getTypedArrayValue(col, i));
+        const values = indices.map(i => Number(this.getTypedArrayValue(col, i)));
         
         switch (agg.op) {
           case 'first':
@@ -541,7 +541,7 @@ export class ColumnarTable {
         const newArr = newCol as string[];
         for (let i = 0; i < this.rowCount; i++) newArr[i] = oldArr[i] ?? '';
       } else {
-        (newCol as TypedNumericArray).set((oldCol as TypedNumericArray).subarray(0, this.rowCount));
+        (newCol as TypedNumericArray).set((oldCol as TypedNumericArray).subarray(0, this.rowCount) as any);
       }
 
       this.columns.set(def.name, newCol);

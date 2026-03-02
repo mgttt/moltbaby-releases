@@ -476,12 +476,13 @@ export class HNSWIndex {
     index.size = data.size;
     
     for (const [id, nodeData] of Object.entries(data.nodes)) {
+      const nd = nodeData as any;
       const node = new HNSWNode(
         parseInt(id),
-        new Float32Array(nodeData.vector as number[]),
-        nodeData.connections.length - 1
+        new Float32Array(nd.vector as number[]),
+        nd.connections.length - 1
       );
-      node.connections = nodeData.connections as number[][];
+      node.connections = nd.connections as number[][];
       index.nodes.set(parseInt(id), node);
     }
     
