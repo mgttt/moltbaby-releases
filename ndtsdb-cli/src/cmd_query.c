@@ -72,11 +72,6 @@ int cmd_query(int argc, char *argv[]) {
     char intervals[1024][16];
     int sym_count = ndtsdb_list_symbols(db, symbols, intervals, 1024);
     
-    fprintf(stderr, "[QUERY DEBUG] sym_count=%d\n", sym_count);
-    for (int i = 0; i < sym_count; i++) {
-        fprintf(stderr, "[QUERY DEBUG] symbol[%d]=%s/%s\n", i, symbols[i], intervals[i]);
-    }
-    
     int total_count = 0;
     
     for (int s = 0; s < sym_count && total_count < limit; s++) {
@@ -86,8 +81,6 @@ int cmd_query(int argc, char *argv[]) {
         const char *sym_list[1] = {symbols[s]};
         QueryResult *result = ndtsdb_query_filtered(db, sym_list, 1);
         if (!result || !result->rows) continue;
-        
-        fprintf(stderr, "[QUERY DEBUG] %s/%s: result->count=%u\n", symbols[s], intervals[s], result->count);
         
         // 正确解析ResultRow结构
         ResultRowInternal* rows = (ResultRowInternal*)result->rows;

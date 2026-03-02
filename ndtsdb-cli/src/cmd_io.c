@@ -189,12 +189,18 @@ int cmd_write_csv(int argc, char *argv[]) {
             return 1;
         }
         
-        // 验证路径不为空
+        // 验证路径不为空，且不含单引号（防止 JS 脚本注入）
         if (strlen(database) == 0) {
             fprintf(stderr, "Error: --database path cannot be empty\n");
             return 1;
         }
-        
+        for (const char *_p = database; *_p; _p++) {
+            if (*_p == '\'' || *_p == '\\' || *_p == '\n' || *_p == '\r') {
+                fprintf(stderr, "Error: --database path contains invalid character\n");
+                return 1;
+            }
+        }
+
         // 自动创建数据库目录（如果不存在）
         struct stat st;
         if (stat(database, &st) != 0) {

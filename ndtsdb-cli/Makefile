@@ -155,6 +155,52 @@ open('ndtsdb-cli/src/sql_engine_js.h', 'w').writelines(lines)
 print(f'✓ sql_engine_js.h ({len(data)} bytes → ndtsdb-cli/src/sql_engine_js.h)')
 "
 
+# ============================================================================
+# gcc-linux: Native Linux x86-64 ELF build (no podman required)
+# 产物: ndtsdb-cli.elf — Linux x86-64 native binary, dynamically linked
+# ============================================================================
+
+GCC_SOURCES = \
+	ndtsdb-cli/src/main.c \
+	ndtsdb-cli/src/common.c \
+	ndtsdb-cli/src/cmd_query.c \
+	ndtsdb-cli/src/cmd_io.c \
+	ndtsdb-cli/src/cmd_indicators.c \
+	ndtsdb-cli/src/cmd_sql.c \
+	ndtsdb-cli/src/cmd_plugin.c \
+	ndtsdb-cli/src/cmd_embed.c \
+	ndtsdb-cli/src/cmd_search.c \
+	ndtsdb-cli/src/cmd_facts.c \
+	ndtsdb-cli/src/cmd_facts_enhancements.c \
+	ndtsdb-cli/src/ndtsdb_lock.c \
+	ndtsdb-cli/src/bindings/qjs_ndtsdb.c \
+	ndtsdb-lib/native/ndts.c \
+	ndtsdb-lib/native/ndtsdb_vec.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/quickjs.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/libregexp.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/libunicode.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/cutils.c \
+	ndtsdb-cli/vendor/quickjs-2024-01-13/libbf.c
+
+GCC_FLAGS = \
+	-O2 \
+	-I./ndtsdb-cli/src/bindings \
+	-I./ndtsdb-cli/include \
+	-I./ndtsdb-lib/native \
+	-I./ndtsdb-cli/vendor/quickjs-2024-01-13 \
+	'-DCONFIG_VERSION="2024-01-13"' \
+	-D_GNU_SOURCE \
+	-DCONFIG_BIGNUM \
+	-lm
+
+gcc-linux:
+	@echo "=== gcc Native Linux Build ==="
+	@gcc -O2 $(GCC_SOURCES) $(GCC_FLAGS) -o ndtsdb-cli/ndtsdb-cli.elf
+	@chmod +x ndtsdb-cli/ndtsdb-cli.elf
+	@ln -sf ndtsdb-cli.elf ndtsdb-cli/ndtsdb-cli
+	@echo "✓ Native ELF: ndtsdb-cli/ndtsdb-cli.elf  ($$(ls -lh ndtsdb-cli/ndtsdb-cli.elf | awk '{print $$5}'))"
+	@echo "  Symlink updated: ndtsdb-cli/ndtsdb-cli → ndtsdb-cli.elf"
+
 # 清理
 clean:
 	@rm -rf build/*.o
@@ -177,7 +223,7 @@ help:
 	@echo "前提: podman image localhost/cosmocc:latest 已就绪"
 	@echo "      如需重建镜像: podman build -f podman/ndtsdb-cli-cosmo/Dockerfile -t cosmocc:latest ."
 
-.PHONY: all cosmo cosmo-docker install uninstall clean help gen-sql-header
+.PHONY: all cosmo cosmo-docker gcc-linux install uninstall clean help gen-sql-header
 
 # ============================================================================
 # [已归档] Legacy 构建目标 (gcc/zig) —— 已禁用，仅作历史参考

@@ -133,16 +133,16 @@ int ndtsdb_lock_acquire(const char* db_path, bool exclusive) {
     // 打开或创建锁文件
     int lock_fd = open(lock_path, O_RDONLY | O_CREAT, 0644);
     if (lock_fd < 0) {
-        fprintf(stderr, "[LOCK DEBUG] open failed: %s, errno=%d\n", lock_path, errno);
+        fprintf(stderr, "[ndtsdb] lock: open failed: %s (errno=%d)\n", lock_path, errno);
         free(lock_path);
         return -1;
     }
     free(lock_path);
-    
+
     // 获取锁
     int op = exclusive ? LOCK_EX : LOCK_SH;
     if (flock(lock_fd, op) < 0) {
-        fprintf(stderr, "[LOCK DEBUG] flock failed: fd=%d, op=%d, errno=%d\n", lock_fd, op, errno);
+        fprintf(stderr, "[ndtsdb] lock: flock failed (errno=%d)\n", errno);
         close(lock_fd);
         return -1;
     }

@@ -236,20 +236,39 @@ export function initLibrary(): void {
   console.log('[ndtsdb:ffi] Database FFI initialized');
 }
 
+// ─── 进程内句柄缓存（防止同一路径多次 flock 失败）────────────────────────
+// flock(LOCK_EX|LOCK_NB) 在同进程内不同 fd 间会失败（POSIX 语义）。
+// 缓存保证同一绝对路径只调用一次 ndtsdb_open，关闭时引用计数清零才真正 close。
+
+interface DbCacheEntry {
+  handle: bigint;
+  refCount: number;
+}
+
+const _dbCache = new Map<string, DbCacheEntry>();
+
 // ─── 数据库句柄包装类 ───────────────────────────────────
 
 export class NdtsDatabase {
   private handle: bigint | null = null;
   private path: string;
-  
+
   constructor(path: string) {
     this.path = path;
     initLibrary();
   }
-  
+
   open(): void {
     if (!lib) throw new Error('FFI not initialized');
-    
+
+    // Check per-process cache first (same path = same handle, ref-counted)
+    const cached = _dbCache.get(this.path);
+    if (cached) {
+      cached.refCount++;
+      this.handle = cached.handle;
+      return;
+    }
+
     const pathBuf = Buffer.from(this.path + '\0');
     this.handle = lib.symbols.ndtsdb_open(ptr(pathBuf)) as bigint;
 
@@ -258,10 +277,24 @@ export class NdtsDatabase {
     if (!this.handle) {
       throw new Error(`Failed to open database at ${this.path} (locked by another process or invalid path)`);
     }
+
+    _dbCache.set(this.path, { handle: this.handle, refCount: 1 });
   }
-  
+
   close(): void {
     if (!lib || !this.handle) return;
+
+    const cached = _dbCache.get(this.path);
+    if (cached) {
+      cached.refCount--;
+      if (cached.refCount > 0) {
+        // Still in use by other NdtsDatabase instances in this process
+        this.handle = null;
+        return;
+      }
+      _dbCache.delete(this.path);
+    }
+
     lib.symbols.ndtsdb_close(this.handle);
     this.handle = null;
   }

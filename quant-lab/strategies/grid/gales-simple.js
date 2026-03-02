@@ -108,6 +108,11 @@ const CONFIG = {
     maxLeverage: 3.0,           // 最大杠杆倍数（硬顶阈值）
   },
 
+  // P3新增：拦截逻辑绕过开关（仅用于short策略特殊处理，默认全部禁用以保证安全）
+  allowBypassLeverageBlock: false,      // 允许在杠杆硬顶时仍下单（仅警告）
+  allowBypassPositionBlock: false,      // 允许在仓位限制时仍下单（仅警告）
+  disableAutoRecenterBlockade: false,   // 禁用autoRecenter的追涨追跌拦截
+
   // 应急方向切换 (P0 修复)
   emergencyLean: 'auto',  // auto/long/short/neutral
 
@@ -174,6 +179,11 @@ if (typeof ctx !== 'undefined' && ctx && ctx.strategy && ctx.strategy.params) {
   if (p.recenterDistance) CONFIG.recenterDistance = p.recenterDistance;
   if (p.recenterCooldownSec) CONFIG.recenterCooldownSec = p.recenterCooldownSec;
   if (p.recenterMinIdleTicks) CONFIG.recenterMinIdleTicks = p.recenterMinIdleTicks;
+
+  // P3新增：拦截逻辑绕过开关
+  if (p.allowBypassLeverageBlock !== undefined) CONFIG.allowBypassLeverageBlock = p.allowBypassLeverageBlock;
+  if (p.allowBypassPositionBlock !== undefined) CONFIG.allowBypassPositionBlock = p.allowBypassPositionBlock;
+  if (p.disableAutoRecenterBlockade !== undefined) CONFIG.disableAutoRecenterBlockade = p.disableAutoRecenterBlockade;
 
   if (p.simMode !== undefined) CONFIG.simMode = p.simMode;
   if (p.enableMarketRegime !== undefined) CONFIG.enableMarketRegime = p.enableMarketRegime;
@@ -3102,15 +3112,20 @@ function st_heartbeat(tickJson) {
         (noActiveOrders || fullPositionStuck)) {
 
       // P2修复：方向性保护 - short只允许上移，long只允许下移
+      // P3修复：支持 disableAutoRecenterBlockade 绕过此拦截
       const newCenter = state.lastPrice;
       const oldCenter = state.centerPrice || state.lastPrice;
-      if (CONFIG.lean === 'negative' && newCenter < oldCenter) {
-        logWarn('[autoRecenter拦截] short策略禁止追跌: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
-        return;
-      }
-      if (CONFIG.lean === 'positive' && newCenter > oldCenter) {
-        logWarn('[autoRecenter拦截] long策略禁止追涨: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
-        return;
+      if (!CONFIG.disableAutoRecenterBlockade) {
+        if (CONFIG.lean === 'negative' && newCenter < oldCenter) {
+          logWarn('[autoRecenter拦截] short策略禁止追跌: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
+          return;
+        }
+        if (CONFIG.lean === 'positive' && newCenter > oldCenter) {
+          logWarn('[autoRecenter拦截] long策略禁止追涨: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
+          return;
+        }
+      } else {
+        logInfo('[autoRecenter] disableAutoRecenterBlockade=true，跳过方向性保护');
       }
 
       const reason = fullPositionStuck ? '满仓死锁自动重心' : '自动重心';
@@ -3306,6 +3321,20 @@ function st_onParamsUpdate(newParamsJson) {
     initializeGrids();
     state.lastRecenterAtMs = Date.now();
     state.lastRecenterTick = state.tickCount || 0;
+  }
+
+  // P3新增：拦截逻辑绕过开关热更新
+  if (newParams.allowBypassLeverageBlock !== undefined) {
+    CONFIG.allowBypassLeverageBlock = newParams.allowBypassLeverageBlock;
+    logInfo('[Gales] 允许绕过杠杆硬顶: ' + CONFIG.allowBypassLeverageBlock);
+  }
+  if (newParams.allowBypassPositionBlock !== undefined) {
+    CONFIG.allowBypassPositionBlock = newParams.allowBypassPositionBlock;
+    logInfo('[Gales] 允许绕过仓位限制: ' + CONFIG.allowBypassPositionBlock);
+  }
+  if (newParams.disableAutoRecenterBlockade !== undefined) {
+    CONFIG.disableAutoRecenterBlockade = newParams.disableAutoRecenterBlockade;
+    logInfo('[Gales] 禁用autoRecenter拦截: ' + CONFIG.disableAutoRecenterBlockade);
   }
 
   saveState();
@@ -3508,22 +3537,31 @@ function shouldPlaceOrder(grid, distance) {
     }
   }
 
-  // 杠杆硬顶/熔断blockNewOrders：优先拦截，并打印准确原因
+  // P3修复：杠杆硬顶/熔断blockNewOrders - 支持绕过逻辑
   if (circuitBreakerState.blockNewOrders) {
     var blockReason = (circuitBreakerState.leverageHardCapTriggeredAt > 0) ? '杠杆硬顶' : '仓位熔断';
-    logWarn('[' + blockReason + '] 禁止新订单 gridId=' + grid.id);
-    return false;
+    var isLeverageBlock = (circuitBreakerState.leverageHardCapTriggeredAt > 0);
+    var isPositionBlock = !isLeverageBlock;
+
+    // 判断是否应该拦截：如果有对应的绕过开关，只记警告不拦截
+    var shouldBlock = true;
+    if (isLeverageBlock && CONFIG.allowBypassLeverageBlock) {
+      logWarn('[' + blockReason + '] 告警但继续下单 (allowBypassLeverageBlock=true) gridId=' + grid.id);
+      shouldBlock = false;
+    } else if (isPositionBlock && CONFIG.allowBypassPositionBlock) {
+      logWarn('[' + blockReason + '] 告警但继续下单 (allowBypassPositionBlock=true) gridId=' + grid.id);
+      shouldBlock = false;
+    }
+
+    if (shouldBlock) {
+      logWarn('[' + blockReason + '] 禁止新订单 gridId=' + grid.id);
+      return false;
+    }
   }
 
   // ADX市场状态检测：极强趋势时暂停下单（仅在enableMarketRegime时生效）
   if (CONFIG.enableMarketRegime && marketRegimeState.currentRegime === 'STRONG_TREND') {
     logWarn('[ADX] 极强趋势，暂停网格下单 gridId=' + grid.id);
-    return false;
-  }
-
-  // 仓位熔断检查：仓位超限时限制开仓
-  if (circuitBreakerState.blockNewOrders) {
-    logWarn('[仓位限制] 仓位超限，禁止新开仓 gridId=' + grid.id);
     return false;
   }
 
