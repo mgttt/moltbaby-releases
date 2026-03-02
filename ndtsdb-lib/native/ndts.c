@@ -1428,7 +1428,7 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     /* 2. 解析 header JSON（从 header_block[8] 起，长度由 header_block[4..7] 给出） */
     uint32_t header_len;
     memcpy(&header_len, header_block + 4, 4);
-    if (header_len > 4088) { fclose(f); return -1; }
+    if (header_len == 0 || header_len > 4088) { fclose(f); return -1; }  /* #99 */
 
     char* header_json = (char*)malloc(header_len + 1);
     if (!header_json) { fclose(f); return -1; }
@@ -2198,6 +2198,32 @@ const char* ndtsdb_get_path(NDTSDB* db) {
 
 /* ─── JSON 序列化 ─────────────────────────────────────────── */
 
+/* #96: JSON string escape helper — replaces \ " \n \r \t with safe sequences */
+static void json_escape_str(const char* src, char* dst, size_t dst_sz) {
+    size_t di = 0;
+    for (size_t si = 0; src[si] && di + 2 < dst_sz; si++) {
+        unsigned char c = (unsigned char)src[si];
+        if (c == '"' || c == '\\') {
+            if (di + 3 >= dst_sz) break;
+            dst[di++] = '\\'; dst[di++] = (char)c;
+        } else if (c == '\n') {
+            if (di + 3 >= dst_sz) break;
+            dst[di++] = '\\'; dst[di++] = 'n';
+        } else if (c == '\r') {
+            if (di + 3 >= dst_sz) break;
+            dst[di++] = '\\'; dst[di++] = 'r';
+        } else if (c == '\t') {
+            if (di + 3 >= dst_sz) break;
+            dst[di++] = '\\'; dst[di++] = 't';
+        } else if (c < 0x20) {
+            /* skip other control chars */
+        } else {
+            dst[di++] = (char)c;
+        }
+    }
+    dst[di] = '\0';
+}
+
 /**
  * ndtsdb_query_all_json — 将所有数据序列化为 JSON 字符串
  *
@@ -2272,6 +2298,11 @@ char* ndtsdb_query_all_json(NDTSDB* db) {
             }
             first_row = 0;
 
+            /* #96: escape symbol/interval before embedding in JSON */
+            char esc_sym[128], esc_itv[32];
+            json_escape_str(sd->symbol,   esc_sym, sizeof(esc_sym));
+            json_escape_str(sd->interval, esc_itv, sizeof(esc_itv));
+
             /* 尝试写入当前行；若空间不足则 realloc 并重试 */
             for (;;) {
                 /* Item 6: use PRId64 instead of %ld — correct on all platforms */
@@ -2279,7 +2310,7 @@ char* ndtsdb_query_all_json(NDTSDB* db) {
                     "{\"symbol\":\"%s\",\"interval\":\"%s\",\"timestamp\":%" PRId64 ","
                     "\"open\":%.17g,\"high\":%.17g,\"low\":%.17g,\"close\":%.17g,"
                     "\"volume\":%.17g,\"flags\":%u}",
-                    sd->symbol, sd->interval, kr->timestamp,
+                    esc_sym, esc_itv, kr->timestamp,
                     kr->open, kr->high, kr->low, kr->close,
                     kr->volume, kr->flags
                 );
@@ -2339,10 +2370,13 @@ char* ndtsdb_list_symbols_json(NDTSDB* db) {
     buf[pos++] = '[';
     for (uint32_t i = 0; i < db->symbol_count; i++) {
         if (i > 0) buf[pos++] = ',';
+        /* #96: escape before embedding in JSON */
+        char esc_sym[128], esc_itv[32];
+        json_escape_str(db->symbols[i].symbol,   esc_sym, sizeof(esc_sym));
+        json_escape_str(db->symbols[i].interval, esc_itv, sizeof(esc_itv));
         pos += (size_t)snprintf(buf + pos, cap - pos,
             "{\"symbol\":\"%s\",\"interval\":\"%s\"}",
-            db->symbols[i].symbol,
-            db->symbols[i].interval);
+            esc_sym, esc_itv);
     }
     buf[pos++] = ']';
     buf[pos]   = '\0';

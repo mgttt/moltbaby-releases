@@ -128,8 +128,10 @@ export class AppendWriterFFI {
    */
   flush(): void {
     if (!this.db || this.buffer.length === 0) return;
-    
-    this.db.insertBatch(this.symbol, this.interval, this.buffer);
+
+    // #101: copy first, clear only after confirmed success — prevents data loss on throw
+    const rows = this.buffer.slice();
+    this.db.insertBatch(this.symbol, this.interval, rows);
     this.buffer = [];
   }
   
