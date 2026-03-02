@@ -252,9 +252,11 @@ export class NdtsDatabase {
     
     const pathBuf = Buffer.from(this.path + '\0');
     this.handle = lib.symbols.ndtsdb_open(ptr(pathBuf)) as bigint;
-    
-    if (this.handle === 0n) {
-      throw new Error(`Failed to open database at ${this.path}`);
+
+    // Use !handle (falsy check) instead of === 0n — FFI may return 0 (number) or 0n (bigint)
+    // both are falsy, while valid pointers are non-zero
+    if (!this.handle) {
+      throw new Error(`Failed to open database at ${this.path} (locked by another process or invalid path)`);
     }
   }
   
@@ -266,7 +268,15 @@ export class NdtsDatabase {
   
   insert(symbol: string, interval: string, row: KlineRow): void {
     if (!lib || !this.handle) throw new Error('Database not open');
-    
+
+    // #95: timestamp 单位校验 — ndtsdb 要求毫秒（ms）。秒级值 < 1e12 抛出明确错误
+    if (row.timestamp > 0 && row.timestamp < 1e12) {
+      throw new Error(
+        `[ndtsdb] timestamp ${row.timestamp} looks like seconds; ndtsdb requires milliseconds. ` +
+        `Use Date.now() (not Date.now()/1000).`
+      );
+    }
+
     const symBuf = Buffer.from(symbol + '\0');
     const intBuf = Buffer.from(interval + '\0');
     const rowBuf = klineRowToBuffer(row);
@@ -286,6 +296,15 @@ export class NdtsDatabase {
   insertBatch(symbol: string, interval: string, rows: KlineRow[]): number {
     if (!lib || !this.handle) throw new Error('Database not open');
     if (rows.length === 0) return 0;
+
+    // #95: 批量检查 timestamp 单位
+    for (const row of rows) {
+      if (row.timestamp > 0 && row.timestamp < 1e12) {
+        throw new Error(
+          `[ndtsdb] timestamp ${row.timestamp} looks like seconds; ndtsdb requires milliseconds.`
+        );
+      }
+    }
     
     const symBuf = Buffer.from(symbol + '\0');
     const intBuf = Buffer.from(interval + '\0');

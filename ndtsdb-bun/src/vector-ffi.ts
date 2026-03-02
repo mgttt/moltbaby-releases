@@ -145,51 +145,63 @@ const VEC_QUERY_RESULT_SIZE = 16;
 // VecRecord pointer at offset 0, count at offset 8
 
 function parseVecQueryResult(resultPtr: bigint | number): VecRecord[] {
+  // #94: resultPtr 有效性检查
   if (!resultPtr) return [];
-
   const ptrNum = Number(resultPtr);
-  const resultBuf = toArrayBuffer(ptrNum as any, 0, VEC_QUERY_RESULT_SIZE);
-  const resultView = new DataView(resultBuf);
+  if (!Number.isFinite(ptrNum) || ptrNum === 0) return [];
 
-  const recordsPtr = resultView.getBigUint64(0, true);
-  const count = resultView.getUint32(8, true);
+  try {
+    const resultBuf = toArrayBuffer(ptrNum as any, 0, VEC_QUERY_RESULT_SIZE);
+    const resultView = new DataView(resultBuf);
 
-  if (!recordsPtr || count === 0) return [];
+    const recordsPtr = resultView.getBigUint64(0, true);
+    const count = resultView.getUint32(8, true);
 
-  const results: VecRecord[] = [];
+    // #94: count 合理性上限（防 C 层返回垃圾值导致 OOM）
+    if (!recordsPtr || count === 0 || count > 1_000_000) return [];
 
-  for (let i = 0; i < count; i++) {
-    const recPtr = Number(recordsPtr) + i * VEC_RECORD_SIZE;
-    const recBuf = toArrayBuffer(recPtr as any, 0, VEC_RECORD_SIZE);
-    const recView = new DataView(recBuf);
+    const results: VecRecord[] = [];
 
-    const timestamp = Number(recView.getBigInt64(0, true));
+    for (let i = 0; i < count; i++) {
+      const recPtr = Number(recordsPtr) + i * VEC_RECORD_SIZE;
+      if (recPtr === 0) continue;
 
-    // agent_id: 32 bytes at offset 8
-    const agentIdRaw = new Uint8Array(recBuf, 8, 32);
-    const agentIdEnd = agentIdRaw.indexOf(0);
-    const agentId = Buffer.from(agentIdRaw.slice(0, agentIdEnd < 0 ? 32 : agentIdEnd)).toString('utf8');
+      const recBuf = toArrayBuffer(recPtr as any, 0, VEC_RECORD_SIZE);
+      const recView = new DataView(recBuf);
 
-    // type: 16 bytes at offset 40
-    const typeRaw = new Uint8Array(recBuf, 40, 16);
-    const typeEnd = typeRaw.indexOf(0);
-    const type = Buffer.from(typeRaw.slice(0, typeEnd < 0 ? 16 : typeEnd)).toString('utf8');
+      const timestamp = Number(recView.getBigInt64(0, true));
 
-    const confidence = recView.getFloat32(56, true);
-    const embeddingDim = recView.getUint16(60, true);
-    const embeddingPtr = recView.getBigUint64(64, true);
-    const flags = recView.getUint32(72, true);
+      // agent_id: 32 bytes at offset 8
+      const agentIdRaw = new Uint8Array(recBuf, 8, 32);
+      const agentIdEnd = agentIdRaw.indexOf(0);
+      const agentId = Buffer.from(agentIdRaw.slice(0, agentIdEnd < 0 ? 32 : agentIdEnd)).toString('utf8');
 
-    let embedding = new Float32Array(0);
-    if (embeddingPtr && embeddingDim > 0) {
-      const embBuf = toArrayBuffer(Number(embeddingPtr) as any, 0, embeddingDim * 4);
-      embedding = new Float32Array(embBuf.slice(0));
+      // type: 16 bytes at offset 40
+      const typeRaw = new Uint8Array(recBuf, 40, 16);
+      const typeEnd = typeRaw.indexOf(0);
+      const type = Buffer.from(typeRaw.slice(0, typeEnd < 0 ? 16 : typeEnd)).toString('utf8');
+
+      const confidence = recView.getFloat32(56, true);
+      const embeddingDim = recView.getUint16(60, true);
+      const embeddingPtr = recView.getBigUint64(64, true);
+      const flags = recView.getUint32(72, true);
+
+      // #94: embeddingDim 上限 + embeddingPtr 非零检查
+      let embedding = new Float32Array(0);
+      if (embeddingPtr && embeddingDim > 0 && embeddingDim <= 65536) {
+        const embBuf = toArrayBuffer(Number(embeddingPtr) as any, 0, embeddingDim * 4);
+        embedding = new Float32Array(embBuf.slice(0));
+      }
+
+      results.push({ timestamp, agentId, type, confidence, embedding, flags });
     }
 
-    results.push({ timestamp, agentId, type, confidence, embedding, flags });
+    return results;
+  } catch (err) {
+    // #94: 捕获任何来自 C 内存的非法访问，避免 Bun 崩溃
+    console.error('[ndtsdb-vec] parseVecQueryResult error (invalid C pointer?):', err);
+    return [];
   }
-
-  return results;
 }
 
 // ─── NdtsVecDatabase ─────────────────────────────────────────────────────

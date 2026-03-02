@@ -20,7 +20,12 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <direct.h>
+#include <io.h>
 #define mkdir(path, mode) _mkdir(path)
+/* Windows: flush to disk */
+#define NDTS_FSYNC(fd) _commit(fd)
+/* Windows: no flock, use invalid sentinel */
+#define NDTS_LOCK_FD_INVALID (-1)
 /* strndup is a POSIX extension not available on Windows */
 static char* strndup(const char* s, size_t n) {
     size_t len = 0;
@@ -76,6 +81,11 @@ static void closedir(DIR *dir) {
 #else
 #include <sys/types.h>
 #include <dirent.h>
+#include <unistd.h>
+#include <fcntl.h>      /* open, O_CREAT, O_RDWR */
+#include <sys/file.h>   /* flock */
+#define NDTS_FSYNC(fd) fsync(fd)
+#define NDTS_LOCK_FD_INVALID (-1)
 #endif
 
 // ─── 类型转换 ─────────────────────────────────────────────
@@ -1034,7 +1044,11 @@ static void write_partition_file(const char* filepath,
                                   char** sym_dict, int n_sym,
                                   char** itv_dict, int n_itv,
                                   int32_t* sym_ids, int32_t* itv_ids) {
-    FILE* f = fopen(filepath, "wb");
+    // #90: 写临时文件，成功后原子 rename，避免 crash 产生半写分区文件
+    char tmppath[512 + 4];
+    snprintf(tmppath, sizeof(tmppath), "%s.tmp", filepath);
+
+    FILE* f = fopen(tmppath, "wb");
     if (!f) return;
 
     /* === 提取 OHLCV 列数组并压缩 === */
@@ -1093,11 +1107,20 @@ static void write_partition_file(const char* filepath,
     pos += snprintf(json+pos, sizeof(json)-pos, "\"symbol\":[");
     for (int i = 0; i < n_sym; i++) {
         if (i > 0) json[pos++] = ',';
+        // #92: JSON overflow guard — stop before buffer full (need room for closing ]}}）
+        if (pos + 64 >= (int)sizeof(json)) {
+            fprintf(stderr, "[ndtsdb] ERROR: JSON header overflow at symbol %d/%d — aborting partition write\n", i, n_sym);
+            fclose(f); remove(tmppath); return;
+        }
         pos += snprintf(json+pos, sizeof(json)-pos, "\"%s\"", sym_dict[i]);
     }
     pos += snprintf(json+pos, sizeof(json)-pos, "],\"interval\":[");
     for (int i = 0; i < n_itv; i++) {
         if (i > 0) json[pos++] = ',';
+        if (pos + 32 >= (int)sizeof(json)) {
+            fprintf(stderr, "[ndtsdb] ERROR: JSON header overflow at interval %d/%d — aborting partition write\n", i, n_itv);
+            fclose(f); remove(tmppath); return;
+        }
         pos += snprintf(json+pos, sizeof(json)-pos, "\"%s\"", itv_dict[i]);
     }
     pos += snprintf(json+pos, sizeof(json)-pos, "]}}");
@@ -1145,7 +1168,7 @@ static void write_partition_file(const char* filepath,
     chunk_buf = (uint8_t*)malloc(chunk_size);
     if (!chunk_buf) {
         if (use_gorilla) { free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume); }
-        fclose(f);
+        fclose(f); remove(tmppath);
         return;
     }
 
@@ -1188,7 +1211,14 @@ static void write_partition_file(const char* filepath,
     fwrite(&ccrc, 4, 1, f);
 
     free(chunk_buf);
+
+    // #90: fsync 保证数据落盘，再 rename（POSIX 原子操作）替换目标文件
+    NDTS_FSYNC(fileno(f));
     fclose(f);
+    if (rename(tmppath, filepath) != 0) {
+        remove(tmppath);
+        fprintf(stderr, "[ndtsdb] ERROR: rename(%s, %s) failed\n", tmppath, filepath);
+    }
 }
 
 // ============================================================
@@ -1221,6 +1251,8 @@ struct NDTSDB {
     SymbolData* symbols;
     uint32_t    symbol_count;
     uint32_t    symbols_capacity;
+    // #93: 目录级文件锁（POSIX flock），防止多进程并发写同一目录
+    int         lock_fd;    // -1 = 未加锁 / 文件模式
 };
 
 static SymbolData* find_or_create_symbol(NDTSDB* db, const char* symbol, const char* interval) {
@@ -1242,7 +1274,10 @@ static SymbolData* find_or_create_symbol(NDTSDB* db, const char* symbol, const c
 
     // 需要新增symbol，检查是否需要扩容
     if (db->symbol_count >= db->symbols_capacity) {
+        // #91: 防止 uint32_t 翻倍溢出
+        if (db->symbols_capacity > UINT32_MAX / 2) return NULL;
         uint32_t new_capacity = db->symbols_capacity * 2;
+        // #91: realloc 失败时保留原指针（temp var 模式）
         SymbolData* new_symbols = (SymbolData*)realloc(db->symbols, new_capacity * sizeof(SymbolData));
         if (!new_symbols) return NULL;
         memset(new_symbols + db->symbols_capacity, 0, (new_capacity - db->symbols_capacity) * sizeof(SymbolData));
@@ -1630,6 +1665,7 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
     db->symbols          = NULL;
     db->symbol_count     = 0;
     db->symbols_capacity = 0;
+    db->lock_fd          = NDTS_LOCK_FD_INVALID;
 
     db->is_dir = path_is_dir(path);
 
@@ -1651,6 +1687,26 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
     }
 
     db->dirty  = 0;
+
+#ifndef _WIN32
+    /* #93: 目录模式下加 POSIX 排他文件锁，防止多进程并发写同一目录 */
+    if (db->is_dir) {
+        char lockpath[256 + 6];
+        snprintf(lockpath, sizeof(lockpath), "%s/.lock", path);
+        int lfd = open(lockpath, O_CREAT | O_RDWR, 0600);
+        if (lfd >= 0) {
+            if (flock(lfd, LOCK_EX | LOCK_NB) != 0) {
+                /* 另一进程持有锁 — 失败返回，不允许并发写 */
+                fprintf(stderr, "[ndtsdb] ERROR: database locked by another process: %s\n", path);
+                close(lfd);
+                free(db);
+                return NULL;
+            }
+            db->lock_fd = lfd;
+        }
+        /* 若 open 失败（如只读文件系统），静默继续（降级为无锁） */
+    }
+#endif
 
     if (db->is_dir) {
         /* 目录模式：递归扫描所有 .ndts 文件 */
@@ -1773,10 +1829,11 @@ void ndtsdb_close(NDTSDB* db) {
             }
 
             /* 建字典并填充数据
-             * 每个 symbol 名约 10 chars → json 上限 ~4080 bytes 能容纳约 250 个 symbol。
-             * 使用 250 作为安全上限；超出时打印警告并跳过（不写入无效 id = -1）。 */
-            #define MAX_SYM 250
-            #define MAX_ITV 32
+             * JSON header 固定 4096 bytes，每条 symbol ~12 bytes → 最多约 320 条。
+             * MAX_SYM=4096 不再是瓶颈；JSON overflow 由 write_partition_file 检测并中止。
+             * #92: 超出时报错并跳过整行（不写 sym_id=-1 到磁盘）。 */
+            #define MAX_SYM 4096
+            #define MAX_ITV 256
             char* sym_dict[MAX_SYM]; int n_sym = 0;
             char* itv_dict[MAX_ITV]; int n_itv = 0;
 
@@ -1793,11 +1850,12 @@ void ndtsdb_close(NDTSDB* db) {
                         sym_dict[n_sym] = strdup(flat[i + k].symbol);
                         si = n_sym++;
                     } else {
-                        fprintf(stderr, "[ndtsdb] WARNING: symbol dict full (%d), skipping symbol: %s\n",
+                        // #92: dict 满时报错，行将被过滤（不写 sym_id=-1 到磁盘）
+                        fprintf(stderr, "[ndtsdb] ERROR: symbol dict full (%d), row lost: %s\n",
                                 MAX_SYM, flat[i + k].symbol);
                     }
                 }
-                sym_ids[k] = si;
+                sym_ids[k] = si;  // -1 表示该行需跳过
 
                 /* interval 字典查询/插入 */
                 int ii = -1;
@@ -1818,10 +1876,21 @@ void ndtsdb_close(NDTSDB* db) {
             #undef MAX_SYM
             #undef MAX_ITV
 
+            /* #92: 过滤掉 sym_id==-1 或 itv_id==-1 的行（dict 溢出时出现） */
+            uint32_t valid_n = 0;
+            for (uint32_t k = 0; k < day_n; k++) {
+                if (sym_ids[k] >= 0 && itv_ids[k] >= 0) {
+                    day_rows[valid_n] = day_rows[k];
+                    sym_ids[valid_n]  = sym_ids[k];
+                    itv_ids[valid_n]  = itv_ids[k];
+                    valid_n++;
+                }
+            }
+
             /* 写文件 */
             char filepath[512];
             snprintf(filepath, sizeof(filepath), "%s/%s.ndts", db->path, current_day);
-            write_partition_file(filepath, day_rows, day_n,
+            write_partition_file(filepath, day_rows, valid_n,
                                   sym_dict, n_sym, itv_dict, n_itv,
                                   sym_ids, itv_ids);
 
@@ -1835,8 +1904,11 @@ void ndtsdb_close(NDTSDB* db) {
 
         free(flat);
     } else {
-        /* ===== 文件模式：保持旧格式（向后兼容） ===== */
-        FILE* f = fopen(db->path, "wb");
+        /* ===== 文件模式：保持旧格式（向后兼容）===== */
+        /* #90: 同样使用原子写：先写 .tmp，fsync，再 rename */
+        char tmppath_fm[256 + 4];
+        snprintf(tmppath_fm, sizeof(tmppath_fm), "%s.tmp", db->path);
+        FILE* f = fopen(tmppath_fm, "wb");
         if (f) {
             fwrite("NDTS", 1, 4, f);
             uint32_t version = 1;
@@ -1849,7 +1921,12 @@ void ndtsdb_close(NDTSDB* db) {
                 fwrite(&sd->count, 4, 1, f);
                 fwrite(sd->klines, sizeof(KlineRow), sd->count, f);
             }
+            NDTS_FSYNC(fileno(f));
             fclose(f);
+            if (rename(tmppath_fm, db->path) != 0) {
+                remove(tmppath_fm);
+                fprintf(stderr, "[ndtsdb] ERROR: rename failed for %s\n", db->path);
+            }
         }
     }
 
@@ -1867,6 +1944,16 @@ cleanup:
     }
     db->symbol_count = 0;
     db->symbols_capacity = 0;
+
+#ifndef _WIN32
+    /* #93: 释放目录级文件锁 */
+    if (db->lock_fd != NDTS_LOCK_FD_INVALID) {
+        flock(db->lock_fd, LOCK_UN);
+        close(db->lock_fd);
+        db->lock_fd = NDTS_LOCK_FD_INVALID;
+    }
+#endif
+
     free(db);
 }
 
@@ -1906,9 +1993,11 @@ int ndtsdb_insert(NDTSDB* db, const char* symbol, const char* interval, const Kl
     
     // 动态扩容：count >= capacity 时 realloc
     if (sd->count >= sd->capacity) {
+        // #91: 防止 uint32_t 翻倍溢出
+        if (sd->capacity > UINT32_MAX / 2) return -1;
         uint32_t new_capacity = sd->capacity * 2;
         KlineRow* new_klines = (KlineRow*)realloc(sd->klines, new_capacity * sizeof(KlineRow));
-        if (!new_klines) return -1;  // 扩容失败
+        if (!new_klines) return -1;  // 扩容失败，sd->klines 仍有效
         sd->klines = new_klines;
         sd->capacity = new_capacity;
     }
@@ -1955,10 +2044,12 @@ int ndtsdb_insert_batch(NDTSDB* db, const char* symbol, const char* interval, co
         // 计算新的capacity（至少翻倍，或满足需求）
         uint32_t new_capacity = sd->capacity;
         while (new_capacity < required) {
+            // #91: 防止 uint32_t 翻倍溢出
+            if (new_capacity > UINT32_MAX / 2) return -1;
             new_capacity *= 2;
         }
         KlineRow* new_klines = (KlineRow*)realloc(sd->klines, new_capacity * sizeof(KlineRow));
-        if (!new_klines) return -1;  // 扩容失败
+        if (!new_klines) return -1;  // 扩容失败，sd->klines 仍有效
         sd->klines = new_klines;
         sd->capacity = new_capacity;
     }
