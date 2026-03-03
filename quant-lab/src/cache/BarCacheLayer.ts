@@ -32,6 +32,10 @@ export interface Kline {
   low: number;
   close: number;
   volume: number;
+  quoteVolume?: number;
+  trades?: number;
+  takerBuyVolume?: number;
+  takerBuyQuoteVolume?: number;
 }
 
 export interface BarCacheStats {
@@ -57,6 +61,10 @@ const NDTS_COLS = [
   { name: 'low',       type: 'float64' },
   { name: 'close',     type: 'float64' },
   { name: 'volume',    type: 'float64' },
+  { name: 'quoteVolume', type: 'float64' },
+  { name: 'trades', type: 'int32' },
+  { name: 'takerBuyVolume', type: 'float64' },
+  { name: 'takerBuyQuoteVolume', type: 'float64' },
 ] as const;
 
 /** interval → TTL（秒） */
@@ -114,9 +122,24 @@ export class BarCacheLayer {
     const l   = data.get('low')       as Float64Array;
     const c   = data.get('close')     as Float64Array;
     const v   = data.get('volume')    as Float64Array;
+    const qv  = data.get('quoteVolume') as Float64Array | undefined;
+    const tr  = data.get('trades')    as Int32Array | undefined;
+    const tbv = data.get('takerBuyVolume') as Float64Array | undefined;
+    const tbq = data.get('takerBuyQuoteVolume') as Float64Array | undefined;
     const result: Kline[] = [];
     for (let i = 0; i < ts.length; i++) {
-      result.push({ timestamp: Number(ts[i]), open: o[i], high: h[i], low: l[i], close: c[i], volume: v[i] });
+      result.push({
+        timestamp: Number(ts[i]),
+        open: o[i],
+        high: h[i],
+        low: l[i],
+        close: c[i],
+        volume: v[i],
+        quoteVolume: qv ? qv[i] : undefined,
+        trades: tr ? tr[i] : undefined,
+        takerBuyVolume: tbv ? tbv[i] : undefined,
+        takerBuyQuoteVolume: tbq ? tbq[i] : undefined,
+      });
     }
     return result;
   }
@@ -131,7 +154,15 @@ export class BarCacheLayer {
     writer.open();
     writer.append(newBars.map(b => ({
       timestamp: BigInt(b.timestamp),
-      open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume,
+      open: b.open,
+      high: b.high,
+      low: b.low,
+      close: b.close,
+      volume: b.volume,
+      quoteVolume: b.quoteVolume ?? 0,
+      trades: b.trades ?? 0,
+      takerBuyVolume: b.takerBuyVolume ?? 0,
+      takerBuyQuoteVolume: b.takerBuyQuoteVolume ?? 0,
     })));
     // AppendWriter.close() is async, but we use sync pattern here
     void (writer as any).close?.();

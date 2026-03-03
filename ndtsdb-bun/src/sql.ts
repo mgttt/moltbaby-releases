@@ -217,7 +217,7 @@ function buildWherePredicate(whereClause: string): (row: Record<string, any>) =>
 
 function isAggregateFunction(expr: string): boolean {
   const normalized = expr.toLowerCase().replace(/\s+/g, '');
-  const aggregateFunctions = ['count(', 'sum(', 'avg(', 'min(', 'max(', 'first(', 'last('];
+  const aggregateFunctions = ['count(', 'sum(', 'avg(', 'min(', 'max(', 'stddev(', 'variance(', 'var(', 'std(', 'first(', 'last('];
   return aggregateFunctions.some(fn => normalized.includes(fn));
 }
 
@@ -291,6 +291,22 @@ function aggregateRows(rows: Record<string, any>[], expr: string): any {
       return rows[0]?.[colName];
     case 'last':
       return rows[rows.length - 1]?.[colName];
+    case 'variance':
+    case 'var': {
+      const good = values.filter(v => Number.isFinite(v));
+      if (good.length < 2) return NaN;
+      const mean = good.reduce((a, b) => a + b, 0) / good.length;
+      const sumSq = good.reduce((sum, v) => sum + (v - mean) ** 2, 0);
+      return sumSq / (good.length - 1); // Sample variance
+    }
+    case 'stddev':
+    case 'std': {
+      const good = values.filter(v => Number.isFinite(v));
+      if (good.length < 2) return NaN;
+      const mean = good.reduce((a, b) => a + b, 0) / good.length;
+      const sumSq = good.reduce((sum, v) => sum + (v - mean) ** 2, 0);
+      return Math.sqrt(sumSq / (good.length - 1)); // Sample standard deviation
+    }
     default:
       return rows[0]?.[colName];
   }

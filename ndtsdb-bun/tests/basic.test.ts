@@ -553,4 +553,63 @@ describe('DISTINCT and Enhanced ORDER BY', () => {
     expect(rows[0].symbol).toBe('ETH');
     expect(rows[1].symbol).toBe('BTC');
   });
+
+  it('STDDEV aggregate without GROUP BY', () => {
+    const exec = new SQLExecutor();
+    // Data: 100, 110, 105 → mean=105, variance=25, stddev=5
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'BTC', interval: '1h', timestamp: 2n, close: 110, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 105, volume: 15 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT STDDEV(close) FROM klines'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['STDDEV(close)']).toBe(5);
+  });
+
+  it('VARIANCE aggregate without GROUP BY', () => {
+    const exec = new SQLExecutor();
+    // Data: 100, 110, 105 → mean=105, variance=25
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'BTC', interval: '1h', timestamp: 2n, close: 110, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 105, volume: 15 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT VARIANCE(close) FROM klines'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['VARIANCE(close)']).toBe(25);
+  });
+
+  it('GROUP BY with STDDEV', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'BTC', interval: '1h', timestamp: 2n, close: 110, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 105, volume: 15 },
+      { symbol: 'ETH', interval: '1h', timestamp: 4n, close: 50, volume: 5 },
+      { symbol: 'ETH', interval: '1h', timestamp: 5n, close: 55, volume: 25 },
+      { symbol: 'ETH', interval: '1h', timestamp: 6n, close: 60, volume: 35 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT symbol, STDDEV(close) FROM klines GROUP BY symbol'));
+    expect(rows).toHaveLength(2);
+    const btcRow = rows.find(r => r.symbol === 'BTC');
+    const ethRow = rows.find(r => r.symbol === 'ETH');
+    expect(btcRow?.['STDDEV(close)']).toBe(5); // 100,110,105 → stddev=5
+    expect(ethRow?.['STDDEV(close)']).toBe(5); // 50,55,60 → stddev=5
+  });
+
+  it('GROUP BY with VARIANCE and COUNT', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'BTC', interval: '1h', timestamp: 2n, close: 110, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 105, volume: 15 },
+      { symbol: 'ETH', interval: '1h', timestamp: 4n, close: 50, volume: 5 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT symbol, COUNT(*), VARIANCE(close) FROM klines GROUP BY symbol'));
+    expect(rows).toHaveLength(2);
+    const btcRow = rows.find(r => r.symbol === 'BTC');
+    expect(btcRow?.['COUNT(*)']).toBe(3);
+    expect(btcRow?.['VARIANCE(close)']).toBe(25);
+  });
 });
