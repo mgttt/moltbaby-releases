@@ -245,8 +245,9 @@ describe('parseSQL', () => {
 
   it('parses ORDER BY and LIMIT', () => {
     const r = parseSQL('SELECT * FROM klines ORDER BY timestamp DESC LIMIT 100');
-    expect(r.data.orderBy).toBe('timestamp');
-    expect(r.data.orderDir).toBe('DESC');
+    expect(r.data.orderBy).toHaveLength(1);
+    expect(r.data.orderBy?.[0].col).toBe('timestamp');
+    expect(r.data.orderBy?.[0].direction).toBe('DESC');
     expect(r.data.limit).toBe(100);
   });
 
@@ -312,5 +313,244 @@ describe('SQLExecutor', () => {
   it('throws on unknown table', () => {
     const exec = new SQLExecutor();
     expect(() => exec.execute(parseSQL('SELECT * FROM nonexistent'))).toThrow('Table not found');
+  });
+});
+
+// ─── Group By & Aggregation ──────────────────────────────────────────────────
+
+describe('GROUP BY and Aggregation', () => {
+  function makeTable(rows: Record<string, any>[]): ColumnarTable {
+    const t = new ColumnarTable([
+      { name: 'symbol', type: 'string' },
+      { name: 'interval', type: 'string' },
+      { name: 'timestamp', type: 'int64' },
+      { name: 'close', type: 'float64' },
+      { name: 'volume', type: 'float64' },
+    ]);
+    t.appendBatch(rows);
+    return t;
+  }
+
+  it('COUNT(*) without GROUP BY', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 150, volume: 15 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT COUNT(*) FROM klines'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['COUNT(*)']).toBe(3);
+  });
+
+  it('SUM aggregate without GROUP BY', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT SUM(volume) FROM klines'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['SUM(volume)']).toBe(30);
+  });
+
+  it('AVG aggregate without GROUP BY', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT AVG(close) FROM klines'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['AVG(close)']).toBe(150);
+  });
+
+  it('MIN and MAX aggregates', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 150, volume: 15 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT MIN(close), MAX(close) FROM klines'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['MIN(close)']).toBe(100);
+    expect(rows[0]['MAX(close)']).toBe(200);
+  });
+
+  it('GROUP BY single column with COUNT', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 150, volume: 15 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT symbol, COUNT(*) FROM klines GROUP BY symbol'));
+    expect(rows).toHaveLength(2);
+    const btcRow = rows.find(r => r.symbol === 'BTC');
+    const ethRow = rows.find(r => r.symbol === 'ETH');
+    expect(btcRow?.['COUNT(*)']).toBe(2);
+    expect(ethRow?.['COUNT(*)']).toBe(1);
+  });
+
+  it('GROUP BY with SUM', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 150, volume: 15 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT symbol, SUM(volume) FROM klines GROUP BY symbol'));
+    expect(rows).toHaveLength(2);
+    const btcRow = rows.find(r => r.symbol === 'BTC');
+    expect(btcRow?.['SUM(volume)']).toBe(25); // 10 + 15
+  });
+
+  it('GROUP BY multiple columns', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'BTC', interval: '4h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 150, volume: 15 },
+      { symbol: 'ETH', interval: '1h', timestamp: 4n, close: 50, volume: 5 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT symbol, interval, COUNT(*) FROM klines GROUP BY symbol, interval'));
+    expect(rows).toHaveLength(3);
+    const btc1h = rows.find(r => r.symbol === 'BTC' && r.interval === '1h');
+    expect(btc1h?.['COUNT(*)']).toBe(2);
+  });
+
+  it('GROUP BY with AVG', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'BTC', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'ETH', interval: '1h', timestamp: 3n, close: 50, volume: 5 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT symbol, AVG(close) FROM klines GROUP BY symbol'));
+    expect(rows).toHaveLength(2);
+    const btcRow = rows.find(r => r.symbol === 'BTC');
+    expect(btcRow?.['AVG(close)']).toBe(150); // (100 + 200) / 2
+  });
+
+  it('parseSQL: parses GROUP BY clause', () => {
+    const r = parseSQL('SELECT symbol, COUNT(*) FROM klines GROUP BY symbol');
+    expect(r.data.groupBy).toEqual(['symbol']);
+  });
+
+  it('parseSQL: parses multiple GROUP BY columns', () => {
+    const r = parseSQL('SELECT symbol, interval, COUNT(*) FROM klines GROUP BY symbol, interval');
+    expect(r.data.groupBy).toEqual(['symbol', 'interval']);
+  });
+
+  it('parseSQL: parses HAVING clause', () => {
+    const r = parseSQL("SELECT symbol, COUNT(*) FROM klines GROUP BY symbol HAVING COUNT(*) > 1");
+    expect(r.data.having).toBe('COUNT(*) > 1');
+  });
+
+  it('HAVING filters grouped results', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 150, volume: 15 },
+    ]));
+    const { rows } = exec.execute(parseSQL("SELECT symbol, COUNT(*) FROM klines GROUP BY symbol HAVING COUNT(*) > 1"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].symbol).toBe('BTC');
+  });
+});
+
+// ─── DISTINCT and Enhanced ORDER BY ──────────────────────────────────────────
+
+describe('DISTINCT and Enhanced ORDER BY', () => {
+  function makeTable(rows: Record<string, any>[]): ColumnarTable {
+    const t = new ColumnarTable([
+      { name: 'symbol', type: 'string' },
+      { name: 'interval', type: 'string' },
+      { name: 'timestamp', type: 'int64' },
+      { name: 'close', type: 'float64' },
+      { name: 'volume', type: 'float64' },
+    ]);
+    t.appendBatch(rows);
+    return t;
+  }
+
+  it('SELECT DISTINCT removes duplicates', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 }, // duplicate
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT DISTINCT * FROM klines'));
+    expect(rows).toHaveLength(2);
+  });
+
+  it('SELECT DISTINCT with column projection', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'BTC', interval: '4h', timestamp: 2n, close: 150, volume: 15 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 100, volume: 10 }, // duplicate symbol
+      { symbol: 'ETH', interval: '1h', timestamp: 4n, close: 200, volume: 20 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT DISTINCT symbol FROM klines'));
+    expect(rows).toHaveLength(2);
+  });
+
+  it('parseSQL detects DISTINCT', () => {
+    const r = parseSQL('SELECT DISTINCT symbol FROM klines');
+    expect(r.data.distinct).toBe(true);
+  });
+
+  it('ORDER BY multiple columns', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '4h', timestamp: 3n, close: 150, volume: 15 },
+      { symbol: 'BTC', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT * FROM klines ORDER BY symbol ASC, interval ASC'));
+    expect(rows[0].symbol).toBe('BTC');
+    expect(rows[0].interval).toBe('1h');
+    expect(rows[1].interval).toBe('4h');
+    expect(rows[2].symbol).toBe('ETH');
+  });
+
+  it('ORDER BY with DESC on multiple columns', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'A', interval: '1h', timestamp: 1n, close: 100, volume: 10 },
+      { symbol: 'A', interval: '4h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'B', interval: '1h', timestamp: 3n, close: 150, volume: 15 },
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT * FROM klines ORDER BY symbol DESC, close DESC'));
+    expect(rows[0].symbol).toBe('B');
+    expect(rows[1].symbol).toBe('A');
+    expect(rows[1].close).toBe(200);
+    expect(rows[2].close).toBe(100);
+  });
+
+  it('parseSQL: parses multiple ORDER BY columns', () => {
+    const r = parseSQL('SELECT * FROM klines ORDER BY symbol ASC, timestamp DESC');
+    expect(r.data.orderBy).toHaveLength(2);
+    expect(r.data.orderBy?.[0].col).toBe('symbol');
+    expect(r.data.orderBy?.[0].direction).toBe('ASC');
+    expect(r.data.orderBy?.[1].col).toBe('timestamp');
+    expect(r.data.orderBy?.[1].direction).toBe('DESC');
+  });
+
+  it('DISTINCT with ORDER BY', () => {
+    const exec = new SQLExecutor();
+    exec.registerTable('klines', makeTable([
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 150, volume: 15 },
+      { symbol: 'ETH', interval: '1h', timestamp: 2n, close: 200, volume: 20 },
+      { symbol: 'BTC', interval: '1h', timestamp: 3n, close: 150, volume: 15 }, // duplicate
+    ]));
+    const { rows } = exec.execute(parseSQL('SELECT DISTINCT symbol FROM klines ORDER BY symbol DESC'));
+    expect(rows).toHaveLength(2);
+    expect(rows[0].symbol).toBe('ETH');
+    expect(rows[1].symbol).toBe('BTC');
   });
 });
