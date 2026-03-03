@@ -864,6 +864,24 @@ void delta_decode_f64(const double* src, double* dst, size_t n) {
     prefix_sum_f64(src, dst, n);
 }
 
+// 整数差分解码 (int32)
+static void delta_decode_i32(const int32_t* src, int32_t* dst, size_t n) {
+    if (n == 0) return;
+    dst[0] = src[0];
+    for (size_t i = 1; i < n; i++) {
+        dst[i] = dst[i-1] + src[i];
+    }
+}
+
+// 整数差分解码 (int64)
+static void delta_decode_i64(const int64_t* src, int64_t* dst, size_t n) {
+    if (n == 0) return;
+    dst[0] = src[0];
+    for (size_t i = 1; i < n; i++) {
+        dst[i] = dst[i-1] + src[i];
+    }
+}
+
 // EMA (Exponential Moving Average)
 void ema_f64(const double* src, double* dst, size_t n, double alpha) {
     if (n == 0) return;
@@ -1053,23 +1071,32 @@ static void write_partition_file(const char* filepath,
     FILE* f = fopen(tmppath, "wb");
     if (!f) return;
 
-    /* === 提取 OHLCV 列数组并压缩 === */
+    /* === 提取 OHLCV + 额外 3 列数组并压缩 === */
     size_t gorilla_bound = GORILLA_BOUND(n_rows);
     double* col_open   = (double*)malloc(n_rows * 8);
     double* col_high   = (double*)malloc(n_rows * 8);
     double* col_low    = (double*)malloc(n_rows * 8);
     double* col_close  = (double*)malloc(n_rows * 8);
     double* col_volume = (double*)malloc(n_rows * 8);
+    double* col_quote_volume = (double*)malloc(n_rows * 8);
+    double* col_taker_buy_volume = (double*)malloc(n_rows * 8);
+    double* col_taker_buy_quote_volume = (double*)malloc(n_rows * 8);
     uint8_t* buf_open   = (uint8_t*)malloc(gorilla_bound);
     uint8_t* buf_high   = (uint8_t*)malloc(gorilla_bound);
     uint8_t* buf_low    = (uint8_t*)malloc(gorilla_bound);
     uint8_t* buf_close  = (uint8_t*)malloc(gorilla_bound);
     uint8_t* buf_volume = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_quote_volume = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_taker_buy_volume = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_taker_buy_quote_volume = (uint8_t*)malloc(gorilla_bound);
 
     int use_gorilla = col_open && col_high && col_low && col_close && col_volume
-                   && buf_open && buf_high && buf_low && buf_close && buf_volume;
+                   && col_quote_volume && col_taker_buy_volume && col_taker_buy_quote_volume
+                   && buf_open && buf_high && buf_low && buf_close && buf_volume
+                   && buf_quote_volume && buf_taker_buy_volume && buf_taker_buy_quote_volume;
 
     size_t len_open = 0, len_high = 0, len_low = 0, len_close = 0, len_volume = 0;
+    size_t len_quote_volume = 0, len_taker_buy_volume = 0, len_taker_buy_quote_volume = 0;
 
     if (use_gorilla && n_rows > 0) {
         for (uint32_t i = 0; i < n_rows; i++) {
@@ -1078,14 +1105,21 @@ static void write_partition_file(const char* filepath,
             col_low[i]    = rows[i].low;
             col_close[i]  = rows[i].close;
             col_volume[i] = rows[i].volume;
+            col_quote_volume[i] = rows[i].quoteVolume;
+            col_taker_buy_volume[i] = rows[i].takerBuyVolume;
+            col_taker_buy_quote_volume[i] = rows[i].takerBuyQuoteVolume;
         }
         len_open   = gorilla_compress_f64(col_open,   n_rows, buf_open);
         len_high   = gorilla_compress_f64(col_high,   n_rows, buf_high);
         len_low    = gorilla_compress_f64(col_low,    n_rows, buf_low);
         len_close  = gorilla_compress_f64(col_close,  n_rows, buf_close);
         len_volume = gorilla_compress_f64(col_volume, n_rows, buf_volume);
+        len_quote_volume = gorilla_compress_f64(col_quote_volume, n_rows, buf_quote_volume);
+        len_taker_buy_volume = gorilla_compress_f64(col_taker_buy_volume, n_rows, buf_taker_buy_volume);
+        len_taker_buy_quote_volume = gorilla_compress_f64(col_taker_buy_quote_volume, n_rows, buf_taker_buy_quote_volume);
     }
     free(col_open); free(col_high); free(col_low); free(col_close); free(col_volume);
+    free(col_quote_volume); free(col_taker_buy_volume); free(col_taker_buy_quote_volume);
 
     /* === 构建 JSON header === */
     /* header_block = 4096 bytes: magic(4) + hlen(4) + json(≤4088) + CRC4
@@ -1094,17 +1128,13 @@ static void write_partition_file(const char* filepath,
     int pos = 0;
     pos += snprintf(json+pos, sizeof(json)-pos,
         "{\"columns\":["
-        "{\"name\":\"symbol\",\"type\":\"string\"},"
-        "{\"name\":\"interval\",\"type\":\"string\"},"
-        "{\"name\":\"timestamp\",\"type\":\"int64\"},"
-        "{\"name\":\"open\",\"type\":\"float64\"},"
-        "{\"name\":\"high\",\"type\":\"float64\"},"
-        "{\"name\":\"low\",\"type\":\"float64\"},"
-        "{\"name\":\"close\",\"type\":\"float64\"},"
-        "{\"name\":\"volume\",\"type\":\"float64\"},"
-        "{\"name\":\"flags\",\"type\":\"uint32\"}"
-        "],\"totalRows\":%u,\"chunkCount\":1,\"compression\":\"%s\",\"stringDicts\":{",
-        n_rows, use_gorilla ? "gorilla" : "none");
+        "\"symbol_id\",\"timestamp\",\"open\",\"high\",\"low\",\"close\",\"volume\","
+        "\"quoteVolume\",\"trades\",\"takerBuyVolume\",\"takerBuyQuoteVolume\""
+        "],\"compression\":{\"enabled\":%s,\"algorithms\":{"
+        "\"open\":\"gorilla\",\"high\":\"gorilla\",\"low\":\"gorilla\",\"close\":\"gorilla\","
+        "\"volume\":\"gorilla\",\"quoteVolume\":\"gorilla\",\"takerBuyVolume\":\"gorilla\","
+        "\"takerBuyQuoteVolume\":\"gorilla\",\"trades\":\"delta\"}},\"stringDicts\":{",
+        use_gorilla ? "true" : "false");
 
     pos += snprintf(json+pos, sizeof(json)-pos, "\"symbol\":[");
     for (int i = 0; i < n_sym; i++) {
@@ -1148,7 +1178,7 @@ static void write_partition_file(const char* filepath,
 
     if (use_gorilla) {
         /* 压缩格式: sym_ids(raw) + itv_ids(raw) + timestamps(raw)
-         *           + [len(4)+data](×5 OHLCV) + flags(raw) */
+         *           + [len(4)+data](×8 OHLCV+extra_3_double) + trades(raw) + flags(raw) */
         chunk_size = 4                       /* row_count */
             + n_rows * 4                     /* sym_ids */
             + n_rows * 4                     /* itv_ids */
@@ -1158,18 +1188,27 @@ static void write_partition_file(const char* filepath,
             + (4 + len_low)
             + (4 + len_close)
             + (4 + len_volume)
+            + (4 + len_quote_volume)         /* quoteVolume: len+data */
+            + (4 + len_taker_buy_volume)     /* takerBuyVolume: len+data */
+            + (4 + len_taker_buy_quote_volume) /* takerBuyQuoteVolume: len+data */
+            + n_rows * 4                     /* trades: raw int32 */
             + n_rows * 4;                    /* flags */
     } else {
         chunk_size = 4
             + n_rows * 4 + n_rows * 4
             + n_rows * 8
-            + n_rows * 8 * 5
-            + n_rows * 4;
+            + n_rows * 8 * 5                 /* OHLCV */
+            + n_rows * 8 * 3                 /* quoteVolume, takerBuyVolume, takerBuyQuoteVolume */
+            + n_rows * 4                     /* trades */
+            + n_rows * 4;                    /* flags */
     }
 
     chunk_buf = (uint8_t*)malloc(chunk_size);
     if (!chunk_buf) {
-        if (use_gorilla) { free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume); }
+        if (use_gorilla) {
+            free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume);
+            free(buf_quote_volume); free(buf_taker_buy_volume); free(buf_taker_buy_quote_volume);
+        }
         fclose(f); remove(tmppath);
         return;
     }
@@ -1187,21 +1226,32 @@ static void write_partition_file(const char* filepath,
     for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].timestamp, 8); p += 8; }
 
     if (use_gorilla) {
-        /* OHLCV: gorilla 压缩，每列前缀 uint32_t 长度 */
+        /* OHLCV + extra 3 double: gorilla 压缩，每列前缀 uint32_t 长度 */
         uint32_t u32;
         u32 = (uint32_t)len_open;   memcpy(p, &u32, 4); p += 4; memcpy(p, buf_open,   len_open);   p += len_open;
         u32 = (uint32_t)len_high;   memcpy(p, &u32, 4); p += 4; memcpy(p, buf_high,   len_high);   p += len_high;
         u32 = (uint32_t)len_low;    memcpy(p, &u32, 4); p += 4; memcpy(p, buf_low,    len_low);    p += len_low;
         u32 = (uint32_t)len_close;  memcpy(p, &u32, 4); p += 4; memcpy(p, buf_close,  len_close);  p += len_close;
         u32 = (uint32_t)len_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_volume, len_volume); p += len_volume;
+        u32 = (uint32_t)len_quote_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_quote_volume, len_quote_volume); p += len_quote_volume;
+        u32 = (uint32_t)len_taker_buy_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_taker_buy_volume, len_taker_buy_volume); p += len_taker_buy_volume;
+        u32 = (uint32_t)len_taker_buy_quote_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_taker_buy_quote_volume, len_taker_buy_quote_volume); p += len_taker_buy_quote_volume;
         free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume);
+        free(buf_quote_volume); free(buf_taker_buy_volume); free(buf_taker_buy_quote_volume);
+        /* trades: raw int32 */
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].trades, 4); p += 4; }
     } else {
-        /* OHLCV: raw float64 */
+        /* OHLCV + extra 3 double: raw float64 */
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].open,   8); p += 8; }
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].high,   8); p += 8; }
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].low,    8); p += 8; }
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].close,  8); p += 8; }
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].volume, 8); p += 8; }
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].quoteVolume, 8); p += 8; }
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].takerBuyVolume, 8); p += 8; }
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].takerBuyQuoteVolume, 8); p += 8; }
+        /* trades: raw int32 */
+        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].trades, 4); p += 4; }
     }
 
     /* flags (raw) */
@@ -1488,8 +1538,24 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     }
 
     /* 4. 检测格式标志 */
-    int is_old_ts = (strstr(header_json, "\"enabled\":true") != NULL);
-    int is_gorilla = (strstr(header_json, "\"compression\":\"gorilla\"") != NULL);
+    /* 旧版 TS 压缩：根级别有 "enabled":true，但没有 "compression":{ */
+    int has_compression_obj = (strstr(header_json, "\"compression\":{") != NULL);
+    int is_old_ts = (!has_compression_obj && strstr(header_json, "\"enabled\":true") != NULL);
+    /* 新版分列压缩：有 "compression":{"algorithms":...} 或旧版单列 gorilla */
+    int is_gorilla = (strstr(header_json, "\"compression\":\"gorilla\"") != NULL) || has_compression_obj;
+
+    /* 检测额外列存在性（用于向后兼容） */
+    int has_quoteVolume = (strstr(header_json, "\"quoteVolume\"") != NULL);
+    int has_trades = (strstr(header_json, "\"trades\"") != NULL);
+    int has_takerBuyVolume = (strstr(header_json, "\"takerBuyVolume\"") != NULL);
+    int has_takerBuyQuoteVolume = (strstr(header_json, "\"takerBuyQuoteVolume\"") != NULL);
+
+    /*  consolidated flag: 如果任意一个额外列存在，就假设全部存在（分区文件格式） */
+    int has_extra_cols = has_quoteVolume || has_trades || has_takerBuyVolume || has_takerBuyQuoteVolume;
+
+    fprintf(stderr, "[ndtsdb debug] %s: has_quoteVolume=%d has_trades=%d has_takerBuyVolume=%d has_takerBuyQuoteVolume=%d has_extra_cols=%d\n",
+            filepath, has_quoteVolume, has_trades, has_takerBuyVolume, has_takerBuyQuoteVolume, has_extra_cols);
+
     free(header_json);
 
     if (is_old_ts) {
@@ -1506,7 +1572,9 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     int total_loaded = 0;
 
     /* 6. 循环读取所有 chunks */
+    int chunk_num = 0;
     while (!feof(f)) {
+        chunk_num++;
         /* snapshot 限制 */
         if (db->snapshot_size > 0) {
             long pos = ftell(f);
@@ -1514,14 +1582,25 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
         }
 
         uint32_t row_count = 0;
-        if (fread(&row_count, 4, 1, f) != 1 || row_count == 0) break;
-        if (row_count > 10000000) break;  /* 安全上限，防止 OOM */
+        if (fread(&row_count, 4, 1, f) != 1) {
+            fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read row_count\n", chunk_num);
+            break;
+        }
+        if (row_count == 0) {
+            fprintf(stderr, "[ndtsdb debug] chunk %d: row_count is 0\n", chunk_num);
+            break;
+        }
+        if (row_count > 10000000) {
+            fprintf(stderr, "[ndtsdb debug] chunk %d: row_count %u too large\n", chunk_num, row_count);
+            break;  /* 安全上限，防止 OOM */
+        }
+        fprintf(stderr, "[ndtsdb debug] chunk %d: row_count=%u has_extra_cols=%d\n", chunk_num, row_count, has_extra_cols);
 
         /* 增量 CRC 状态（与 write 侧 crc32_buf 等价，从同一初始值开始） */
         uint32_t crc_state = 0xFFFFFFFFu;
         crc_state = crc32_update(crc_state, &row_count, 4);
 
-        /* 分配列缓冲区 */
+        /* 分配列缓冲区 (8列基础: OHLCV + flags，额外4列根据 has_extra_cols) */
         int32_t*  sym_ids    = (int32_t*)malloc(row_count * 4);
         int32_t*  itv_ids    = (int32_t*)malloc(row_count * 4);
         int64_t*  timestamps = (int64_t*)malloc(row_count * 8);
@@ -1530,33 +1609,47 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
         double*   lows       = (double*)malloc(row_count * 8);
         double*   closes     = (double*)malloc(row_count * 8);
         double*   volumes    = (double*)malloc(row_count * 8);
+        double*   quote_volumes    = has_extra_cols ? (double*)malloc(row_count * 8) : NULL;
+        uint32_t* trades           = has_extra_cols ? (uint32_t*)malloc(row_count * 4) : NULL;
+        double*   taker_buy_volumes      = has_extra_cols ? (double*)malloc(row_count * 8) : NULL;
+        double*   taker_buy_quote_volumes = has_extra_cols ? (double*)malloc(row_count * 8) : NULL;
         uint32_t* flags      = (uint32_t*)malloc(row_count * 4);
 
         if (!sym_ids || !itv_ids || !timestamps ||
-            !opens || !highs || !lows || !closes || !volumes || !flags) {
+            !opens || !highs || !lows || !closes || !volumes || !flags ||
+            (has_extra_cols && (!quote_volumes || !trades || !taker_buy_volumes || !taker_buy_quote_volumes))) {
             free(sym_ids); free(itv_ids); free(timestamps);
             free(opens); free(highs); free(lows);
-            free(closes); free(volumes); free(flags);
+            free(closes); free(volumes);
+            if (has_extra_cols) { free(quote_volumes); free(trades);
+            free(taker_buy_volumes); free(taker_buy_quote_volumes); }
+            free(flags);
             break;
         }
 
-        /* sym_ids / itv_ids / timestamps — 始终 raw */
+        /* sym_ids / itv_ids / timestamps — 始终 raw 格式（不支持 delta 压缩的分区文件） */
+        /* 新分区文件（由 Bun AppendWriter 写）使用 delta 压缩，尚不支持读取 */
         if (fread(sym_ids,    4, row_count, f) != row_count ||
             fread(itv_ids,    4, row_count, f) != row_count ||
             fread(timestamps, 8, row_count, f) != row_count) {
             free(sym_ids); free(itv_ids); free(timestamps);
             free(opens); free(highs); free(lows);
-            free(closes); free(volumes); free(flags);
+            free(closes); free(volumes);
+            if (has_extra_cols) { free(quote_volumes); free(trades);
+            free(taker_buy_volumes); free(taker_buy_quote_volumes); }
+            free(flags);
             break;
         }
         crc_state = crc32_update(crc_state, sym_ids,    row_count * 4);
         crc_state = crc32_update(crc_state, itv_ids,    row_count * 4);
         crc_state = crc32_update(crc_state, timestamps, row_count * 8);
 
-        /* OHLCV：gorilla 解压 或 raw */
         int ok = 1;
+
+        /* OHLCV + 可选额外列：gorilla 解压 或 raw */
         if (is_gorilla) {
-            double* ohlcv[5] = { opens, highs, lows, closes, volumes };
+            /* 5 列基础 double 数据: OHLCV */
+            double* ohlcv_basic[5] = { opens, highs, lows, closes, volumes };
             for (int ci = 0; ci < 5 && ok; ci++) {
                 uint32_t clen = 0;
                 if (fread(&clen, 4, 1, f) != 1 ||
@@ -1569,9 +1662,69 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 /* CRC 覆盖压缩字节（与写入侧一致），必须在 free(cbuf) 前计算 */
                 crc_state = crc32_update(crc_state, &clen, 4);
                 crc_state = crc32_update(crc_state, cbuf, clen);
-                size_t decoded = gorilla_decompress_f64(cbuf, clen, ohlcv[ci], row_count);
+                size_t decoded = gorilla_decompress_f64(cbuf, clen, ohlcv_basic[ci], row_count);
                 free(cbuf);
                 if (decoded != row_count) { ok = 0; }
+            }
+            /* 额外 3 列 double 数据 (has_extra_cols): quoteVolume, takerBuyVolume, takerBuyQuoteVolume */
+            if (ok && has_extra_cols) {
+                double* extra_cols[3] = { quote_volumes, taker_buy_volumes, taker_buy_quote_volumes };
+                for (int ci = 0; ci < 3 && ok; ci++) {
+                    uint32_t clen = 0;
+                    if (fread(&clen, 4, 1, f) != 1 ||
+                        clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
+                        ok = 0; break;
+                    }
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; break; }
+                    if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); ok = 0; break; }
+                    crc_state = crc32_update(crc_state, &clen, 4);
+                    crc_state = crc32_update(crc_state, cbuf, clen);
+                    size_t decoded = gorilla_decompress_f64(cbuf, clen, extra_cols[ci], row_count);
+                    free(cbuf);
+                    if (decoded != row_count) { ok = 0; }
+                }
+            }
+            /* trades 列 (uint32_t) - 可能 delta 压缩 (has_extra_cols 时) */
+            if (ok && has_extra_cols) {
+                uint32_t trades_clen = 0;
+                uint8_t* trades_cbuf = NULL;
+                int32_t* trades_delta = NULL;
+
+                if (fread(&trades_clen, 4, 1, f) != 1) {
+                    ok = 0;
+                } else {
+                    crc_state = crc32_update(crc_state, &trades_clen, 4);
+
+                    if (trades_clen < row_count * 4 + 1000 && trades_clen > 0) {
+                        /* 压缩格式 */
+                        trades_cbuf = (uint8_t*)malloc(trades_clen);
+                        trades_delta = (int32_t*)malloc(row_count * 4);
+                        if (!trades_cbuf || !trades_delta) {
+                            ok = 0;
+                        } else if (fread(trades_cbuf, 1, trades_clen, f) != trades_clen) {
+                            ok = 0;
+                        } else {
+                            crc_state = crc32_update(crc_state, trades_cbuf, trades_clen);
+                            if (trades_clen == row_count * 4) {
+                                memcpy(trades_delta, trades_cbuf, trades_clen);
+                                delta_decode_i32(trades_delta, (int32_t*)trades, row_count);
+                            } else {
+                                ok = 0;
+                            }
+                        }
+                    } else {
+                        /* raw 格式：trades_clen 是第一个值 */
+                        memcpy(trades, &trades_clen, 4);
+                        if (fread(trades + 1, 4, row_count - 1, f) != row_count - 1) {
+                            ok = 0;
+                        } else {
+                            crc_state = crc32_update(crc_state, trades + 1, (row_count - 1) * 4);
+                        }
+                    }
+                }
+                free(trades_cbuf);
+                free(trades_delta);
             }
         } else {
             if (fread(opens,   8, row_count, f) != row_count ||
@@ -1586,6 +1739,19 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 crc_state = crc32_update(crc_state, lows,    row_count * 8);
                 crc_state = crc32_update(crc_state, closes,  row_count * 8);
                 crc_state = crc32_update(crc_state, volumes, row_count * 8);
+            }
+            if (ok && has_extra_cols) {
+                if (fread(quote_volumes, 8, row_count, f) != row_count ||
+                    fread(trades, 4, row_count, f) != row_count ||
+                    fread(taker_buy_volumes, 8, row_count, f) != row_count ||
+                    fread(taker_buy_quote_volumes, 8, row_count, f) != row_count) {
+                    ok = 0;
+                } else {
+                    crc_state = crc32_update(crc_state, quote_volumes, row_count * 8);
+                    crc_state = crc32_update(crc_state, trades, row_count * 4);
+                    crc_state = crc32_update(crc_state, taker_buy_volumes, row_count * 8);
+                    crc_state = crc32_update(crc_state, taker_buy_quote_volumes, row_count * 8);
+                }
             }
         }
 
@@ -1606,7 +1772,10 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                         filepath, computed_crc, disk_crc, row_count);
                 free(sym_ids); free(itv_ids); free(timestamps);
                 free(opens); free(highs); free(lows);
-                free(closes); free(volumes); free(flags);
+                free(closes); free(volumes);
+                if (has_extra_cols) { free(quote_volumes); free(trades);
+                free(taker_buy_volumes); free(taker_buy_quote_volumes); }
+                free(flags);
                 continue;
             }
         }
@@ -1614,7 +1783,10 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
         if (!ok) {
             free(sym_ids); free(itv_ids); free(timestamps);
             free(opens); free(highs); free(lows);
-            free(closes); free(volumes); free(flags);
+            free(closes); free(volumes);
+            if (has_extra_cols) { free(quote_volumes); free(trades);
+            free(taker_buy_volumes); free(taker_buy_quote_volumes); }
+            free(flags);
             break;
         }
 
@@ -1641,6 +1813,10 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
             sd->klines[sd->count].low       = lows[i];
             sd->klines[sd->count].close     = closes[i];
             sd->klines[sd->count].volume    = volumes[i];
+            sd->klines[sd->count].quoteVolume    = has_extra_cols ? quote_volumes[i] : 0.0;
+            sd->klines[sd->count].trades         = has_extra_cols ? trades[i] : 0;
+            sd->klines[sd->count].takerBuyVolume = has_extra_cols ? taker_buy_volumes[i] : 0.0;
+            sd->klines[sd->count].takerBuyQuoteVolume = has_extra_cols ? taker_buy_quote_volumes[i] : 0.0;
             sd->klines[sd->count].flags     = flags[i];
             sd->count++;
             total_loaded++;
@@ -1648,7 +1824,10 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
 
         free(sym_ids); free(itv_ids); free(timestamps);
         free(opens); free(highs); free(lows);
-        free(closes); free(volumes); free(flags);
+        free(closes); free(volumes);
+        if (has_extra_cols) { free(quote_volumes); free(trades);
+        free(taker_buy_volumes); free(taker_buy_quote_volumes); }
+        free(flags);
     }
 
     fclose(f);
@@ -1660,6 +1839,8 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
 
 #undef LNDTS_MAX_SYM
 #undef LNDTS_MAX_ITV
+
+    fprintf(stderr, "[ndtsdb debug] %s: loaded %d rows\n", filepath, total_loaded);
 
     return total_loaded;
 }
@@ -2441,22 +2622,27 @@ NDTSBinaryResult* ndtsdb_query_all_binary(NDTSDB* db) {
             KlineRow* kr = &sd->klines[j];
             uint8_t* row = buffer + row_idx * 128;
 
-            // 使用 memcpy 填充数值字段（高效）
+            // 使用 memcpy 填充数值字段（高效）— 11 列完整格式
             memcpy(row +  0, &kr->timestamp, 8);  // timestamp @ 0
             memcpy(row +  8, &kr->open, 8);       // open @ 8
             memcpy(row + 16, &kr->high, 8);       // high @ 16
             memcpy(row + 24, &kr->low, 8);        // low @ 24
             memcpy(row + 32, &kr->close, 8);      // close @ 32
             memcpy(row + 40, &kr->volume, 8);     // volume @ 40
-            memcpy(row + 48, &kr->flags, 4);      // flags @ 48
-            // @ 52: 4 bytes padding
+            memcpy(row + 48, &kr->quoteVolume, 8); // quoteVolume @ 48
+            memcpy(row + 56, &kr->trades, 4);     // trades @ 56
+            // @ 60: 4 bytes padding
+            memcpy(row + 64, &kr->takerBuyVolume, 8);      // takerBuyVolume @ 64
+            memcpy(row + 72, &kr->takerBuyQuoteVolume, 8); // takerBuyQuoteVolume @ 72
+            memcpy(row + 80, &kr->flags, 4);      // flags @ 80
+            // @ 84: 4 bytes padding
 
             // 填充字符串字段
-            strncpy((char*)(row + 56), sd->symbol, 31);
-            row[87] = '\0';  // 确保 null-terminated
-            strncpy((char*)(row + 88), sd->interval, 15);
-            row[103] = '\0';  // 确保 null-terminated
-            // @ 104-127: 24 bytes reserved (已由 malloc 初始化为 0)
+            strncpy((char*)(row + 88), sd->symbol, 31);
+            row[119] = '\0';  // 确保 null-terminated
+            strncpy((char*)(row + 120), sd->interval, 15);
+            row[135] = '\0';  // 确保 null-terminated
+            // @ 136-159: 24 bytes reserved (已由 malloc 初始化为 0)
 
             row_idx++;
         }

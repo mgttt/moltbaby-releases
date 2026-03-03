@@ -9,16 +9,21 @@ import { existsSync } from 'fs';
 import { resolve } from 'path';
 import { arch, platform } from 'os';
 
-// ─── KlineRow struct layout (56 bytes, matches C struct) ───────────────────
-// offset 0:  int64_t  timestamp (8 bytes LE)
-// offset 8:  double   open      (8 bytes LE)
-// offset 16: double   high      (8 bytes LE)
-// offset 24: double   low       (8 bytes LE)
-// offset 32: double   close     (8 bytes LE)
-// offset 40: double   volume    (8 bytes LE)
-// offset 48: uint32_t flags     (4 bytes LE)
-// offset 52: padding            (4 bytes)
-export const KLINE_ROW_SIZE = 56;
+// ─── KlineRow struct layout (88 bytes, matches C struct v2 with 10 columns) ─
+// offset 0:   int64_t  timestamp           (8 bytes LE)
+// offset 8:   double   open                (8 bytes LE)
+// offset 16:  double   high                (8 bytes LE)
+// offset 24:  double   low                 (8 bytes LE)
+// offset 32:  double   close               (8 bytes LE)
+// offset 40:  double   volume              (8 bytes LE)
+// offset 48:  double   quoteVolume         (8 bytes LE)  [NEW]
+// offset 56:  uint32_t trades              (4 bytes LE)  [NEW]
+// offset 60:  padding                      (4 bytes)
+// offset 64:  double   takerBuyVolume      (8 bytes LE)  [NEW]
+// offset 72:  double   takerBuyQuoteVolume (8 bytes LE)  [NEW]
+// offset 80:  uint32_t flags               (4 bytes LE)
+// offset 84:  padding                      (4 bytes)
+export const KLINE_ROW_SIZE = 88;
 
 export interface KlineRow {
   timestamp: bigint;
@@ -27,6 +32,10 @@ export interface KlineRow {
   low: number;
   close: number;
   volume: number;
+  quoteVolume?: number;
+  trades?: number;
+  takerBuyVolume?: number;
+  takerBuyQuoteVolume?: number;
   flags?: number;
 }
 
@@ -137,7 +146,7 @@ function readCStrPtr(ptr: number | bigint | null): string {
   return new CString(p).toString();
 }
 
-/** Encode a single KlineRow into a 56-byte Uint8Array (matches C struct layout) */
+/** Encode a single KlineRow into an 88-byte Uint8Array (matches C struct v2 layout with 10 columns) */
 export function encodeKlineRow(row: KlineRow): Uint8Array {
   const buf = new ArrayBuffer(KLINE_ROW_SIZE);
   const dv = new DataView(buf);
@@ -148,8 +157,13 @@ export function encodeKlineRow(row: KlineRow): Uint8Array {
   dv.setFloat64(24, row.low,    true);
   dv.setFloat64(32, row.close,  true);
   dv.setFloat64(40, row.volume, true);
-  dv.setUint32(48, row.flags ?? 0, true);
-  // bytes 52-55: zero padding (zero-initialised by ArrayBuffer)
+  dv.setFloat64(48, row.quoteVolume ?? 0, true);
+  dv.setUint32(56, row.trades ?? 0, true);
+  // offset 60: padding (4 bytes, zero-initialized)
+  dv.setFloat64(64, row.takerBuyVolume ?? 0, true);
+  dv.setFloat64(72, row.takerBuyQuoteVolume ?? 0, true);
+  dv.setUint32(80, row.flags ?? 0, true);
+  // offset 84: padding (4 bytes, zero-initialized)
   return new Uint8Array(buf);
 }
 
@@ -244,21 +258,26 @@ function readCStringFromBuffer(buffer: Uint8Array, offset: number, maxLen: numbe
 /**
  * ffi_query_all_binary — Get all data in binary format (Phase 2 optimization)
  *
- * Returns raw binary buffer with fixed 128-byte rows to avoid JSON serialization
+ * Returns raw binary buffer with fixed 160-byte rows to avoid JSON serialization
  * overhead. Much faster than ffi_query_all_json for large datasets.
  *
- * Binary row format (128 bytes per row):
- *   0-7:    timestamp (int64, ms)
- *   8-15:   open (double)
- *   16-23:  high (double)
- *   24-31:  low (double)
- *   32-39:  close (double)
- *   40-47:  volume (double)
- *   48-51:  flags (uint32)
- *   52-55:  padding
- *   56-87:  symbol (char[32])
- *   88-103: interval (char[16])
- *   104-127: reserved
+ * Binary row format (160 bytes per row, v2 with 10 columns):
+ *   0-7:     timestamp           (int64, ms)
+ *   8-15:    open                (double)
+ *   16-23:   high                (double)
+ *   24-31:   low                 (double)
+ *   32-39:   close               (double)
+ *   40-47:   volume              (double)
+ *   48-55:   quoteVolume         (double)     [NEW]
+ *   56-59:   trades              (uint32)     [NEW]
+ *   60-63:   padding
+ *   64-71:   takerBuyVolume      (double)     [NEW]
+ *   72-79:   takerBuyQuoteVolume (double)     [NEW]
+ *   80-83:   flags               (uint32)
+ *   84-87:   padding
+ *   88-119:  symbol              (char[32])
+ *   120-135: interval            (char[16])
+ *   136-159: reserved
  *
  * @param ptr  Database handle from ffi_open
  * @return Binary result with data buffer, or null on failure
@@ -321,9 +340,13 @@ export function parseQueryAllBinary(result: BinaryQueryResult): NDTSRow[] {
       low: dv.getFloat64(offset + 24, true),
       close: dv.getFloat64(offset + 32, true),
       volume: dv.getFloat64(offset + 40, true),
-      flags: dv.getUint32(offset + 48, true),
-      symbol: readCStringFromBuffer(data, offset + 56, 32),
-      interval: readCStringFromBuffer(data, offset + 88, 16),
+      quoteVolume: dv.getFloat64(offset + 48, true),
+      trades: dv.getUint32(offset + 56, true),
+      takerBuyVolume: dv.getFloat64(offset + 64, true),
+      takerBuyQuoteVolume: dv.getFloat64(offset + 72, true),
+      flags: dv.getUint32(offset + 80, true),
+      symbol: readCStringFromBuffer(data, offset + 88, 32),
+      interval: readCStringFromBuffer(data, offset + 120, 16),
     };
     rows.push(row);
   }

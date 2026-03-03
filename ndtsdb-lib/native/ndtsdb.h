@@ -48,15 +48,19 @@ extern "C" {
 /* ─── 数据结构 ─────────────────────────────────────────── */
 
 /**
- * KlineRow — 单根 K 线数据（56 bytes）
+ * KlineRow — 单根 K 线数据（88 bytes，10列完整版）
  *
- * @field timestamp  毫秒 epoch（int64_t）
- * @field open       开盘价
- * @field high       最高价
- * @field low        最低价
- * @field close      收盘价
- * @field volume     成交量（volume < 0 表示 tombstone / 软删除标记）
- * @field flags      保留标志位（当前未使用，写 0）
+ * @field timestamp           毫秒 epoch（int64_t）
+ * @field open                开盘价
+ * @field high                最高价
+ * @field low                 最低价
+ * @field close               收盘价
+ * @field volume              成交量（volume < 0 表示 tombstone / 软删除标记）
+ * @field quoteVolume         计价货币成交量（新增）
+ * @field trades              成交笔数（新增）
+ * @field takerBuyVolume      主动买入成交量（新增）
+ * @field takerBuyQuoteVolume 主动买入计价成交量（新增）
+ * @field flags               保留标志位（当前未使用，写 0）
  */
 typedef struct {
     int64_t timestamp;
@@ -65,6 +69,10 @@ typedef struct {
     double low;
     double close;
     double volume;
+    double quoteVolume;
+    uint32_t trades;
+    double takerBuyVolume;
+    double takerBuyQuoteVolume;
     uint32_t flags;
 } KlineRow;
 
@@ -317,18 +325,23 @@ typedef struct {
  * 结果包含所有 symbol/interval 的所有 K 线数据。
  * 结果必须通过 ndtsdb_free_binary 释放。
  *
- * 二进制格式（每行 128 字节，8 字节对齐）：
- *   偏移 0:   timestamp   int64_t (ms)
- *   偏移 8:   open        double
- *   偏移 16:  high        double
- *   偏移 24:  low         double
- *   偏移 32:  close       double
- *   偏移 40:  volume      double
- *   偏移 48:  flags       uint32_t
- *   偏移 52:  _pad        uint32_t (padding)
- *   偏移 56:  symbol      char[32] (null-terminated)
- *   偏移 88:  interval    char[16] (null-terminated)
- *   偏移 104: _reserved   char[24] (reserved)
+ * 二进制格式（每行 160 字节，8 字节对齐）：
+ *   偏移 0:   timestamp           int64_t (ms)
+ *   偏移 8:   open                double
+ *   偏移 16:  high                double
+ *   偏移 24:  low                 double
+ *   偏移 32:  close               double
+ *   偏移 40:  volume              double
+ *   偏移 48:  quoteVolume         double
+ *   偏移 56:  trades              uint32_t
+ *   偏移 60:  _pad1               uint32_t (padding to 8 bytes)
+ *   偏移 64:  takerBuyVolume      double
+ *   偏移 72:  takerBuyQuoteVolume double
+ *   偏移 80:  flags               uint32_t
+ *   偏移 84:  _pad2               uint32_t (padding to 8 bytes)
+ *   偏移 88:  symbol              char[32] (null-terminated)
+ *   偏移 120: interval            char[16] (null-terminated)
+ *   偏移 136: _reserved           char[24] (reserved)
  *
  * @param db  数据库句柄
  * @return    NDTSBinaryResult*（堆分配），失败返回 NULL

@@ -14,7 +14,7 @@ export interface ColumnDef {
 }
 
 export interface ReadAllResult {
-  data: Map<string, BigInt64Array | Float64Array>;
+  data: Map<string, BigInt64Array | Float64Array | Int32Array>;
 }
 
 type AnyRow = Record<string, any>;
@@ -70,6 +70,10 @@ export class AppendWriter {
         low:    Number(row.low    ?? 0),
         close:  Number(row.close  ?? 0),
         volume: Number(row.volume ?? 0),
+        quoteVolume: Number(row.quoteVolume ?? 0),
+        trades: Number(row.trades ?? 0),
+        takerBuyVolume: Number(row.takerBuyVolume ?? 0),
+        takerBuyQuoteVolume: Number(row.takerBuyQuoteVolume ?? 0),
         flags:  0,
       });
     }
@@ -90,7 +94,8 @@ export class AppendWriter {
    * Read all rows from a database path and return as columnar typed arrays.
    *
    * Returns a Map with keys: 'timestamp' (BigInt64Array) and
-   * 'open', 'high', 'low', 'close', 'volume' (Float64Array each).
+   * 'open', 'high', 'low', 'close', 'volume', 'quoteVolume', 'takerBuyVolume',
+   * 'takerBuyQuoteVolume' (Float64Array each), 'trades' (Int32Array).
    */
   static readAll(path: string): ReadAllResult {
     let db: NdtsDatabase;
@@ -114,6 +119,10 @@ export class AppendWriter {
       const lows       = new Float64Array(n);
       const closes     = new Float64Array(n);
       const volumes    = new Float64Array(n);
+      const quoteVolumes = new Float64Array(n);
+      const tradesArr    = new Int32Array(n);
+      const takerBuyVolumes = new Float64Array(n);
+      const takerBuyQuoteVolumes = new Float64Array(n);
 
       for (let i = 0; i < n; i++) {
         timestamps[i] = rows[i].timestamp;
@@ -122,15 +131,23 @@ export class AppendWriter {
         lows[i]       = rows[i].low;
         closes[i]     = rows[i].close;
         volumes[i]    = rows[i].volume;
+        quoteVolumes[i] = rows[i].quoteVolume ?? 0;
+        tradesArr[i] = rows[i].trades ?? 0;
+        takerBuyVolumes[i] = rows[i].takerBuyVolume ?? 0;
+        takerBuyQuoteVolumes[i] = rows[i].takerBuyQuoteVolume ?? 0;
       }
 
-      const data = new Map<string, BigInt64Array | Float64Array>();
+      const data = new Map<string, BigInt64Array | Float64Array | Int32Array>();
       data.set('timestamp', timestamps);
       data.set('open',      opens);
       data.set('high',      highs);
       data.set('low',       lows);
       data.set('close',     closes);
       data.set('volume',    volumes);
+      data.set('quoteVolume', quoteVolumes);
+      data.set('trades', tradesArr);
+      data.set('takerBuyVolume', takerBuyVolumes);
+      data.set('takerBuyQuoteVolume', takerBuyQuoteVolumes);
 
       return { data };
     } finally {

@@ -34,6 +34,10 @@ function parseQueryAllJson(json: string): NDTSRow[] {
     low:       Number(r.low),
     close:     Number(r.close),
     volume:    Number(r.volume),
+    quoteVolume: Number(r.quoteVolume ?? 0),
+    trades:    Number(r.trades ?? 0),
+    takerBuyVolume: Number(r.takerBuyVolume ?? 0),
+    takerBuyQuoteVolume: Number(r.takerBuyQuoteVolume ?? 0),
     flags:     Number(r.flags ?? 0),
   }));
 }

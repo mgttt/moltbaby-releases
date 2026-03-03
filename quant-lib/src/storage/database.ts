@@ -16,7 +16,7 @@ export class KlineDatabase {
   private config: DatabaseConfig;
   private db: NdtsDatabase | null = null;
 
-  constructor(config: DatabaseConfig | string = `${process.env.HOME}/.quant-lib/data/ndtsdb-v2`) {
+  constructor(config: DatabaseConfig | string = `${process.env.HOME}/.quant-lib/data/ndtsdb`) {
     if (typeof config === 'string') {
       this.config = {
         path: config,
@@ -30,7 +30,7 @@ export class KlineDatabase {
         autoInit: true,
         ...config
       };
-      this.dataDir = config.path || `${process.env.HOME}/.quant-lib/data/ndtsdb-v2`;
+      this.dataDir = config.path || `${process.env.HOME}/.quant-lib/data/ndtsdb`;
     }
 
     if (!existsSync(this.dataDir)) {
