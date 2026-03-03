@@ -73,6 +73,7 @@ function findLibPath(): string {
 // ─── FFI singleton ──────────────────────────────────────────────────────────
 
 let _lib: ReturnType<typeof dlopen> | null = null;
+let _libc: ReturnType<typeof dlopen> | null = null;
 
 function getLib() {
   if (_lib) return _lib;
@@ -87,11 +88,28 @@ function getLib() {
     ndtsdb_query_all_json:       { args: [FFIType.ptr], returns: FFIType.ptr },
     ndtsdb_list_symbols_json:    { args: [FFIType.ptr], returns: FFIType.ptr },
     ndtsdb_free_json:            { args: [FFIType.ptr], returns: FFIType.void },
+    ndtsdb_query_all_binary:     { args: [FFIType.ptr], returns: FFIType.ptr },
+    ndtsdb_binary_get_data:      { args: [FFIType.ptr], returns: FFIType.ptr },
+    ndtsdb_binary_get_count:     { args: [FFIType.ptr], returns: FFIType.u32 },
+    ndtsdb_binary_get_stride:    { args: [FFIType.ptr], returns: FFIType.u32 },
+    ndtsdb_free_binary:          { args: [FFIType.ptr], returns: FFIType.void },
     ndtsdb_get_latest_timestamp: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i64 },
     ndtsdb_get_path:             { args: [FFIType.ptr], returns: FFIType.ptr },
   });
 
   return _lib;
+}
+
+/** Load libc memcpy for copying C memory to JS */
+function getLibc() {
+  if (_libc) return _libc;
+
+  const libcName = platform() === 'darwin' ? 'libc.dylib' : 'libc.so.6';
+  _libc = dlopen(libcName, {
+    memcpy: { args: [FFIType.ptr, FFIType.ptr, FFIType.usize], returns: FFIType.ptr },
+  });
+
+  return _libc;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -200,4 +218,123 @@ export function ffi_get_latest_timestamp(ptr: number, symbol: string, interval: 
 export function ffi_get_path(ptr: number): string {
   const pathPtr = getLib().symbols.ndtsdb_get_path(ptr);
   return readCStrPtr(pathPtr as number | bigint | null);
+}
+
+// ─── Binary API (Phase 2) ───────────────────────────────────────────────────
+
+/** Binary query result with data buffer and metadata */
+export interface BinaryQueryResult {
+  data: Uint8Array;
+  count: number;
+  stride: number;
+}
+
+/**
+ * Read a null-terminated C string from binary buffer
+ * @param buffer  The Uint8Array containing the data
+ * @param offset  Starting offset
+ * @param maxLen  Maximum bytes to read
+ */
+function readCStringFromBuffer(buffer: Uint8Array, offset: number, maxLen: number): string {
+  let len = 0;
+  while (len < maxLen && buffer[offset + len] !== 0) len++;
+  return new TextDecoder().decode(buffer.slice(offset, offset + len));
+}
+
+/**
+ * ffi_query_all_binary — Get all data in binary format (Phase 2 optimization)
+ *
+ * Returns raw binary buffer with fixed 128-byte rows to avoid JSON serialization
+ * overhead. Much faster than ffi_query_all_json for large datasets.
+ *
+ * Binary row format (128 bytes per row):
+ *   0-7:    timestamp (int64, ms)
+ *   8-15:   open (double)
+ *   16-23:  high (double)
+ *   24-31:  low (double)
+ *   32-39:  close (double)
+ *   40-47:  volume (double)
+ *   48-51:  flags (uint32)
+ *   52-55:  padding
+ *   56-87:  symbol (char[32])
+ *   88-103: interval (char[16])
+ *   104-127: reserved
+ *
+ * @param ptr  Database handle from ffi_open
+ * @return Binary result with data buffer, or null on failure
+ */
+export function ffi_query_all_binary(ptr: number): BinaryQueryResult | null {
+  const resultPtr = getLib().symbols.ndtsdb_query_all_binary(ptr);
+  const resultNum = typeof resultPtr === 'bigint' ? Number(resultPtr) : (resultPtr as number | null);
+
+  if (!resultNum) return null;
+
+  // Use helper functions to extract fields
+  const dataPtr = getLib().symbols.ndtsdb_binary_get_data(resultNum);
+  const countVal = getLib().symbols.ndtsdb_binary_get_count(resultNum);
+  const strideVal = getLib().symbols.ndtsdb_binary_get_stride(resultNum);
+
+  // Ensure count is a number
+  const count = typeof countVal === 'bigint' ? Number(countVal) : (countVal as number);
+  const stride = typeof strideVal === 'bigint' ? Number(strideVal) : (strideVal as number);
+
+  if (!dataPtr || count === 0) {
+    getLib().symbols.ndtsdb_free_binary(resultNum);
+    return null;
+  }
+
+  const dataPtrNum = typeof dataPtr === 'bigint' ? Number(dataPtr) : (dataPtr as number);
+  const bufferSize = count * stride;
+
+  // Create a Uint8Array to hold the binary data
+  const buffer = new Uint8Array(bufferSize);
+
+  // Copy data from C memory using memcpy
+  const libc = getLibc();
+  libc.symbols.memcpy(buffer, dataPtrNum, bufferSize);
+
+  // Free the C-allocated result structure
+  getLib().symbols.ndtsdb_free_binary(resultNum);
+
+  return { data: buffer, count, stride };
+}
+
+/**
+ * Parse binary query result into NDTSRow array
+ *
+ * Converts raw binary buffer into structured rows with proper typing
+ *
+ * @param result  Binary query result from ffi_query_all_binary
+ * @return Array of parsed rows
+ */
+export function parseQueryAllBinary(result: BinaryQueryResult): NDTSRow[] {
+  const rows: NDTSRow[] = [];
+  const { data, count, stride } = result;
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+
+  for (let i = 0; i < count; i++) {
+    const offset = i * stride;
+    const row: NDTSRow = {
+      timestamp: dv.getBigInt64(offset + 0, true), // LE
+      open: dv.getFloat64(offset + 8, true),
+      high: dv.getFloat64(offset + 16, true),
+      low: dv.getFloat64(offset + 24, true),
+      close: dv.getFloat64(offset + 32, true),
+      volume: dv.getFloat64(offset + 40, true),
+      flags: dv.getUint32(offset + 48, true),
+      symbol: readCStringFromBuffer(data, offset + 56, 32),
+      interval: readCStringFromBuffer(data, offset + 88, 16),
+    };
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+/**
+ * ffi_free_binary — Release binary query result
+ * @param resultPtr Pointer from ffi_query_all_binary
+ */
+export function ffi_free_binary(resultPtr: number): void {
+  getLib().symbols.ndtsdb_free_binary(resultPtr);
 }

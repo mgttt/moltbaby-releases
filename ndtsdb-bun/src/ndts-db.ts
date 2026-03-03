@@ -8,6 +8,7 @@ import {
   ffi_open, ffi_close,
   ffi_insert, ffi_insert_batch, ffi_clear,
   ffi_query_all_json, ffi_list_symbols_json,
+  ffi_query_all_binary, parseQueryAllBinary,
   ffi_get_latest_timestamp, ffi_get_path,
   type KlineRow, type NDTSRow,
 } from './ndts-db-ffi.ts';
@@ -81,15 +82,18 @@ export class NdtsDatabase {
   /** Query all rows, sorted by timestamp ascending. Each row includes symbol and interval. */
   queryAll(): NDTSRow[] {
     this._assertOpen();
-    const json = ffi_query_all_json(this._ptr);
-    if (!json) return [];
+
+    // Phase 2: Use binary API for better performance (avoids JSON serialization)
+    const result = ffi_query_all_binary(this._ptr);
+    if (!result) return [];
+
     try {
-      const rows = parseQueryAllJson(json);
+      const rows = parseQueryAllBinary(result);
       rows.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
       return rows;
     } catch (e) {
-      // Log instead of silently swallowing — JSON corruption or FFI bug should be visible
-      console.error('[ndtsdb] queryAll parse error:', e instanceof Error ? e.message : e);
+      // Log instead of silently swallowing — binary parse error should be visible
+      console.error('[ndtsdb] queryAll binary parse error:', e instanceof Error ? e.message : e);
       return [];
     }
   }

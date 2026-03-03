@@ -2395,3 +2395,114 @@ char* ndtsdb_list_symbols_json(NDTSDB* db) {
     buf[pos]   = '\0';
     return buf;
 }
+
+/* ─── 二进制序列化（Phase 2 优化）─────────────────────────────── */
+
+/**
+ * ndtsdb_query_all_binary — 将所有数据序列化为二进制格式
+ *
+ * 避免 JSON 序列化开销，返回紧凑二进制格式。
+ * 结果包含所有 symbol/interval 的所有 K 线数据。
+ * 结果必须通过 ndtsdb_free_binary 释放。
+ *
+ * @param db  数据库句柄
+ * @return    NDTSBinaryResult*（堆分配），失败返回 NULL
+ */
+NDTSBinaryResult* ndtsdb_query_all_binary(NDTSDB* db) {
+    if (!db) return NULL;
+
+    // 第一遍：计算总行数
+    uint32_t total_count = 0;
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        total_count += db->symbols[i].count;
+    }
+
+    // 处理空数据库
+    if (total_count == 0) {
+        NDTSBinaryResult* empty = (NDTSBinaryResult*)malloc(sizeof(NDTSBinaryResult));
+        if (!empty) return NULL;
+        empty->data = NULL;
+        empty->count = 0;
+        empty->stride = 128;
+        memcpy(empty->magic, "NDB\0", 4);
+        return empty;
+    }
+
+    // 分配连续缓冲区（每行 128 字节）
+    size_t buffer_size = total_count * 128;
+    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
+    if (!buffer) return NULL;
+
+    // 第二遍：填充二进制数据（高效内存复制）
+    uint32_t row_idx = 0;
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        SymbolData* sd = &db->symbols[i];
+        for (uint32_t j = 0; j < sd->count; j++) {
+            KlineRow* kr = &sd->klines[j];
+            uint8_t* row = buffer + row_idx * 128;
+
+            // 使用 memcpy 填充数值字段（高效）
+            memcpy(row +  0, &kr->timestamp, 8);  // timestamp @ 0
+            memcpy(row +  8, &kr->open, 8);       // open @ 8
+            memcpy(row + 16, &kr->high, 8);       // high @ 16
+            memcpy(row + 24, &kr->low, 8);        // low @ 24
+            memcpy(row + 32, &kr->close, 8);      // close @ 32
+            memcpy(row + 40, &kr->volume, 8);     // volume @ 40
+            memcpy(row + 48, &kr->flags, 4);      // flags @ 48
+            // @ 52: 4 bytes padding
+
+            // 填充字符串字段
+            strncpy((char*)(row + 56), sd->symbol, 31);
+            row[87] = '\0';  // 确保 null-terminated
+            strncpy((char*)(row + 88), sd->interval, 15);
+            row[103] = '\0';  // 确保 null-terminated
+            // @ 104-127: 24 bytes reserved (已由 malloc 初始化为 0)
+
+            row_idx++;
+        }
+    }
+
+    // 返回结果
+    NDTSBinaryResult* result = (NDTSBinaryResult*)malloc(sizeof(NDTSBinaryResult));
+    if (!result) {
+        free(buffer);
+        return NULL;
+    }
+    result->data = buffer;
+    result->count = total_count;
+    result->stride = 128;
+    memcpy(result->magic, "NDB\0", 4);
+    return result;
+}
+
+/**
+ * ndtsdb_free_binary — 释放二进制查询结果
+ *
+ * @param result  ndtsdb_query_all_binary 返回的指针，NULL 安全
+ */
+void ndtsdb_free_binary(NDTSBinaryResult* result) {
+    if (!result) return;
+    if (result->data) free(result->data);
+    free(result);
+}
+
+/**
+ * ndtsdb_binary_get_data — 获取二进制结果的数据指针
+ */
+uint8_t* ndtsdb_binary_get_data(NDTSBinaryResult* result) {
+    return result ? result->data : NULL;
+}
+
+/**
+ * ndtsdb_binary_get_count — 获取二进制结果的行数
+ */
+uint32_t ndtsdb_binary_get_count(NDTSBinaryResult* result) {
+    return result ? result->count : 0;
+}
+
+/**
+ * ndtsdb_binary_get_stride — 获取二进制结果的行大小
+ */
+uint32_t ndtsdb_binary_get_stride(NDTSBinaryResult* result) {
+    return result ? result->stride : 0;
+}

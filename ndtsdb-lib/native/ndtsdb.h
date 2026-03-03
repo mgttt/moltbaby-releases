@@ -293,6 +293,81 @@ void ndtsdb_free_json(char* json);
  */
 char* ndtsdb_list_symbols_json(NDTSDB* db);
 
+/* ─── 二进制序列化（Phase 2 优化）─────────────────────────────── */
+
+/**
+ * NDTSBinaryResult — 二进制查询结果（避免 JSON 序列化开销）
+ *
+ * @field data      行数据缓冲指针（堆分配，每行 128 字节）
+ * @field count     总行数
+ * @field stride    每行字节数（固定 128）
+ * @field magic     魔数 "NDB\0" 用于验证
+ */
+typedef struct {
+    uint8_t* data;
+    uint32_t count;
+    uint32_t stride;
+    char     magic[4];
+} NDTSBinaryResult;
+
+/**
+ * ndtsdb_query_all_binary — 以二进制格式返回所有数据
+ *
+ * 避免 JSON 序列化开销，返回紧凑二进制格式。
+ * 结果包含所有 symbol/interval 的所有 K 线数据。
+ * 结果必须通过 ndtsdb_free_binary 释放。
+ *
+ * 二进制格式（每行 128 字节，8 字节对齐）：
+ *   偏移 0:   timestamp   int64_t (ms)
+ *   偏移 8:   open        double
+ *   偏移 16:  high        double
+ *   偏移 24:  low         double
+ *   偏移 32:  close       double
+ *   偏移 40:  volume      double
+ *   偏移 48:  flags       uint32_t
+ *   偏移 52:  _pad        uint32_t (padding)
+ *   偏移 56:  symbol      char[32] (null-terminated)
+ *   偏移 88:  interval    char[16] (null-terminated)
+ *   偏移 104: _reserved   char[24] (reserved)
+ *
+ * @param db  数据库句柄
+ * @return    NDTSBinaryResult*（堆分配），失败返回 NULL
+ */
+NDTSBinaryResult* ndtsdb_query_all_binary(NDTSDB* db);
+
+/**
+ * ndtsdb_free_binary — 释放二进制查询结果
+ *
+ * @param result  ndtsdb_query_all_binary 返回的指针，NULL 安全
+ */
+void ndtsdb_free_binary(NDTSBinaryResult* result);
+
+/**
+ * ndtsdb_binary_get_data — 获取二进制结果的数据指针
+ *
+ * 用于 FFI 环境中方便访问数据缓冲
+ *
+ * @param result  ndtsdb_query_all_binary 返回的指针
+ * @return        数据缓冲指针，NULL 表示无数据
+ */
+uint8_t* ndtsdb_binary_get_data(NDTSBinaryResult* result);
+
+/**
+ * ndtsdb_binary_get_count — 获取二进制结果的行数
+ *
+ * @param result  ndtsdb_query_all_binary 返回的指针
+ * @return        行数
+ */
+uint32_t ndtsdb_binary_get_count(NDTSBinaryResult* result);
+
+/**
+ * ndtsdb_binary_get_stride — 获取二进制结果的行大小
+ *
+ * @param result  ndtsdb_query_all_binary 返回的指针
+ * @return        每行字节数（固定 128）
+ */
+uint32_t ndtsdb_binary_get_stride(NDTSBinaryResult* result);
+
 #ifdef __cplusplus
 }
 #endif
