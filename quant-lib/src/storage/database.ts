@@ -78,7 +78,7 @@ export class KlineDatabase {
         groups.set(key, { symbol: k.symbol, interval: k.interval, rows: [] });
       }
       groups.get(key)!.rows.push({
-        timestamp: k.timestamp, // 保持调用方的单位（通常 ms）
+        timestamp: BigInt(k.timestamp), // 保持调用方的单位（通常 ms），持久化到底层需 bigint
         open: k.open,
         high: k.high,
         low: k.low,
@@ -167,14 +167,16 @@ export class KlineDatabase {
     if (!this.db) throw new Error('Database not initialized. Call init() first.');
 
     const rows = this.db.queryAll();
-    let filtered = rows.filter(r =>
-      r.symbol === options.symbol &&
-      r.interval === options.interval &&
-      (options.startTime == null || r.timestamp >= options.startTime) &&
-      (options.endTime == null || r.timestamp <= options.endTime)
-    );
+    let filtered = rows.filter(r => {
+      if (r.symbol !== options.symbol || r.interval !== options.interval) return false;
+      const ts = Number(r.timestamp); // Convert BigInt to number for comparison
+      if (options.startTime != null && ts < options.startTime) return false;
+      if (options.endTime != null && ts > options.endTime) return false;
+      return true;
+    });
 
-    filtered.sort((a, b) => a.timestamp - b.timestamp);
+    // Sort by timestamp (convert BigInt to number for comparison)
+    filtered.sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 
     if (options.limit) filtered = filtered.slice(0, options.limit);
 
@@ -215,7 +217,7 @@ function rowToKline(r: KlineRow, symbol: string, interval: string): Kline {
     baseCurrency,
     quoteCurrency,
     interval,
-    timestamp: r.timestamp,
+    timestamp: Number(r.timestamp), // Convert BigInt to number
     open: Number(r.open),
     high: Number(r.high),
     low: Number(r.low),
