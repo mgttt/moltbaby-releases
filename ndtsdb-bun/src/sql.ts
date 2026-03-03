@@ -23,7 +23,7 @@ export interface OrderBySpec {
 }
 
 export interface SelectData {
-  fields: string[];        // ['*'] or specific column names
+  fields: string[];        // ['*'] or specific column names / expressions (without alias)
   from:   string;          // table name
   distinct?: boolean;      // SELECT DISTINCT
   where?: string;          // raw WHERE clause string (unparsed)
@@ -32,6 +32,7 @@ export interface SelectData {
   orderBy?: OrderBySpec[]; // ORDER BY clause with multiple columns support
   limit?: number;
   offset?: number;
+  fieldAliases?: Record<string, string>; // expr → alias (e.g. "COUNT(*)" → "total")
 }
 
 export interface ParsedSQL {
@@ -77,7 +78,26 @@ export function parseSQL(sql: string): ParsedSQL {
     distinct = true;
     fieldsStr = fieldsStr.slice(8).trim(); // Remove 'DISTINCT' keyword
   }
-  const fields = fieldsStr === '*' ? ['*'] : fieldsStr.split(',').map(f => f.trim()).filter(Boolean);
+
+  // Parse fields with AS alias support: "COUNT(*) AS total" → expr="COUNT(*)", alias="total"
+  const fieldAliases: Record<string, string> = {};
+  let fields: string[];
+  if (fieldsStr === '*') {
+    fields = ['*'];
+  } else {
+    fields = fieldsStr.split(',').map(f => {
+      const trimmed = f.trim();
+      // Match "expr AS alias" (case-insensitive, handle spaces around AS)
+      const aliasMatch = trimmed.match(/^(.+?)\s+[Aa][Ss]\s+([a-zA-Z_][a-zA-Z0-9_]*)$/);
+      if (aliasMatch) {
+        const expr = aliasMatch[1].trim();
+        const alias = aliasMatch[2].trim();
+        fieldAliases[expr] = alias;
+        return expr;
+      }
+      return trimmed;
+    }).filter(Boolean);
+  }
 
   // Parse FROM (table name — may have alias, take first token)
   const fromStr = (clauses['FROM'] ?? '').split(/\s+/)[0] ?? '';
@@ -124,6 +144,7 @@ export function parseSQL(sql: string): ParsedSQL {
       orderBy: orderBySpecs,
       limit,
       offset,
+      fieldAliases: Object.keys(fieldAliases).length > 0 ? fieldAliases : undefined,
     },
   };
 }
@@ -326,7 +347,7 @@ export class SQLExecutor {
       throw new Error(`Only SELECT is supported (got: ${parsed.type})`);
     }
 
-    const { fields, from, distinct, where, groupBy, having, orderBy, limit, offset } = parsed.data;
+    const { fields, from, distinct, where, groupBy, having, orderBy, limit, offset, fieldAliases } = parsed.data;
 
     const table = this._tables.get(from);
     if (!table) {
@@ -351,11 +372,25 @@ export class SQLExecutor {
       rows = this.executeAggregateWithoutGroupBy(rows, fields);
     }
 
-    // SELECT projection (before DISTINCT to project fields)
-    if (!fields.includes('*')) {
+    // Apply field aliases: rename keys from expr to alias in result rows
+    if (fieldAliases) {
       rows = rows.map(row => {
         const out: Record<string, any> = {};
-        for (const f of fields) {
+        for (const [key, val] of Object.entries(row)) {
+          const alias = fieldAliases[key];
+          out[alias ?? key] = val;
+        }
+        return out;
+      });
+    }
+
+    // SELECT projection (before DISTINCT to project fields)
+    if (!fields.includes('*')) {
+      // Use aliased names for projection
+      const projFields = fields.map(f => fieldAliases?.[f] ?? f);
+      rows = rows.map(row => {
+        const out: Record<string, any> = {};
+        for (const f of projFields) {
           out[f] = row[f];
         }
         return out;
