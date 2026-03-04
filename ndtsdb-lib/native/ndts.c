@@ -2652,10 +2652,8 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     int has_takerBuyVolume = (strstr(header_json, "\"takerBuyVolume\"") != NULL);
     int has_takerBuyQuoteVolume = (strstr(header_json, "\"takerBuyQuoteVolume\"") != NULL);
 
-    /*  consolidated flag: 如果任意一个额外列存在，就假设全部存在（分区文件格式）
-        TODO (#132 Phase 2): 修复额外列读取逻辑后重新启用
-        int has_extra_cols = has_quoteVolume || has_trades || has_takerBuyVolume || has_takerBuyQuoteVolume; */
-    int has_extra_cols = 0;  /* 临时禁用额外列，仅读取基础 5 列 OHLCV */
+    /*  consolidated flag: 如果任意一个额外列存在，就假设全部存在（分区文件格式） */
+    int has_extra_cols = has_quoteVolume || has_trades || has_takerBuyVolume || has_takerBuyQuoteVolume;
 
     fprintf(stderr, "[ndtsdb debug] %s: is_new_bucket_format=%d has_extra_cols=%d\n",
             filepath, is_new_bucket_format, has_extra_cols);
@@ -2821,8 +2819,9 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
             /* 读取 quoteVolume (gorilla) */
             if (ok) {
                 uint32_t clen = 0;
+                long pos_before = ftell(f);
                 if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
-                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid quoteVolume length %u\n", chunk_num, clen);
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid quoteVolume length %u (file pos %ld before read)\n", chunk_num, clen, pos_before);
                     ok = 0;
                 } else {
                     uint8_t* cbuf = (uint8_t*)malloc(clen);
