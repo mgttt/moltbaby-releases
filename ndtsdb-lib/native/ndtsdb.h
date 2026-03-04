@@ -17,6 +17,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <inttypes.h>   /* PRId64 — used by ndtsdb_query_all_json format strings */
+#include <stdio.h>      /* FILE — used by StreamingIterator */
 
 /* ─── 版本信息 ─────────────────────────────────────────── */
 #ifndef NDTSDB_VERSION
