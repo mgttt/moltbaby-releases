@@ -1756,6 +1756,11 @@ NDTSDB* ndtsdb_open(const char* path) {
 }
 
 /* ============================================================
+ * Phase 2: Sparse Index & Streaming Iterator (Issue #139)
+ * Structure definitions moved to ndtsdb.h (public API)
+ * ============================================================ */
+
+/* ============================================================
  * load_ndts_file — 将单个 .ndts 文件（NDTS 格式）加载到 db->symbols
  *
  * 支持：
@@ -4219,4 +4224,677 @@ uint32_t ndtsdb_binary_get_count(NDTSBinaryResult* result) {
  */
 uint32_t ndtsdb_binary_get_stride(NDTSBinaryResult* result) {
     return result ? result->stride : 0;
+}
+
+/* ============================================================
+ * Phase 2 Implementation: Sparse Index & Streaming Iterator
+ * ============================================================ */
+
+/**
+ * ndtb_sparse_index_create — 为 NDTB 文件构建稀疏索引
+ *
+ * 扫描 NDTB 文件，为时间戳列构建块级别的 min/max 索引。
+ * 用于后续范围查询加速（BOUND 优化）。
+ *
+ * @param file_path      NDTB 文件路径
+ * @param block_rows     每个块的目标行数（默认 1000）
+ * @return              SparseIndex 指针（成功）或 NULL（失败）
+ */
+SparseIndex* ndtb_sparse_index_create(const char* file_path, uint32_t block_rows) {
+    if (!file_path || block_rows == 0) return NULL;
+
+    FILE* f = fopen(file_path, "rb");
+    if (!f) return NULL;
+
+    /* 读取 header block 以跳过 header 数据 */
+    uint8_t header_block[4096];
+    if (fread(header_block, 1, 4096, f) != 4096) {
+        fclose(f);
+        return NULL;
+    }
+
+    /* 验证 magic */
+    if (memcmp(header_block, "NDTB", 4) != 0) {
+        fclose(f);
+        return NULL;
+    }
+
+    /* 跳过 header CRC */
+    uint32_t hcrc;
+    if (fread(&hcrc, 4, 1, f) != 1) {
+        fclose(f);
+        return NULL;
+    }
+
+    /* 跳过前两列（symbol 和 interval） */
+    uint8_t chunk_type;
+    uint32_t row_count, clen;
+
+    for (int col = 0; col < 2; col++) {
+        if (fread(&chunk_type, 1, 1, f) != 1) goto idx_cleanup;
+        if (fread(&row_count, 4, 1, f) != 1) goto idx_cleanup;
+        if (fread(&clen, 4, 1, f) != 1) goto idx_cleanup;
+        if (fseek(f, clen + 4, SEEK_CUR) != 0) goto idx_cleanup;  /* skip data + CRC */
+    }
+
+    /* 现在准备读取 timestamp 列 */
+    if (fread(&chunk_type, 1, 1, f) != 1) goto idx_cleanup;
+    if (chunk_type != 0x00) goto idx_cleanup;  /* timestamp 必须是 raw */
+    if (fread(&row_count, 4, 1, f) != 1) goto idx_cleanup;
+    if (fread(&clen, 4, 1, f) != 1) goto idx_cleanup;
+
+    if (row_count == 0 || clen != row_count * 8) goto idx_cleanup;
+
+    int64_t* timestamps = (int64_t*)malloc(row_count * 8);
+    if (!timestamps) goto idx_cleanup;
+
+    if (fread(timestamps, 8, row_count, f) != row_count) {
+        free(timestamps);
+        goto idx_cleanup;
+    }
+
+    /* 构建索引：将 timestamps 分组为块，计算每块的 min/max */
+    SparseIndex* idx = (SparseIndex*)malloc(sizeof(SparseIndex));
+    if (!idx) {
+        free(timestamps);
+        goto idx_cleanup;
+    }
+
+    uint32_t num_blocks = (row_count + block_rows - 1) / block_rows;
+    idx->entries = (SparseIndexEntry*)malloc(num_blocks * sizeof(SparseIndexEntry));
+    if (!idx->entries) {
+        free(idx);
+        free(timestamps);
+        goto idx_cleanup;
+    }
+
+    idx->entry_count = 0;
+    uint64_t ts_offset = ftell(f) - (row_count * 8) - 4 - 4 - 1;  /* timestamp 块的起始位置 */
+
+    for (uint32_t b = 0; b < num_blocks; b++) {
+        uint32_t start_row = b * block_rows;
+        uint32_t end_row = (start_row + block_rows > row_count) ? row_count : start_row + block_rows;
+        uint32_t block_size = end_row - start_row;
+
+        int64_t min_ts = timestamps[start_row];
+        int64_t max_ts = timestamps[start_row];
+
+        for (uint32_t i = start_row; i < end_row; i++) {
+            if (timestamps[i] < min_ts) min_ts = timestamps[i];
+            if (timestamps[i] > max_ts) max_ts = timestamps[i];
+        }
+
+        idx->entries[idx->entry_count].block_offset = ts_offset + start_row * 8;
+        idx->entries[idx->entry_count].min_ts = min_ts;
+        idx->entries[idx->entry_count].max_ts = max_ts;
+        idx->entries[idx->entry_count].row_count = block_size;
+        idx->entry_count++;
+    }
+
+    free(timestamps);
+    idx->is_sorted = 1;  /* 已按偏移排序 */
+    fclose(f);
+    return idx;
+
+idx_cleanup:
+    fclose(f);
+    return NULL;
+}
+
+/**
+ * ndtb_sparse_index_query_range — 使用索引过滤块
+ *
+ * 给定时间范围 [min_ts, max_ts]，返回符合条件的块索引数组。
+ * 调用者负责释放返回的数组。
+ *
+ * @param idx         稀疏索引
+ * @param min_ts      时间范围下界
+ * @param max_ts      时间范围上界
+ * @param out_count   输出：符合条件的块数
+ * @return           块索引数组（0-based），失败返回 NULL
+ */
+uint32_t* ndtb_sparse_index_query_range(const SparseIndex* idx,
+                                       int64_t min_ts, int64_t max_ts,
+                                       uint32_t* out_count) {
+    if (!idx || !out_count) return NULL;
+
+    uint32_t matched = 0;
+    uint32_t* result = (uint32_t*)malloc(idx->entry_count * sizeof(uint32_t));
+    if (!result) return NULL;
+
+    for (uint32_t i = 0; i < idx->entry_count; i++) {
+        SparseIndexEntry* e = &idx->entries[i];
+        /* 块的 [min_ts, max_ts] 与查询范围 [min_ts, max_ts] 有交集 */
+        if (e->max_ts >= min_ts && e->min_ts <= max_ts) {
+            result[matched++] = i;
+        }
+    }
+
+    *out_count = matched;
+    return result;
+}
+
+/**
+ * ndtb_sparse_index_free — 释放稀疏索引
+ */
+void ndtb_sparse_index_free(SparseIndex* idx) {
+    if (!idx) return;
+    free(idx->entries);
+    free(idx);
+}
+
+/**
+ * ndtb_streaming_iterator_create — 创建流式迭代器
+ *
+ * 打开 NDTB 文件并准备流式读取。调用者通过
+ * ndtb_streaming_iterator_next() 逐块读取数据。
+ *
+ * @param file_path   NDTB 文件路径
+ * @param block_rows  单次读取的行数（默认 1000）
+ * @return            迭代器指针（成功）或 NULL（失败）
+ */
+StreamingIterator* ndtb_streaming_iterator_create(const char* file_path,
+                                                  uint32_t block_rows) {
+    if (!file_path || block_rows == 0) return NULL;
+
+    FILE* f = fopen(file_path, "rb");
+    if (!f) return NULL;
+
+    StreamingIterator* iter = (StreamingIterator*)malloc(sizeof(StreamingIterator));
+    if (!iter) {
+        fclose(f);
+        return NULL;
+    }
+
+    strncpy(iter->file_path, file_path, sizeof(iter->file_path) - 1);
+    iter->file_path[sizeof(iter->file_path) - 1] = '\0';
+    iter->f = f;
+    iter->block_rows = block_rows;
+    iter->current_block = NULL;
+    iter->block_size = 0;
+    iter->block_idx = 0;
+    iter->total_rows = 0;
+    iter->eof = 0;
+    iter->read_buffer = NULL;
+    iter->read_buffer_cap = 0;
+    iter->sym_dict = NULL;
+    iter->itv_dict = NULL;
+    iter->n_sym = 0;
+    iter->n_itv = 0;
+
+    /* 分配读缓冲区（初始大小 1MB，自动扩展） */
+    iter->read_buffer_cap = 1024 * 1024;
+    iter->read_buffer = (uint8_t*)malloc(iter->read_buffer_cap);
+    if (!iter->read_buffer) {
+        free(iter);
+        fclose(f);
+        return NULL;
+    }
+
+    /* 分配行缓冲区 */
+    iter->current_block = (KlineRow*)malloc(block_rows * sizeof(KlineRow));
+    if (!iter->current_block) {
+        free(iter->read_buffer);
+        free(iter);
+        fclose(f);
+        return NULL;
+    }
+
+    return iter;
+}
+
+/**
+ * ndtb_streaming_iterator_init — 初始化迭代器（内部函数）
+ * 读取 header、解析字典、定位数据块起始位置
+ * @return 成功返回 0，失败返回 -1
+ */
+static int ndtb_streaming_iterator_init(StreamingIterator* iter) {
+    if (!iter->f) return -1;
+
+    /* 1. 读取 header block */
+    uint8_t header_block[4096];
+    if (fread(header_block, 1, 4096, iter->f) != 4096) return -1;
+
+    if (memcmp(header_block, "NDTB", 4) != 0) return -1;
+
+    /* 2. 验证 header CRC */
+    uint32_t expected_hcrc = crc32_buf(header_block, 4096);
+    uint32_t actual_hcrc = 0;
+    if (fread(&actual_hcrc, 4, 1, iter->f) != 1) return -1;
+    if (actual_hcrc != expected_hcrc) return -1;
+
+    /* 3. 解析 header JSON 和字典 */
+    uint32_t header_len;
+    memcpy(&header_len, header_block + 4, 4);
+    if (header_len == 0 || header_len > 4088) return -1;
+
+    char* header_json = (char*)malloc(header_len + 1);
+    if (!header_json) return -1;
+    memcpy(header_json, header_block + 8, header_len);
+    header_json[header_len] = '\0';
+
+    /* 分配字典数组 */
+    iter->sym_dict = (char**)malloc(256 * sizeof(char*));
+    iter->itv_dict = (char**)malloc(32 * sizeof(char*));
+    if (!iter->sym_dict || !iter->itv_dict) {
+        free(header_json);
+        return -1;
+    }
+    memset(iter->sym_dict, 0, 256 * sizeof(char*));
+    memset(iter->itv_dict, 0, 32 * sizeof(char*));
+
+    /* 提取 symbol 字典 */
+    const char* sym_start = strstr(header_json, "\"symbol\":[");
+    if (sym_start) {
+        sym_start += 10;
+        const char* sym_end = strchr(sym_start, ']');
+        if (sym_end) {
+            const char* p = sym_start;
+            while (p < sym_end && iter->n_sym < 256) {
+                const char* q1 = strchr(p, '"');
+                if (!q1 || q1 >= sym_end) break;
+                const char* q2 = strchr(q1 + 1, '"');
+                if (!q2 || q2 >= sym_end) break;
+                iter->sym_dict[iter->n_sym++] = strndup(q1 + 1, (size_t)(q2 - q1 - 1));
+                p = q2 + 1;
+            }
+        }
+    }
+
+    /* 提取 interval 字典 */
+    const char* itv_start = strstr(header_json, "\"interval\":[");
+    if (itv_start) {
+        itv_start += 12;
+        const char* itv_end = strchr(itv_start, ']');
+        if (itv_end) {
+            const char* p = itv_start;
+            while (p < itv_end && iter->n_itv < 32) {
+                const char* q1 = strchr(p, '"');
+                if (!q1 || q1 >= itv_end) break;
+                const char* q2 = strchr(q1 + 1, '"');
+                if (!q2 || q2 >= itv_end) break;
+                iter->itv_dict[iter->n_itv++] = strndup(q1 + 1, (size_t)(q2 - q1 - 1));
+                p = q2 + 1;
+            }
+        }
+    }
+
+    free(header_json);
+
+    if (iter->n_sym == 0 || iter->n_itv == 0) return -1;
+
+    iter->header_offset = ftell(iter->f);
+
+    /* peek at first symbol block to get total_rows */
+    uint8_t chunk_type;
+    uint32_t total_rows;
+    if (fread(&chunk_type, 1, 1, iter->f) != 1) return -1;
+    if (fread(&total_rows, 4, 1, iter->f) != 1) return -1;
+    iter->total_rows = total_rows;
+
+    /* rewind to data start */
+    fseek(iter->f, iter->header_offset, SEEK_SET);
+    return 0;
+}
+
+/**
+ * ndtb_streaming_iterator_next — 读取下一个块
+ */
+uint32_t ndtb_streaming_iterator_next(StreamingIterator* iter) {
+    if (!iter || !iter->f || iter->eof) return 0;
+
+    if (iter->header_offset == 0) {
+        if (ndtb_streaming_iterator_init(iter) < 0) {
+            iter->eof = 1;
+            return 0;
+        }
+    }
+
+    uint32_t block_rows = iter->block_rows;
+    uint32_t remaining = iter->total_rows - iter->block_idx;
+    if (remaining == 0) {
+        iter->eof = 1;
+        return 0;
+    }
+    if (remaining < block_rows) block_rows = remaining;
+
+    int32_t* sym_ids = (int32_t*)malloc(block_rows * 4);
+    int32_t* itv_ids = (int32_t*)malloc(block_rows * 4);
+    int64_t* timestamps = (int64_t*)malloc(block_rows * 8);
+    double* opens = (double*)malloc(block_rows * 8);
+    double* highs = (double*)malloc(block_rows * 8);
+    double* lows = (double*)malloc(block_rows * 8);
+    double* closes = (double*)malloc(block_rows * 8);
+    double* volumes = (double*)malloc(block_rows * 8);
+    double* quote_volumes = (double*)malloc(block_rows * 8);
+    uint32_t* trades = (uint32_t*)malloc(block_rows * 4);
+    double* taker_buy_volumes = (double*)malloc(block_rows * 8);
+    double* taker_buy_quote_volumes = (double*)malloc(block_rows * 8);
+
+    if (!sym_ids || !itv_ids || !timestamps || !opens || !highs || !lows || !closes ||
+        !volumes || !quote_volumes || !trades || !taker_buy_volumes || !taker_buy_quote_volumes) {
+        goto next_cleanup;
+    }
+
+    /* symbol column */
+    {
+        uint8_t chunk_type;
+        uint32_t clen;
+        if (fread(&chunk_type, 1, 1, iter->f) != 1 || chunk_type != 0x03) goto next_cleanup;
+        uint32_t row_count2;
+        if (fread(&row_count2, 4, 1, iter->f) != 1 || row_count2 != block_rows) goto next_cleanup;
+        if (fread(&clen, 4, 1, iter->f) != 1 || clen == 0) goto next_cleanup;
+
+        if (clen > iter->read_buffer_cap) {
+            uint32_t new_cap = clen * 1.5;
+            uint8_t* new_buf = (uint8_t*)realloc(iter->read_buffer, new_cap);
+            if (!new_buf) goto next_cleanup;
+            iter->read_buffer = new_buf;
+            iter->read_buffer_cap = new_cap;
+        }
+
+        if (fread(iter->read_buffer, 1, clen, iter->f) != clen) goto next_cleanup;
+        uint32_t disk_crc;
+        if (fread(&disk_crc, 4, 1, iter->f) != 1) goto next_cleanup;
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, iter->read_buffer, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto next_cleanup;
+
+        if (clen < 4) goto next_cleanup;
+        uint32_t n_items;
+        memcpy(&n_items, iter->read_buffer, 4);
+        if (n_items != block_rows) goto next_cleanup;
+        memcpy(sym_ids, iter->read_buffer + 4, block_rows * 4);
+    }
+
+    /* interval column */
+    {
+        uint8_t chunk_type;
+        uint32_t clen;
+        if (fread(&chunk_type, 1, 1, iter->f) != 1 || chunk_type != 0x03) goto next_cleanup;
+        uint32_t row_count2;
+        if (fread(&row_count2, 4, 1, iter->f) != 1 || row_count2 != block_rows) goto next_cleanup;
+        if (fread(&clen, 4, 1, iter->f) != 1 || clen == 0) goto next_cleanup;
+
+        if (clen > iter->read_buffer_cap) {
+            uint32_t new_cap = clen * 1.5;
+            uint8_t* new_buf = (uint8_t*)realloc(iter->read_buffer, new_cap);
+            if (!new_buf) goto next_cleanup;
+            iter->read_buffer = new_buf;
+            iter->read_buffer_cap = new_cap;
+        }
+
+        if (fread(iter->read_buffer, 1, clen, iter->f) != clen) goto next_cleanup;
+        uint32_t disk_crc;
+        if (fread(&disk_crc, 4, 1, iter->f) != 1) goto next_cleanup;
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, iter->read_buffer, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto next_cleanup;
+
+        if (clen < 4) goto next_cleanup;
+        uint32_t n_items;
+        memcpy(&n_items, iter->read_buffer, 4);
+        if (n_items != block_rows) goto next_cleanup;
+        memcpy(itv_ids, iter->read_buffer + 4, block_rows * 4);
+    }
+
+    /* timestamp column (raw int64) */
+    {
+        uint8_t chunk_type;
+        uint32_t clen;
+        if (fread(&chunk_type, 1, 1, iter->f) != 1 || chunk_type != 0x00) goto next_cleanup;
+        uint32_t row_count2;
+        if (fread(&row_count2, 4, 1, iter->f) != 1 || row_count2 != block_rows) goto next_cleanup;
+        if (fread(&clen, 4, 1, iter->f) != 1 || clen != block_rows * 8) goto next_cleanup;
+
+        if (fread(timestamps, 8, block_rows, iter->f) != block_rows) goto next_cleanup;
+        uint32_t disk_crc;
+        if (fread(&disk_crc, 4, 1, iter->f) != 1) goto next_cleanup;
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, (const uint8_t*)timestamps, block_rows * 8);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto next_cleanup;
+    }
+
+    /* OHLCV columns (5x gorilla) */
+    double* ohlcv[5] = { opens, highs, lows, closes, volumes };
+    for (int col = 0; col < 5; col++) {
+        uint8_t chunk_type;
+        uint32_t clen;
+        if (fread(&chunk_type, 1, 1, iter->f) != 1 || chunk_type != 0x01) goto next_cleanup;
+        uint32_t row_count2;
+        if (fread(&row_count2, 4, 1, iter->f) != 1 || row_count2 != block_rows) goto next_cleanup;
+        if (fread(&clen, 4, 1, iter->f) != 1 || clen == 0) goto next_cleanup;
+
+        if (clen > iter->read_buffer_cap) {
+            uint32_t new_cap = clen * 1.5;
+            uint8_t* new_buf = (uint8_t*)realloc(iter->read_buffer, new_cap);
+            if (!new_buf) goto next_cleanup;
+            iter->read_buffer = new_buf;
+            iter->read_buffer_cap = new_cap;
+        }
+
+        if (fread(iter->read_buffer, 1, clen, iter->f) != clen) goto next_cleanup;
+        uint32_t disk_crc;
+        if (fread(&disk_crc, 4, 1, iter->f) != 1) goto next_cleanup;
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, iter->read_buffer, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto next_cleanup;
+
+        size_t decoded = gorilla_decompress_f64(iter->read_buffer, clen, ohlcv[col], block_rows);
+        if (decoded != block_rows) goto next_cleanup;
+    }
+
+    /* quoteVolume */
+    {
+        uint8_t chunk_type;
+        uint32_t clen;
+        if (fread(&chunk_type, 1, 1, iter->f) != 1 || chunk_type != 0x01) goto next_cleanup;
+        uint32_t row_count2;
+        if (fread(&row_count2, 4, 1, iter->f) != 1 || row_count2 != block_rows) goto next_cleanup;
+        if (fread(&clen, 4, 1, iter->f) != 1 || clen == 0) goto next_cleanup;
+
+        if (clen > iter->read_buffer_cap) {
+            uint32_t new_cap = clen * 1.5;
+            uint8_t* new_buf = (uint8_t*)realloc(iter->read_buffer, new_cap);
+            if (!new_buf) goto next_cleanup;
+            iter->read_buffer = new_buf;
+            iter->read_buffer_cap = new_cap;
+        }
+
+        if (fread(iter->read_buffer, 1, clen, iter->f) != clen) goto next_cleanup;
+        uint32_t disk_crc;
+        if (fread(&disk_crc, 4, 1, iter->f) != 1) goto next_cleanup;
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, iter->read_buffer, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto next_cleanup;
+
+        size_t decoded = gorilla_decompress_f64(iter->read_buffer, clen, quote_volumes, block_rows);
+        if (decoded != block_rows) goto next_cleanup;
+    }
+
+    /* trades (delta) */
+    {
+        uint8_t chunk_type;
+        uint32_t clen;
+        if (fread(&chunk_type, 1, 1, iter->f) != 1 || chunk_type != 0x02) goto next_cleanup;
+        uint32_t row_count2;
+        if (fread(&row_count2, 4, 1, iter->f) != 1 || row_count2 != block_rows) goto next_cleanup;
+        if (fread(&clen, 4, 1, iter->f) != 1 || clen == 0) goto next_cleanup;
+
+        if (clen > iter->read_buffer_cap) {
+            uint32_t new_cap = clen * 1.5;
+            uint8_t* new_buf = (uint8_t*)realloc(iter->read_buffer, new_cap);
+            if (!new_buf) goto next_cleanup;
+            iter->read_buffer = new_buf;
+            iter->read_buffer_cap = new_cap;
+        }
+
+        if (fread(iter->read_buffer, 1, clen, iter->f) != clen) goto next_cleanup;
+        uint32_t disk_crc;
+        if (fread(&disk_crc, 4, 1, iter->f) != 1) goto next_cleanup;
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, iter->read_buffer, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto next_cleanup;
+
+        int32_t* tmp_trades = (int32_t*)trades;
+        size_t decoded = delta_decompress_i32(iter->read_buffer, clen, tmp_trades, block_rows);
+        if (decoded != block_rows) goto next_cleanup;
+    }
+
+    /* takerBuyVolume */
+    {
+        uint8_t chunk_type;
+        uint32_t clen;
+        if (fread(&chunk_type, 1, 1, iter->f) != 1 || chunk_type != 0x01) goto next_cleanup;
+        uint32_t row_count2;
+        if (fread(&row_count2, 4, 1, iter->f) != 1 || row_count2 != block_rows) goto next_cleanup;
+        if (fread(&clen, 4, 1, iter->f) != 1 || clen == 0) goto next_cleanup;
+
+        if (clen > iter->read_buffer_cap) {
+            uint32_t new_cap = clen * 1.5;
+            uint8_t* new_buf = (uint8_t*)realloc(iter->read_buffer, new_cap);
+            if (!new_buf) goto next_cleanup;
+            iter->read_buffer = new_buf;
+            iter->read_buffer_cap = new_cap;
+        }
+
+        if (fread(iter->read_buffer, 1, clen, iter->f) != clen) goto next_cleanup;
+        uint32_t disk_crc;
+        if (fread(&disk_crc, 4, 1, iter->f) != 1) goto next_cleanup;
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, iter->read_buffer, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto next_cleanup;
+
+        size_t decoded = gorilla_decompress_f64(iter->read_buffer, clen, taker_buy_volumes, block_rows);
+        if (decoded != block_rows) goto next_cleanup;
+    }
+
+    /* takerBuyQuoteVolume */
+    {
+        uint8_t chunk_type;
+        uint32_t clen;
+        if (fread(&chunk_type, 1, 1, iter->f) != 1 || chunk_type != 0x01) goto next_cleanup;
+        uint32_t row_count2;
+        if (fread(&row_count2, 4, 1, iter->f) != 1 || row_count2 != block_rows) goto next_cleanup;
+        if (fread(&clen, 4, 1, iter->f) != 1 || clen == 0) goto next_cleanup;
+
+        if (clen > iter->read_buffer_cap) {
+            uint32_t new_cap = clen * 1.5;
+            uint8_t* new_buf = (uint8_t*)realloc(iter->read_buffer, new_cap);
+            if (!new_buf) goto next_cleanup;
+            iter->read_buffer = new_buf;
+            iter->read_buffer_cap = new_cap;
+        }
+
+        if (fread(iter->read_buffer, 1, clen, iter->f) != clen) goto next_cleanup;
+        uint32_t disk_crc;
+        if (fread(&disk_crc, 4, 1, iter->f) != 1) goto next_cleanup;
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, iter->read_buffer, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto next_cleanup;
+
+        size_t decoded = gorilla_decompress_f64(iter->read_buffer, clen, taker_buy_quote_volumes, block_rows);
+        if (decoded != block_rows) goto next_cleanup;
+    }
+
+    /* reconstruct KlineRow */
+    for (uint32_t i = 0; i < block_rows; i++) {
+        iter->current_block[i].timestamp = timestamps[i];
+        iter->current_block[i].open = opens[i];
+        iter->current_block[i].high = highs[i];
+        iter->current_block[i].low = lows[i];
+        iter->current_block[i].close = closes[i];
+        iter->current_block[i].volume = volumes[i];
+        iter->current_block[i].quoteVolume = quote_volumes[i];
+        iter->current_block[i].trades = trades[i];
+        iter->current_block[i].takerBuyVolume = taker_buy_volumes[i];
+        iter->current_block[i].takerBuyQuoteVolume = taker_buy_quote_volumes[i];
+        iter->current_block[i].flags = 0;
+    }
+
+    iter->block_size = block_rows;
+    iter->block_idx += block_rows;
+
+next_cleanup:
+    free(sym_ids);
+    free(itv_ids);
+    free(timestamps);
+    free(opens);
+    free(highs);
+    free(lows);
+    free(closes);
+    free(volumes);
+    free(quote_volumes);
+    free(trades);
+    free(taker_buy_volumes);
+    free(taker_buy_quote_volumes);
+
+    if (iter->block_idx >= iter->total_rows) {
+        iter->eof = 1;
+    }
+
+    return iter->block_size;
+}
+
+/**
+ * ndtb_streaming_iterator_free — 释放迭代器
+ */
+void ndtb_streaming_iterator_free(StreamingIterator* iter) {
+    if (!iter) return;
+    if (iter->f) fclose(iter->f);
+    if (iter->current_block) free(iter->current_block);
+    if (iter->read_buffer) free(iter->read_buffer);
+    if (iter->sym_dict) {
+        for (int i = 0; i < iter->n_sym; i++) {
+            if (iter->sym_dict[i]) free(iter->sym_dict[i]);
+        }
+        free(iter->sym_dict);
+    }
+    if (iter->itv_dict) {
+        for (int i = 0; i < iter->n_itv; i++) {
+            if (iter->itv_dict[i]) free(iter->itv_dict[i]);
+        }
+        free(iter->itv_dict);
+    }
+    free(iter);
 }

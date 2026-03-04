@@ -397,6 +397,153 @@ uint32_t ndtsdb_binary_get_count(NDTSBinaryResult* result);
  */
 uint32_t ndtsdb_binary_get_stride(NDTSBinaryResult* result);
 
+/* ─── Phase 2: Sparse Index & Streaming Iterator (Issue #139) ─── */
+
+/**
+ * SparseIndexEntry - 单个索引条目（对应一个 block）
+ *
+ * @field block_offset  块在文件中的字节偏移
+ * @field min_ts        块内时间戳最小值（int64_t）
+ * @field max_ts        块内时间戳最大值（int64_t）
+ * @field row_count     块内行数
+ */
+typedef struct {
+    uint64_t block_offset;
+    int64_t min_ts;
+    int64_t max_ts;
+    uint32_t row_count;
+} SparseIndexEntry;
+
+/**
+ * SparseIndex - 时间戳稀疏索引（用于范围查询加速）
+ *
+ * @field entries     索引条目数组（按块偏移有序）
+ * @field entry_count 条目总数
+ * @field is_sorted   条目是否已排序
+ */
+typedef struct {
+    SparseIndexEntry* entries;
+    uint32_t entry_count;
+    int is_sorted;
+} SparseIndex;
+
+/**
+ * StreamingIterator - 流式读取迭代器（用于大文件不溢出内存）
+ *
+ * @field file_path   源文件路径
+ * @field f           打开的文件指针
+ * @field block_rows  单次读取的行数（默认 10000）
+ * @field current_block 当前块的数据缓冲区（KlineRow[]）
+ * @field block_size  current_block 中的行数
+ * @field block_idx   当前块的全局起始行号
+ * @field total_rows  文件中的总行数
+ * @field eof         是否已到达文件末尾
+ * @field header_offset 列数据块的起始偏移（跳过 header）
+ * @field sym_dict    symbol 字典
+ * @field itv_dict    interval 字典
+ * @field n_sym       symbol 数量
+ * @field n_itv       interval 数量
+ * @field read_buffer 压缩块的读缓冲区
+ * @field read_buffer_cap 读缓冲区容量
+ */
+typedef struct {
+    char file_path[512];
+    FILE* f;
+    uint32_t block_rows;
+    KlineRow* current_block;
+    uint32_t block_size;
+    uint32_t block_idx;
+    uint32_t total_rows;
+    int eof;
+    uint64_t header_offset;
+    char** sym_dict;
+    char** itv_dict;
+    int n_sym;
+    int n_itv;
+    uint8_t* read_buffer;
+    uint32_t read_buffer_cap;
+} StreamingIterator;
+
+/**
+ * ndtb_sparse_index_create — 为 NDTB 文件构建稀疏索引
+ *
+ * 扫描 NDTB 文件的时间戳列，构建块级别的 min/max 索引。
+ * 用于后续范围查询加速。
+ *
+ * @param file_path   NDTB 文件路径
+ * @param block_rows  每个块的目标行数（建议 1000-10000）
+ * @return            SparseIndex 指针（成功）或 NULL（失败）
+ */
+SparseIndex* ndtb_sparse_index_create(const char* file_path, uint32_t block_rows);
+
+/**
+ * ndtb_sparse_index_query_range — 使用索引过滤时间范围内的块
+ *
+ * 给定时间范围 [min_ts, max_ts]，返回包含该范围数据的块索引。
+ * 调用者负责释放返回的数组（使用 free()）。
+ *
+ * @param idx         稀疏索引
+ * @param min_ts      时间范围下界（毫秒）
+ * @param max_ts      时间范围上界（毫秒）
+ * @param out_count   输出参数：符合条件的块数
+ * @return            块索引数组（0-based），NULL 表示失败
+ */
+uint32_t* ndtb_sparse_index_query_range(const SparseIndex* idx,
+                                        int64_t min_ts, int64_t max_ts,
+                                        uint32_t* out_count);
+
+/**
+ * ndtb_sparse_index_free — 释放稀疏索引
+ *
+ * @param idx  稀疏索引指针，NULL 安全
+ */
+void ndtb_sparse_index_free(SparseIndex* idx);
+
+/**
+ * ndtb_streaming_iterator_create — 创建 NDTB 文件的流式读取迭代器
+ *
+ * 打开 NDTB 文件并准备流式读取，不一次性加载所有数据到内存。
+ * 调用者通过 ndtb_streaming_iterator_next() 逐块读取行数据。
+ *
+ * @param file_path   NDTB 文件路径
+ * @param block_rows  单次读取的行数（建议 1000-10000）
+ * @return            StreamingIterator 指针（成功）或 NULL（失败）
+ */
+StreamingIterator* ndtb_streaming_iterator_create(const char* file_path,
+                                                  uint32_t block_rows);
+
+/**
+ * ndtb_streaming_iterator_next — 读取下一个数据块
+ *
+ * 从迭代器读取最多 block_rows 行数据。返回的行数可能少于
+ * block_rows（最后一块）。返回 0 表示 EOF 或错误。
+ *
+ * 返回的行数据保存在 iter->current_block 中，
+ * 调用者应在调用 next() 之前复制或使用这些数据。
+ *
+ * @param iter  流式迭代器
+ * @return      当前块的行数（0 = EOF）
+ */
+uint32_t ndtb_streaming_iterator_next(StreamingIterator* iter);
+
+/**
+ * ndtb_streaming_iterator_free — 释放流式迭代器
+ *
+ * @param iter  迭代器指针，NULL 安全
+ */
+void ndtb_streaming_iterator_free(StreamingIterator* iter);
+
+/* ─── NDTB File Operations (Phase 2 Internal) ─── */
+
+/**
+ * write_ndtb_file — 将数据库内容写入 NDTB 文件
+ *
+ * @param filepath  输出文件路径
+ * @param db        数据库句柄
+ * @return          成功返回写入的行数，失败返回 -1
+ */
+int write_ndtb_file(const char* filepath, NDTSDB* db);
+
 #ifdef __cplusplus
 }
 #endif
