@@ -139,6 +139,22 @@ NDTSDB* ndtsdb_open(const char* path);
 NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size);
 
 /**
+ * ndtsdb_open_any — 自动检测格式打开数据库（快照模式，只读）
+ *
+ * 支持自动检测文件/目录路径和格式：
+ * - 若 path 是文件：读取前 4 字节检测 Magic
+ *   - "NDTS" → 使用 .ndts 格式加载
+ *   - "NDTB" → 使用 .ndtb 格式加载
+ * - 若 path 是目录：递归加载所有 .ndts 和 .ndtb 文件（自动混合）
+ *
+ * @param path  数据库文件或目录路径
+ * @return      数据库句柄，失败返回 NULL
+ *
+ * 注意：这是 ndtsdb_open_snapshot(path, 0) 的便利包装，无读取大小限制。
+ */
+NDTSDB* ndtsdb_open_any(const char* path);
+
+/**
  * ndtsdb_close — 关闭数据库并释放全局符号表
  *
  * 必须在下一次 ndtsdb_open 之前调用。

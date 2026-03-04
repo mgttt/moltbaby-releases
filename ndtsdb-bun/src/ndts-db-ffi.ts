@@ -90,6 +90,7 @@ function getLib() {
   _lib = dlopen(findLibPath(), {
     ndtsdb_open:                 { args: [FFIType.ptr], returns: FFIType.ptr },
     ndtsdb_open_snapshot:        { args: [FFIType.ptr, FFIType.u64], returns: FFIType.ptr },
+    ndtsdb_open_any:             { args: [FFIType.ptr], returns: FFIType.ptr },  /* NEW: auto-detect .ndts/.ndtb */
     ndtsdb_close:                { args: [FFIType.ptr], returns: FFIType.void },
     ndtsdb_insert:               { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
     ndtsdb_insert_batch:         { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
@@ -189,6 +190,17 @@ export function ffi_open_snapshot(path: string, snapshotSize = 0n): number {
   const ptr = getLib().symbols.ndtsdb_open_snapshot(cstr(path), snapshotSize);
   const n = typeof ptr === 'bigint' ? Number(ptr) : (ptr as number);
   if (!n) throw new Error(`ndtsdb_open_snapshot failed for path: ${path}`);
+  return n;
+}
+
+/**
+ * ffi_open_any — 自动检测格式打开数据库（快照模式，只读）
+ * 支持 .ndts 和 .ndtb 文件自动识别，以及混合格式目录加载
+ */
+export function ffi_open_any(path: string): number {
+  const ptr = getLib().symbols.ndtsdb_open_any(cstr(path));
+  const n = typeof ptr === 'bigint' ? Number(ptr) : (ptr as number);
+  if (!n) throw new Error(`ndtsdb_open_any failed for path: ${path}`);
   return n;
 }
 

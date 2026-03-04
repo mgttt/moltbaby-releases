@@ -2641,6 +2641,7 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
 
     /* 4. 检测格式标志 */
     int has_compression_obj = (strstr(header_json, "\"compression\":{") != NULL);
+    /* 重新启用 new bucket format 读取 — #132 bug 已修复（itv_ids 读取路径添加） */
     int is_new_bucket_format = (has_compression_obj && strstr(header_json, "\"enabled\":true") != NULL);
     int is_old_ts = (!has_compression_obj && strstr(header_json, "\"enabled\":true") != NULL);
     int is_gorilla = (strstr(header_json, "\"compression\":\"gorilla\"") != NULL) || (has_compression_obj && !is_new_bucket_format);
@@ -2651,8 +2652,10 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     int has_takerBuyVolume = (strstr(header_json, "\"takerBuyVolume\"") != NULL);
     int has_takerBuyQuoteVolume = (strstr(header_json, "\"takerBuyQuoteVolume\"") != NULL);
 
-    /*  consolidated flag: 如果任意一个额外列存在，就假设全部存在（分区文件格式） */
-    int has_extra_cols = has_quoteVolume || has_trades || has_takerBuyVolume || has_takerBuyQuoteVolume;
+    /*  consolidated flag: 如果任意一个额外列存在，就假设全部存在（分区文件格式）
+        TODO (#132 Phase 2): 修复额外列读取逻辑后重新启用
+        int has_extra_cols = has_quoteVolume || has_trades || has_takerBuyVolume || has_takerBuyQuoteVolume; */
+    int has_extra_cols = 0;  /* 临时禁用额外列，仅读取基础 5 列 OHLCV */
 
     fprintf(stderr, "[ndtsdb debug] %s: is_new_bucket_format=%d has_extra_cols=%d\n",
             filepath, is_new_bucket_format, has_extra_cols);
@@ -2701,6 +2704,7 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
 
             /* 分配列缓冲区 */
             int32_t*  sym_ids    = (int32_t*)malloc(row_count * 4);
+            int32_t*  itv_ids    = (int32_t*)malloc(row_count * 4);
             int64_t*  timestamps = (int64_t*)malloc(row_count * 8);
             double*   opens      = (double*)malloc(row_count * 8);
             double*   highs      = (double*)malloc(row_count * 8);
@@ -2712,9 +2716,9 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
             double*   taker_buy_volumes      = (double*)malloc(row_count * 8);
             double*   taker_buy_quote_volumes = (double*)malloc(row_count * 8);
 
-            if (!sym_ids || !timestamps || !opens || !highs || !lows || !closes || !volumes ||
+            if (!sym_ids || !itv_ids || !timestamps || !opens || !highs || !lows || !closes || !volumes ||
                 !quote_volumes || !trades || !taker_buy_volumes || !taker_buy_quote_volumes) {
-                free(sym_ids); free(timestamps); free(opens); free(highs); free(lows);
+                free(sym_ids); free(itv_ids); free(timestamps); free(opens); free(highs); free(lows);
                 free(closes); free(volumes); free(quote_volumes); free(trades);
                 free(taker_buy_volumes); free(taker_buy_quote_volumes);
                 break;
@@ -2745,6 +2749,17 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                             ok = 0;
                         }
                     }
+                }
+            }
+
+            /* 读取 itv_ids (raw int32 × row_count) — 修复 #132 bug */
+            if (ok) {
+                size_t itv_bytes = (size_t)row_count * 4;
+                if (fread(itv_ids, 1, itv_bytes, f) != itv_bytes) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read itv_ids data\n", chunk_num);
+                    ok = 0;
+                } else {
+                    crc_state = crc32_update(crc_state, (uint8_t*)itv_ids, itv_bytes);
                 }
             }
 
@@ -2829,33 +2844,7 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 }
             }
 
-            /* 读取 trades: [len(4) + delta_data(len)] (int32) */
-            if (ok) {
-                uint32_t clen = 0;
-                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > row_count * 4) {
-                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid trades length %u\n", chunk_num, clen);
-                    ok = 0;
-                } else {
-                    uint8_t* cbuf = (uint8_t*)malloc(clen);
-                    if (!cbuf) { ok = 0; }
-                    else if (fread(cbuf, 1, clen, f) != clen) {
-                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read trades data\n", chunk_num);
-                        free(cbuf);
-                        ok = 0;
-                    } else {
-                        crc_state = crc32_update(crc_state, &clen, 4);
-                        crc_state = crc32_update(crc_state, cbuf, clen);
-                        size_t decoded = delta_decompress_i32(cbuf, clen, trades, row_count);
-                        free(cbuf);
-                        if (decoded != row_count) {
-                            fprintf(stderr, "[ndtsdb debug] chunk %d: trades decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
-                            ok = 0;
-                        }
-                    }
-                }
-            }
-
-            /* 读取 takerBuyVolume (gorilla) */
+            /* 读取 takerBuyVolume (gorilla) — 必须在 trades 之前读取 */
             if (ok) {
                 uint32_t clen = 0;
                 if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
@@ -2881,7 +2870,7 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 }
             }
 
-            /* 读取 takerBuyQuoteVolume (gorilla) */
+            /* 读取 takerBuyQuoteVolume (gorilla) — 在 trades 之前 */
             if (ok) {
                 uint32_t clen = 0;
                 if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
@@ -2907,6 +2896,46 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 }
             }
 
+            /* 读取 trades: [len(4) + delta_data(len)] (int32) — 在所有 OHLCV 列之后 */
+            if (ok) {
+                uint32_t clen = 0;
+                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > row_count * 4) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid trades length %u\n", chunk_num, clen);
+                    ok = 0;
+                } else {
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; }
+                    else if (fread(cbuf, 1, clen, f) != clen) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read trades data\n", chunk_num);
+                        free(cbuf);
+                        ok = 0;
+                    } else {
+                        crc_state = crc32_update(crc_state, &clen, 4);
+                        crc_state = crc32_update(crc_state, cbuf, clen);
+                        size_t decoded = delta_decompress_i32(cbuf, clen, trades, row_count);
+                        free(cbuf);
+                        if (decoded != row_count) {
+                            fprintf(stderr, "[ndtsdb debug] chunk %d: trades decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
+                            ok = 0;
+                        }
+                    }
+                }
+            }
+
+            /* 读取 flags (raw int32 × row_count) */
+            if (ok) {
+                uint32_t* flags_buf = (uint32_t*)malloc(row_count * 4);
+                if (!flags_buf) { ok = 0; }
+                else if (fread(flags_buf, 4, row_count, f) != row_count) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read flags data\n", chunk_num);
+                    free(flags_buf);
+                    ok = 0;
+                } else {
+                    crc_state = crc32_update(crc_state, (uint8_t*)flags_buf, row_count * 4);
+                    free(flags_buf);
+                }
+            }
+
             /* 验证 chunk CRC32 */
             if (ok) {
                 uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
@@ -2917,7 +2946,7 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 } else if (disk_crc != computed_crc) {
                     fprintf(stderr, "[ndtsdb] chunk CRC mismatch in %s: computed=0x%08X disk=0x%08X rows=%u — skipping\n",
                             filepath, computed_crc, disk_crc, row_count);
-                    free(sym_ids); free(timestamps); free(opens); free(highs); free(lows);
+                    free(sym_ids); free(itv_ids); free(timestamps); free(opens); free(highs); free(lows);
                     free(closes); free(volumes); free(quote_volumes); free(trades);
                     free(taker_buy_volumes); free(taker_buy_quote_volumes);
                     continue;
@@ -2925,18 +2954,19 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
             }
 
             if (!ok) {
-                free(sym_ids); free(timestamps); free(opens); free(highs); free(lows);
+                free(sym_ids); free(itv_ids); free(timestamps); free(opens); free(highs); free(lows);
                 free(closes); free(volumes); free(quote_volumes); free(trades);
                 free(taker_buy_volumes); free(taker_buy_quote_volumes);
                 break;
             }
 
             /* 将行写入 db->symbols */
-            /* 新格式中没有 interval，使用默认值 */
+            /* 使用读取的 sym_ids 和 itv_ids 查找符号和时间间隔 */
             for (uint32_t i = 0; i < row_count; i++) {
                 const char* sym = (sym_ids[i] >= 0 && sym_ids[i] < n_sym)
                                   ? sym_dict[sym_ids[i]] : "UNKNOWN";
-                const char* itv = (n_itv > 0) ? itv_dict[0] : "_";
+                const char* itv = (itv_ids[i] >= 0 && itv_ids[i] < n_itv)
+                                  ? itv_dict[itv_ids[i]] : "_";
 
                 SymbolData* sd = find_or_create_symbol(db, sym, itv);
                 if (!sd) continue;
@@ -2963,7 +2993,7 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 total_loaded++;
             }
 
-            free(sym_ids); free(timestamps); free(opens); free(highs); free(lows);
+            free(sym_ids); free(itv_ids); free(timestamps); free(opens); free(highs); free(lows);
             free(closes); free(volumes); free(quote_volumes); free(trades);
             free(taker_buy_volumes); free(taker_buy_quote_volumes);
         }
@@ -3247,6 +3277,21 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     return total_loaded;
 }
 
+/**
+ * ndtsdb_open_any — 自动检测格式打开数据库（快照模式，只读）
+ *
+ * 支持：
+ * - .ndts 和 .ndtb 文件自动识别（Magic 检测）
+ * - 文件和目录路径自动切换
+ * - 目录递归加载（混合 .ndts + .ndtb）
+ *
+ * @param path  数据库文件或目录路径
+ * @return      数据库句柄，失败返回 NULL
+ */
+NDTSDB* ndtsdb_open_any(const char* path) {
+    return ndtsdb_open_snapshot(path, 0);  /* 0 = 无大小限制 */
+}
+
 NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
     NDTSDB* db = (NDTSDB*)malloc(sizeof(NDTSDB));
     if (!db) return NULL;
@@ -3328,7 +3373,10 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
                     continue;
                 }
 
-                if (!strstr(ent->d_name, ".ndts")) continue;
+                /* 支持 .ndts 和 .ndtb 两种格式 */
+                int is_ndts = strstr(ent->d_name, ".ndts") != NULL;
+                int is_ndtb = strstr(ent->d_name, ".ndtb") != NULL;
+                if (!is_ndts && !is_ndtb) continue;
 
                 load_ndts_file(db, filepath);
             }

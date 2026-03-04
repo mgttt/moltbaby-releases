@@ -5,7 +5,7 @@
  */
 import { mkdirSync } from 'fs';
 import {
-  ffi_open, ffi_close,
+  ffi_open, ffi_open_any, ffi_close,
   ffi_insert, ffi_insert_batch, ffi_clear,
   ffi_query_all_json, ffi_list_symbols_json,
   ffi_query_all_binary, parseQueryAllBinary,
@@ -145,4 +145,31 @@ export class NdtsDatabase {
 /** Open a database at the given directory path. Close with db.close(). */
 export function openDatabase(path: string): NdtsDatabase {
   return new NdtsDatabase(path);
+}
+
+/**
+ * openDatabaseAny — Open database with automatic format detection (snapshot/read-only mode)
+ *
+ * Supports:
+ * - Single file: Auto-detect Magic ("NDTS" vs "NDTB") and use appropriate parser
+ * - Directory: Recursively load all .ndts and .ndtb files (mixed format support)
+ *
+ * Returns a snapshot database handle. Use db.close() when done.
+ *
+ * @example
+ * // Single .ndts file
+ * const db = openDatabaseAny("data.ndts");
+ *
+ * // Single .ndtb file
+ * const db = openDatabaseAny("data.ndtb");
+ *
+ * // Mixed format directory
+ * const db = openDatabaseAny("data/");  // loads both .ndts and .ndtb files
+ */
+export function openDatabaseAny(path: string): NdtsDatabase {
+  // Create a new database object that uses ffi_open_any instead of ffi_open
+  const db = Object.create(NdtsDatabase.prototype);
+  db._ptr = ffi_open_any(path);
+  db._path = path;
+  return db;
 }

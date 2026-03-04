@@ -532,9 +532,9 @@ int main(int argc, char **argv) {
                 JS_FreeRuntime(rt);
                 return 1;
             }
-            
-            // 打开数据库（目录模式）
-            NDTSDB *db = ndtsdb_open(database);
+
+            // 打开数据库（快照模式，自动格式检测）
+            NDTSDB *db = ndtsdb_open_any(database);
             if (!db) {
                 fprintf(stderr, "Error: Failed to open database: %s\n", database);
                 ndtsdb_lock_release(lock_fd);
@@ -577,9 +577,9 @@ int main(int argc, char **argv) {
                 JS_FreeRuntime(rt);
                 return 1;
             }
-            
-            // 打开数据库（目录模式）
-            NDTSDB *db = ndtsdb_open(database);
+
+            // 打开数据库（快照模式，自动格式检测）
+            NDTSDB *db = ndtsdb_open_any(database);
             if (!db) {
                 fprintf(stderr, "Error: Failed to open database: %s\n", database);
                 ndtsdb_lock_release(lock_fd);
@@ -587,7 +587,7 @@ int main(int argc, char **argv) {
                 JS_FreeRuntime(rt);
                 return 1;
             }
-            
+
             // 执行查询
             Query q = {
                 .symbol = symbol,
@@ -1020,7 +1020,7 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        NDTSDB *db = ndtsdb_open(database);
+        NDTSDB *db = ndtsdb_open_any(database);
         if (!db) {
             fprintf(stderr, "Error: Failed to open database: %s\n", database);
             JS_FreeContext(ctx);
@@ -1195,7 +1195,7 @@ int main(int argc, char **argv) {
         if (plugin_file) {
             NDTSDB *plugin_db = NULL;
             if (database) {
-                plugin_db = ndtsdb_open(database);
+                plugin_db = ndtsdb_open_any(database);
             }
             
             int load_ret = load_plugin(plugin_file, plugin_db, ctx);
@@ -1510,7 +1510,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Usage: ndtsdb-cli info --database <path> [--symbol <sym>]\n");
             JS_FreeContext(ctx); JS_FreeRuntime(rt); return 1;
         }
-        NDTSDB *db = ndtsdb_open(database);
+        NDTSDB *db = ndtsdb_open_any(database);
         if (!db) { fprintf(stderr, "Error: Cannot open database: %s\n", database); JS_FreeContext(ctx); JS_FreeRuntime(rt); return 1; }
         QueryResult *result;
         if (symbol) { const char *syms[1] = {symbol}; result = ndtsdb_query_filtered(db, syms, 1); }
@@ -1756,9 +1756,9 @@ int main(int argc, char **argv) {
             // 初始化数据库连接（插件可能需要）
             NDTSDB *plugin_db = NULL;
             if (plugin_db_path) {
-                plugin_db = ndtsdb_open(plugin_db_path);
+                plugin_db = ndtsdb_open_any(plugin_db_path);
             }
-            
+
             // 使用 cmd_plugin 加载 .so 插件
             int load_ret = load_plugin(plugin_file, plugin_db, ctx);
             if (plugin_db) ndtsdb_close(plugin_db);
