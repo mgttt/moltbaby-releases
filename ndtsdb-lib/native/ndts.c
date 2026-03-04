@@ -565,8 +565,113 @@ size_t gorilla_compress_f64(
 }
 
 /**
+ * VarInt 解码 (LEB128) - 用于 Delta 压缩数据
+ *
+ * LEB128 编码：每个字节的低 7 位是数据，高位是延续标志（1 表示继续，0 表示结束）
+ */
+static size_t varint_decode_u64(const uint8_t* buffer, size_t buffer_len, uint64_t* out) {
+    *out = 0;
+    uint64_t result = 0;
+    int shift = 0;
+    size_t pos = 0;
+
+    while (pos < buffer_len && shift < 64) {
+        uint8_t byte = buffer[pos++];
+        result |= ((uint64_t)(byte & 0x7f)) << shift;
+        if (!(byte & 0x80)) {
+            *out = result;
+            return pos;  /* 返回消费的字节数 */
+        }
+        shift += 7;
+    }
+
+    return 0;  /* 无效 VarInt */
+}
+
+/**
+ * Delta 解压 Int32 数组 (VarInt 编码)
+ *
+ * Delta 编码：第一个值是初值，后续是差值（全部 VarInt 编码）
+ * 解压：vals[0] = delta[0]; vals[i] = vals[i-1] + delta[i]
+ *
+ * @param buffer      压缩数据（VarInt 编码）
+ * @param buffer_len  数据长度（字节数）
+ * @param out_data    输出数组
+ * @param max_count   最大输出数量
+ * @return            解压的元素数量
+ */
+static size_t delta_decompress_i32(
+    const uint8_t* buffer,
+    size_t buffer_len,
+    int32_t* out_data,
+    size_t max_count
+) {
+    if (buffer_len == 0 || max_count == 0) return 0;
+
+    size_t pos = 0;
+    size_t count = 0;
+    int32_t prev = 0;
+
+    /* 解码所有 VarInt 值，作为 delta 累加 */
+    while (pos < buffer_len && count < max_count) {
+        uint64_t delta_u64 = 0;
+        size_t bytes_consumed = varint_decode_u64(buffer + pos, buffer_len - pos, &delta_u64);
+        if (bytes_consumed == 0) break;
+
+        pos += bytes_consumed;
+
+        /* 转换为带符号的 int32：使用 zigzag 解码 */
+        int32_t delta = (int32_t)((delta_u64 >> 1) ^ (-(int32_t)(delta_u64 & 1)));
+        prev = prev + delta;
+        out_data[count++] = prev;
+    }
+
+    return count;
+}
+
+/**
+ * Delta 解压 Int64 数组 (VarInt 编码)
+ *
+ * 同 delta_decompress_i32 但针对 int64_t
+ *
+ * @param buffer      压缩数据（VarInt 编码）
+ * @param buffer_len  数据长度（字节数）
+ * @param out_data    输出数组
+ * @param max_count   最大输出数量
+ * @return            解压的元素数量
+ */
+static size_t delta_decompress_i64(
+    const uint8_t* buffer,
+    size_t buffer_len,
+    int64_t* out_data,
+    size_t max_count
+) {
+    if (buffer_len == 0 || max_count == 0) return 0;
+
+    size_t pos = 0;
+    size_t count = 0;
+    int64_t prev = 0;
+
+    /* 解码所有 VarInt 值，作为 delta 累加 */
+    while (pos < buffer_len && count < max_count) {
+        uint64_t delta_u64 = 0;
+        size_t bytes_consumed = varint_decode_u64(buffer + pos, buffer_len - pos, &delta_u64);
+        if (bytes_consumed == 0) break;
+
+        pos += bytes_consumed;
+
+        /* 转换为带符号的 int64：使用 zigzag 解码 */
+        int64_t delta = (int64_t)((delta_u64 >> 1) ^ (-(int64_t)(delta_u64 & 1)));
+        prev = prev + delta;
+        out_data[count++] = prev;
+    }
+
+    return count;
+}
+
+/**
  * Gorilla XOR 解压 Float64 数组
- * 
+ *
  * @param buffer      压缩数据
  * @param buffer_len  压缩数据长度
  * @param out_data    输出数组
@@ -1178,7 +1283,7 @@ static void write_partition_file(const char* filepath,
 
     if (use_gorilla) {
         /* 压缩格式: sym_ids(raw) + itv_ids(raw) + timestamps(raw)
-         *           + [len(4)+data](×8 OHLCV+extra_3_double) + trades(raw) + flags(raw) */
+         *           + [len(4)+data](×8 OHLCV+extra_3_double) + trades(len+raw) + flags(raw) */
         chunk_size = 4                       /* row_count */
             + n_rows * 4                     /* sym_ids */
             + n_rows * 4                     /* itv_ids */
@@ -1191,7 +1296,7 @@ static void write_partition_file(const char* filepath,
             + (4 + len_quote_volume)         /* quoteVolume: len+data */
             + (4 + len_taker_buy_volume)     /* takerBuyVolume: len+data */
             + (4 + len_taker_buy_quote_volume) /* takerBuyQuoteVolume: len+data */
-            + n_rows * 4                     /* trades: raw int32 */
+            + (4 + n_rows * 4)               /* trades: len+raw int32 */
             + n_rows * 4;                    /* flags */
     } else {
         chunk_size = 4
@@ -1199,7 +1304,7 @@ static void write_partition_file(const char* filepath,
             + n_rows * 8
             + n_rows * 8 * 5                 /* OHLCV */
             + n_rows * 8 * 3                 /* quoteVolume, takerBuyVolume, takerBuyQuoteVolume */
-            + n_rows * 4                     /* trades */
+            + (4 + n_rows * 4)               /* trades: len+raw */
             + n_rows * 4;                    /* flags */
     }
 
@@ -1238,7 +1343,9 @@ static void write_partition_file(const char* filepath,
         u32 = (uint32_t)len_taker_buy_quote_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_taker_buy_quote_volume, len_taker_buy_quote_volume); p += len_taker_buy_quote_volume;
         free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume);
         free(buf_quote_volume); free(buf_taker_buy_volume); free(buf_taker_buy_quote_volume);
-        /* trades: raw int32 */
+        /* trades: raw int32 with length prefix (row_count * 4) */
+        u32 = n_rows * 4;
+        memcpy(p, &u32, 4); p += 4;
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].trades, 4); p += 4; }
     } else {
         /* OHLCV + extra 3 double: raw float64 */
@@ -1250,7 +1357,9 @@ static void write_partition_file(const char* filepath,
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].quoteVolume, 8); p += 8; }
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].takerBuyVolume, 8); p += 8; }
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].takerBuyQuoteVolume, 8); p += 8; }
-        /* trades: raw int32 */
+        /* trades: raw int32 with length prefix (row_count * 4) */
+        uint32_t u32 = n_rows * 4;
+        memcpy(p, &u32, 4); p += 4;
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].trades, 4); p += 4; }
     }
 
@@ -1538,11 +1647,10 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     }
 
     /* 4. 检测格式标志 */
-    /* 旧版 TS 压缩：根级别有 "enabled":true，但没有 "compression":{ */
     int has_compression_obj = (strstr(header_json, "\"compression\":{") != NULL);
+    int is_new_bucket_format = (has_compression_obj && strstr(header_json, "\"enabled\":true") != NULL);
     int is_old_ts = (!has_compression_obj && strstr(header_json, "\"enabled\":true") != NULL);
-    /* 新版分列压缩：有 "compression":{"algorithms":...} 或旧版单列 gorilla */
-    int is_gorilla = (strstr(header_json, "\"compression\":\"gorilla\"") != NULL) || has_compression_obj;
+    int is_gorilla = (strstr(header_json, "\"compression\":\"gorilla\"") != NULL) || (has_compression_obj && !is_new_bucket_format);
 
     /* 检测额外列存在性（用于向后兼容） */
     int has_quoteVolume = (strstr(header_json, "\"quoteVolume\"") != NULL);
@@ -1553,17 +1661,326 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     /*  consolidated flag: 如果任意一个额外列存在，就假设全部存在（分区文件格式） */
     int has_extra_cols = has_quoteVolume || has_trades || has_takerBuyVolume || has_takerBuyQuoteVolume;
 
-    fprintf(stderr, "[ndtsdb debug] %s: has_quoteVolume=%d has_trades=%d has_takerBuyVolume=%d has_takerBuyQuoteVolume=%d has_extra_cols=%d\n",
-            filepath, has_quoteVolume, has_trades, has_takerBuyVolume, has_takerBuyQuoteVolume, has_extra_cols);
+    fprintf(stderr, "[ndtsdb debug] %s: is_new_bucket_format=%d has_extra_cols=%d\n",
+            filepath, is_new_bucket_format, has_extra_cols);
 
     free(header_json);
 
-    if (is_old_ts) {
-        /* 旧版 TS 压缩格式，跳过 */
+    if (is_old_ts && !is_new_bucket_format) {
+        /* 旧版 TS 压缩格式（纯 enabled:true，无 compression 对象），跳过 */
         for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
         for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
         fclose(f);
         return 0;
+    }
+
+    if (is_new_bucket_format) {
+        /* 新格式（bucket-*.ndts）：分列压缩 + delta + gorilla */
+        int total_loaded = 0;
+        int chunk_num = 0;
+
+        while (!feof(f)) {
+            chunk_num++;
+            /* snapshot 限制 */
+            if (db->snapshot_size > 0) {
+                long pos = ftell(f);
+                if (pos < 0 || (uint64_t)pos >= db->snapshot_size) break;
+            }
+
+            uint32_t row_count = 0;
+            if (fread(&row_count, 4, 1, f) != 1) {
+                fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read row_count\n", chunk_num);
+                break;
+            }
+            if (row_count == 0) {
+                fprintf(stderr, "[ndtsdb debug] chunk %d: row_count is 0\n", chunk_num);
+                break;
+            }
+            if (row_count > 10000000) {
+                fprintf(stderr, "[ndtsdb debug] chunk %d: row_count %u too large\n", chunk_num, row_count);
+                break;
+            }
+            fprintf(stderr, "[ndtsdb debug] chunk %d: row_count=%u (new bucket format)\n", chunk_num, row_count);
+
+            /* 增量 CRC 状态 */
+            uint32_t crc_state = 0xFFFFFFFFu;
+            crc_state = crc32_update(crc_state, &row_count, 4);
+
+            /* 分配列缓冲区 */
+            int32_t*  sym_ids    = (int32_t*)malloc(row_count * 4);
+            int64_t*  timestamps = (int64_t*)malloc(row_count * 8);
+            double*   opens      = (double*)malloc(row_count * 8);
+            double*   highs      = (double*)malloc(row_count * 8);
+            double*   lows       = (double*)malloc(row_count * 8);
+            double*   closes     = (double*)malloc(row_count * 8);
+            double*   volumes    = (double*)malloc(row_count * 8);
+            double*   quote_volumes    = (double*)malloc(row_count * 8);
+            int32_t*  trades           = (int32_t*)malloc(row_count * 4);
+            double*   taker_buy_volumes      = (double*)malloc(row_count * 8);
+            double*   taker_buy_quote_volumes = (double*)malloc(row_count * 8);
+
+            if (!sym_ids || !timestamps || !opens || !highs || !lows || !closes || !volumes ||
+                !quote_volumes || !trades || !taker_buy_volumes || !taker_buy_quote_volumes) {
+                free(sym_ids); free(timestamps); free(opens); free(highs); free(lows);
+                free(closes); free(volumes); free(quote_volumes); free(trades);
+                free(taker_buy_volumes); free(taker_buy_quote_volumes);
+                break;
+            }
+
+            int ok = 1;
+
+            /* 读取 symbol_id: [len(4) + delta_data(len)] */
+            if (ok) {
+                uint32_t clen = 0;
+                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > row_count * 4) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid symbol_id length %u\n", chunk_num, clen);
+                    ok = 0;
+                } else {
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; }
+                    else if (fread(cbuf, 1, clen, f) != clen) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read symbol_id data\n", chunk_num);
+                        free(cbuf);
+                        ok = 0;
+                    } else {
+                        crc_state = crc32_update(crc_state, &clen, 4);
+                        crc_state = crc32_update(crc_state, cbuf, clen);
+                        size_t decoded = delta_decompress_i32(cbuf, clen, sym_ids, row_count);
+                        free(cbuf);
+                        if (decoded != row_count) {
+                            fprintf(stderr, "[ndtsdb debug] chunk %d: symbol_id decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
+                            ok = 0;
+                        }
+                    }
+                }
+            }
+
+            /* 读取 timestamp: [len(4) + delta_data(len)] */
+            if (ok) {
+                uint32_t clen = 0;
+                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > row_count * 8) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid timestamp length %u\n", chunk_num, clen);
+                    ok = 0;
+                } else {
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; }
+                    else if (fread(cbuf, 1, clen, f) != clen) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read timestamp data\n", chunk_num);
+                        free(cbuf);
+                        ok = 0;
+                    } else {
+                        crc_state = crc32_update(crc_state, &clen, 4);
+                        crc_state = crc32_update(crc_state, cbuf, clen);
+                        size_t decoded = delta_decompress_i64(cbuf, clen, timestamps, row_count);
+                        free(cbuf);
+                        if (decoded != row_count) {
+                            fprintf(stderr, "[ndtsdb debug] chunk %d: timestamp decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
+                            ok = 0;
+                        }
+                    }
+                }
+            }
+
+            /* 读取 OHLCV (5 列 gorilla) */
+            if (ok) {
+                double* ohlcv_basic[5] = { opens, highs, lows, closes, volumes };
+                for (int ci = 0; ci < 5 && ok; ci++) {
+                    uint32_t clen = 0;
+                    if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: invalid ohlcv[%d] length %u\n", chunk_num, ci, clen);
+                        ok = 0;
+                        break;
+                    }
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; break; }
+                    if (fread(cbuf, 1, clen, f) != clen) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read ohlcv[%d] data\n", chunk_num, ci);
+                        free(cbuf);
+                        ok = 0;
+                        break;
+                    }
+                    crc_state = crc32_update(crc_state, &clen, 4);
+                    crc_state = crc32_update(crc_state, cbuf, clen);
+                    size_t decoded = gorilla_decompress_f64(cbuf, clen, ohlcv_basic[ci], row_count);
+                    free(cbuf);
+                    if (decoded != row_count) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: ohlcv[%d] decode mismatch %zu vs %u\n", chunk_num, ci, decoded, row_count);
+                        ok = 0;
+                    }
+                }
+            }
+
+            /* 读取 quoteVolume (gorilla) */
+            if (ok) {
+                uint32_t clen = 0;
+                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid quoteVolume length %u\n", chunk_num, clen);
+                    ok = 0;
+                } else {
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; }
+                    else if (fread(cbuf, 1, clen, f) != clen) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read quoteVolume data\n", chunk_num);
+                        free(cbuf);
+                        ok = 0;
+                    } else {
+                        crc_state = crc32_update(crc_state, &clen, 4);
+                        crc_state = crc32_update(crc_state, cbuf, clen);
+                        size_t decoded = gorilla_decompress_f64(cbuf, clen, quote_volumes, row_count);
+                        free(cbuf);
+                        if (decoded != row_count) {
+                            fprintf(stderr, "[ndtsdb debug] chunk %d: quoteVolume decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
+                            ok = 0;
+                        }
+                    }
+                }
+            }
+
+            /* 读取 trades: [len(4) + delta_data(len)] (int32) */
+            if (ok) {
+                uint32_t clen = 0;
+                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > row_count * 4) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid trades length %u\n", chunk_num, clen);
+                    ok = 0;
+                } else {
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; }
+                    else if (fread(cbuf, 1, clen, f) != clen) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read trades data\n", chunk_num);
+                        free(cbuf);
+                        ok = 0;
+                    } else {
+                        crc_state = crc32_update(crc_state, &clen, 4);
+                        crc_state = crc32_update(crc_state, cbuf, clen);
+                        size_t decoded = delta_decompress_i32(cbuf, clen, trades, row_count);
+                        free(cbuf);
+                        if (decoded != row_count) {
+                            fprintf(stderr, "[ndtsdb debug] chunk %d: trades decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
+                            ok = 0;
+                        }
+                    }
+                }
+            }
+
+            /* 读取 takerBuyVolume (gorilla) */
+            if (ok) {
+                uint32_t clen = 0;
+                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid takerBuyVolume length %u\n", chunk_num, clen);
+                    ok = 0;
+                } else {
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; }
+                    else if (fread(cbuf, 1, clen, f) != clen) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read takerBuyVolume data\n", chunk_num);
+                        free(cbuf);
+                        ok = 0;
+                    } else {
+                        crc_state = crc32_update(crc_state, &clen, 4);
+                        crc_state = crc32_update(crc_state, cbuf, clen);
+                        size_t decoded = gorilla_decompress_f64(cbuf, clen, taker_buy_volumes, row_count);
+                        free(cbuf);
+                        if (decoded != row_count) {
+                            fprintf(stderr, "[ndtsdb debug] chunk %d: takerBuyVolume decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
+                            ok = 0;
+                        }
+                    }
+                }
+            }
+
+            /* 读取 takerBuyQuoteVolume (gorilla) */
+            if (ok) {
+                uint32_t clen = 0;
+                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid takerBuyQuoteVolume length %u\n", chunk_num, clen);
+                    ok = 0;
+                } else {
+                    uint8_t* cbuf = (uint8_t*)malloc(clen);
+                    if (!cbuf) { ok = 0; }
+                    else if (fread(cbuf, 1, clen, f) != clen) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read takerBuyQuoteVolume data\n", chunk_num);
+                        free(cbuf);
+                        ok = 0;
+                    } else {
+                        crc_state = crc32_update(crc_state, &clen, 4);
+                        crc_state = crc32_update(crc_state, cbuf, clen);
+                        size_t decoded = gorilla_decompress_f64(cbuf, clen, taker_buy_quote_volumes, row_count);
+                        free(cbuf);
+                        if (decoded != row_count) {
+                            fprintf(stderr, "[ndtsdb debug] chunk %d: takerBuyQuoteVolume decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
+                            ok = 0;
+                        }
+                    }
+                }
+            }
+
+            /* 验证 chunk CRC32 */
+            if (ok) {
+                uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+                uint32_t disk_crc = 0;
+                if (fread(&disk_crc, 4, 1, f) != 1) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read crc\n", chunk_num);
+                    ok = 0;
+                } else if (disk_crc != computed_crc) {
+                    fprintf(stderr, "[ndtsdb] chunk CRC mismatch in %s: computed=0x%08X disk=0x%08X rows=%u — skipping\n",
+                            filepath, computed_crc, disk_crc, row_count);
+                    free(sym_ids); free(timestamps); free(opens); free(highs); free(lows);
+                    free(closes); free(volumes); free(quote_volumes); free(trades);
+                    free(taker_buy_volumes); free(taker_buy_quote_volumes);
+                    continue;
+                }
+            }
+
+            if (!ok) {
+                free(sym_ids); free(timestamps); free(opens); free(highs); free(lows);
+                free(closes); free(volumes); free(quote_volumes); free(trades);
+                free(taker_buy_volumes); free(taker_buy_quote_volumes);
+                break;
+            }
+
+            /* 将行写入 db->symbols */
+            /* 新格式中没有 interval，使用默认值 */
+            for (uint32_t i = 0; i < row_count; i++) {
+                const char* sym = (sym_ids[i] >= 0 && sym_ids[i] < n_sym)
+                                  ? sym_dict[sym_ids[i]] : "UNKNOWN";
+                const char* itv = (n_itv > 0) ? itv_dict[0] : "_";
+
+                SymbolData* sd = find_or_create_symbol(db, sym, itv);
+                if (!sd) continue;
+
+                if (sd->count >= sd->capacity) {
+                    uint32_t nc = sd->capacity * 2;
+                    KlineRow* nk = (KlineRow*)realloc(sd->klines, nc * sizeof(KlineRow));
+                    if (!nk) continue;
+                    sd->klines   = nk;
+                    sd->capacity = nc;
+                }
+                sd->klines[sd->count].timestamp = timestamps[i];
+                sd->klines[sd->count].open      = opens[i];
+                sd->klines[sd->count].high      = highs[i];
+                sd->klines[sd->count].low       = lows[i];
+                sd->klines[sd->count].close     = closes[i];
+                sd->klines[sd->count].volume    = volumes[i];
+                sd->klines[sd->count].quoteVolume    = quote_volumes[i];
+                sd->klines[sd->count].trades         = trades[i];
+                sd->klines[sd->count].takerBuyVolume = taker_buy_volumes[i];
+                sd->klines[sd->count].takerBuyQuoteVolume = taker_buy_quote_volumes[i];
+                sd->klines[sd->count].flags     = 0;  /* 新格式无 flags */
+                sd->count++;
+                total_loaded++;
+            }
+
+            free(sym_ids); free(timestamps); free(opens); free(highs); free(lows);
+            free(closes); free(volumes); free(quote_volumes); free(trades);
+            free(taker_buy_volumes); free(taker_buy_quote_volumes);
+        }
+
+        fclose(f);
+        for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+        for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+
+        fprintf(stderr, "[ndtsdb debug] %s: loaded %d rows (new bucket format)\n", filepath, total_loaded);
+        return total_loaded;
     }
 
     /* 5. 从偏移 4100 开始读取 chunks（header_block(4096) + CRC(4)） */
@@ -1685,46 +2102,23 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                     if (decoded != row_count) { ok = 0; }
                 }
             }
-            /* trades 列 (uint32_t) - 可能 delta 压缩 (has_extra_cols 时) */
+            /* trades 列 (uint32_t) - raw format with length prefix */
             if (ok && has_extra_cols) {
                 uint32_t trades_clen = 0;
-                uint8_t* trades_cbuf = NULL;
-                int32_t* trades_delta = NULL;
-
                 if (fread(&trades_clen, 4, 1, f) != 1) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read trades length\n", chunk_num);
+                    ok = 0;
+                } else if (trades_clen != row_count * 4) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: trades length mismatch (expected %u, got %u)\n",
+                            chunk_num, row_count * 4, trades_clen);
+                    ok = 0;
+                } else if (fread(trades, 4, row_count, f) != row_count) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read trades data\n", chunk_num);
                     ok = 0;
                 } else {
                     crc_state = crc32_update(crc_state, &trades_clen, 4);
-
-                    if (trades_clen < row_count * 4 + 1000 && trades_clen > 0) {
-                        /* 压缩格式 */
-                        trades_cbuf = (uint8_t*)malloc(trades_clen);
-                        trades_delta = (int32_t*)malloc(row_count * 4);
-                        if (!trades_cbuf || !trades_delta) {
-                            ok = 0;
-                        } else if (fread(trades_cbuf, 1, trades_clen, f) != trades_clen) {
-                            ok = 0;
-                        } else {
-                            crc_state = crc32_update(crc_state, trades_cbuf, trades_clen);
-                            if (trades_clen == row_count * 4) {
-                                memcpy(trades_delta, trades_cbuf, trades_clen);
-                                delta_decode_i32(trades_delta, (int32_t*)trades, row_count);
-                            } else {
-                                ok = 0;
-                            }
-                        }
-                    } else {
-                        /* raw 格式：trades_clen 是第一个值 */
-                        memcpy(trades, &trades_clen, 4);
-                        if (fread(trades + 1, 4, row_count - 1, f) != row_count - 1) {
-                            ok = 0;
-                        } else {
-                            crc_state = crc32_update(crc_state, trades + 1, (row_count - 1) * 4);
-                        }
-                    }
+                    crc_state = crc32_update(crc_state, trades, trades_clen);
                 }
-                free(trades_cbuf);
-                free(trades_delta);
             }
         } else {
             if (fread(opens,   8, row_count, f) != row_count ||
@@ -1741,14 +2135,29 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                 crc_state = crc32_update(crc_state, volumes, row_count * 8);
             }
             if (ok && has_extra_cols) {
-                if (fread(quote_volumes, 8, row_count, f) != row_count ||
-                    fread(trades, 4, row_count, f) != row_count ||
-                    fread(taker_buy_volumes, 8, row_count, f) != row_count ||
-                    fread(taker_buy_quote_volumes, 8, row_count, f) != row_count) {
+                if (fread(quote_volumes, 8, row_count, f) != row_count) {
                     ok = 0;
                 } else {
                     crc_state = crc32_update(crc_state, quote_volumes, row_count * 8);
-                    crc_state = crc32_update(crc_state, trades, row_count * 4);
+                }
+                /* trades with length prefix */
+                if (ok) {
+                    uint32_t trades_clen = 0;
+                    if (fread(&trades_clen, 4, 1, f) != 1) {
+                        ok = 0;
+                    } else if (trades_clen != row_count * 4) {
+                        ok = 0;
+                    } else if (fread(trades, 4, row_count, f) != row_count) {
+                        ok = 0;
+                    } else {
+                        crc_state = crc32_update(crc_state, &trades_clen, 4);
+                        crc_state = crc32_update(crc_state, trades, trades_clen);
+                    }
+                }
+                if (ok && (fread(taker_buy_volumes, 8, row_count, f) != row_count ||
+                           fread(taker_buy_quote_volumes, 8, row_count, f) != row_count)) {
+                    ok = 0;
+                } else if (ok) {
                     crc_state = crc32_update(crc_state, taker_buy_volumes, row_count * 8);
                     crc_state = crc32_update(crc_state, taker_buy_quote_volumes, row_count * 8);
                 }

@@ -22,6 +22,7 @@ import { createLogger } from './utils/logger';
 const logger = createLogger('CLI');
 
 import { StrategyConfigManager } from '../src/strategy/ConfigManager';
+import { HotReloadManager } from './hot-reload/HotReloadManager';
 import { resolve } from 'path';
 
 const HELP = `
@@ -34,6 +35,7 @@ Commands:
   stop [name]                      停止策略实例
   restart [name] [--update-env]    重启策略实例
   reload [name]                    重载配置（不重启）
+  hot-reload <strategyId> [opts]   热更新策略代码（零停机）
   delete <name>                    删除策略实例
   list                             列出所有实例
   show <name>                      显示实例详情
@@ -80,17 +82,28 @@ async function main() {
   // 解析选项
   const configIdx = restArgs.findIndex(a => a === '--config' || a === '-c');
   const configPath = configIdx !== -1 ? restArgs[configIdx + 1] : './ecosystem.config.js';
-  
+
   const updateEnv = restArgs.includes('--update-env');
-  
+
   const linesIdx = restArgs.findIndex(a => a === '--lines' || a === '-n');
   const lines = linesIdx !== -1 ? parseInt(restArgs[linesIdx + 1]) : 50;
-  
+
+  // 为 hot-reload 命令解析选项
+  const namedArgs = new Map<string, string>();
+  for (let i = 0; i < restArgs.length; i++) {
+    const arg = restArgs[i];
+    if (arg.startsWith('--')) {
+      const [key, value] = arg.substring(2).split('=');
+      namedArgs.set(key, value || restArgs[i + 1]);
+    }
+  }
+
   // 移除选项后的参数
   const positionalArgs = restArgs.filter((_, i) => {
     if (i === configIdx || i === configIdx + 1) return false;
     if (i === linesIdx || i === linesIdx + 1) return false;
     if (restArgs[i] === '--update-env') return false;
+    if (restArgs[i].startsWith('--')) return false;
     return true;
   });
   
@@ -121,7 +134,46 @@ async function main() {
       await manager.reload(name);
       break;
     }
-    
+
+    case 'hot-reload': {
+      const strategyId = positionalArgs[0];
+      if (!strategyId) {
+        logger.error('Usage: qlab hot-reload <strategyId> [--target=strategy|module] [--dry-run] [--force]');
+        process.exit(1);
+      }
+
+      // 解析选项
+      const dryRun = namedArgs.has('dry-run') || namedArgs.has('dryRun');
+      const force = namedArgs.has('force');
+      const target = (namedArgs.get('target') || 'strategy') as 'strategy' | 'module';
+
+      try {
+        const hotReloadManager = new HotReloadManager();
+        const result = await hotReloadManager.reload(strategyId, {
+          target,
+          dryRun,
+          force,
+        });
+
+        if (result.success) {
+          if (dryRun) {
+            logger.info(`✅ Gate checks passed. Ready for hot-reload.`);
+            logger.info(`Run without --dry-run to execute: qlab hot-reload ${strategyId}`);
+          } else {
+            logger.info(`✅ Strategy ${strategyId} reloaded successfully`);
+            logger.info(`Duration: ${result.duration}ms`);
+          }
+        } else {
+          logger.error(`❌ Hot-reload failed: ${result.error}`);
+          process.exit(1);
+        }
+      } catch (error: any) {
+        logger.error(`❌ Error: ${error.message}`);
+        process.exit(1);
+      }
+      break;
+    }
+
     case 'delete': {
       const name = positionalArgs[0];
       if (!name) {

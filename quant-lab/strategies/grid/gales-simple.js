@@ -235,7 +235,7 @@ function getDedupKey() {
 
 let state = {
   initialized: false,
-  centerPrice: 0,
+  referencePrice: 0,
   lastPrice: 0,
   positionNotional: 0,
   gridLevels: [],
@@ -1199,14 +1199,14 @@ function checkCircuitBreaker() {
 
   // 3. 价格偏离 — [硬拦截最小集] 降级为告警（不拦截）
   // 原：drift>50%硬拦截；现：仅告警，允许策略继续运行
-  if (state.centerPrice > 0) {
-    const drift = Math.abs(state.lastPrice - state.centerPrice) / state.centerPrice;
+  if (state.referencePrice > 0) {
+    const drift = Math.abs(state.lastPrice - state.referencePrice) / state.referencePrice;
     const driftPct = (drift * 100).toFixed(2);
     if (drift > 0.30) {  // 30%预警（原50%硬拦截 → 30%告警，不拦）
       const lastDriftWarn = circuitBreakerState.lastDriftWarnAt || 0;
       if (now - lastDriftWarn > 600000) {  // 10分钟防抖
         circuitBreakerState.lastDriftWarnAt = now;
-        logWarn('[告警-价格偏离' + driftPct + '%] center=' + state.centerPrice.toFixed(4) + ' last=' + state.lastPrice.toFixed(4) + ' (不拦截，继续运行)');
+        logWarn('[告警-价格偏离' + driftPct + '%] reference=' + state.referencePrice.toFixed(4) + ' last=' + state.lastPrice.toFixed(4) + ' (不拦截，继续运行)');
         try { bridge_tgSend('9号', '[告警][价格偏离>' + (drift>0.50?'50':'30') + '%] drift=' + driftPct + '% (runId=' + state.runId + ')'); } catch(e){}
       }
     }
@@ -1657,35 +1657,71 @@ function reconcileGridOrderLinks() {
 }
 function updatePositionFromFill(side, fillQty, fillPrice) {
   const notional = fillQty * fillPrice;
+  const oldReference = state.referencePrice;
 
-  // 方向模式处理
+  // 1. 更新仓位（根据策略倾向）
   if (CONFIG.lean === 'positive') {
-    // 做多模式：Buy 增加仓位，Sell 只是虚仓（对冲/减仓）
     if (side === 'Buy') {
       state.positionNotional += notional;
     } else {
-      // Sell 成交只是对冲，记录虚仓但不减少实际仓位
-      // 实际由操盘手跨产品对冲
       logDebug('[虚仓] positive 模式下 Sell 成交仅记账: -' + notional.toFixed(2));
     }
-    return;
-  }
-
-  if (CONFIG.lean === 'negative') {
-    // 做空模式：Sell 增加空仓（更负），Buy 减少空仓（向0靠拢，回补）
+  } else if (CONFIG.lean === 'negative') {
     if (side === 'Sell') {
       state.positionNotional -= notional;
     } else {
-      // Buy 减少空仓（修复：原来是虚仓逻辑，现在实际影响仓位）
       state.positionNotional += notional;
       logDebug('[减空] negative 模式下 Buy 成交减空仓: +' + notional.toFixed(2));
     }
-    return;
+  } else {
+    // neutral 模式
+    if (side === 'Buy') {
+      state.positionNotional += notional;
+    } else {
+      state.positionNotional -= notional;
+    }
   }
 
-  // neutral 模式：双向都影响仓位
-  if (side === 'Buy') state.positionNotional += notional;
-  else state.positionNotional -= notional;
+  // 2. 【核心修复】每次成交都更新基准价格并重新计算网格
+  // Buy成交 @ price → referencePrice = price → 重新计算所有 Sell 网格线
+  // Sell成交 @ price → referencePrice = price → 重新计算所有 Buy 网格线
+  state.referencePrice = fillPrice;
+  recalculateGridPrices(oldReference);
+  logInfo('[网格重算] 成交后基准更新: ' + oldReference.toFixed(4) + ' -> ' + state.referencePrice.toFixed(4) +
+          ' (' + side + ' @ ' + fillPrice.toFixed(4) + ')');
+}
+
+// P0新增：重新计算网格价格（保持网格ID和状态不变）
+function recalculateGridPrices(oldCenter) {
+  if (!state.gridLevels || state.gridLevels.length === 0) return;
+
+  const newReference = state.referencePrice;
+  const spacingDown = CONFIG.gridSpacingDown !== null ? CONFIG.gridSpacingDown : CONFIG.gridSpacing;
+  const spacingUp = CONFIG.gridSpacingUp !== null ? CONFIG.gridSpacingUp : CONFIG.gridSpacing;
+
+  // 重新计算每个网格的价格
+  for (let i = 0; i < state.gridLevels.length; i++) {
+    const grid = state.gridLevels[i];
+    if (grid.side === 'Buy') {
+      // 根据旧center和旧price计算tier（从center往下数第几个）
+      // oldPrice = oldCenter * (1 - spacingDown * tier)
+      // => tier = (oldCenter - oldPrice) / oldCenter / spacingDown
+      const tier = Math.round((oldCenter - grid.price) / oldCenter / spacingDown);
+      if (tier > 0) {
+        grid.price = newCenter * (1 - spacingDown * tier);
+      }
+    } else {
+      // Sell网格
+      // oldPrice = oldCenter * (1 + spacingUp * tier)
+      // => tier = (oldPrice - oldCenter) / oldCenter / spacingUp
+      const tier = Math.round((grid.price - oldCenter) / oldCenter / spacingUp);
+      if (tier > 0) {
+        grid.price = newCenter * (1 + spacingUp * tier);
+      }
+    }
+  }
+
+  logInfo('[网格重算] 已更新 ' + state.gridLevels.length + ' 个档位价格，新基准: ' + newCenter.toFixed(4));
 }
 
 // 统一入口：订单状态更新（未来接 WebSocket 时也走这里）
@@ -3040,11 +3076,11 @@ function st_heartbeat(tickJson) {
 
   // 首次初始化网格
   if (!state.initialized) {
-    state.centerPrice = tick.price;
+    state.referencePrice = tick.price;
     initializeGrids();
     state.initialized = true;
     state.lastPlaceTick = state.tickCount;
-    logInfo('网格初始化完成，中心价格: ' + state.centerPrice);
+    logInfo('网格初始化完成，基准价格: ' + state.referencePrice);
     printGridStatus();
     saveState();
     return;
@@ -3094,8 +3130,8 @@ function st_heartbeat(tickJson) {
   // P0 修复：Auto Recenter + 满仓死锁修复
   // ================================
   if (CONFIG.autoRecenter) {
-    const center = state.centerPrice || state.lastPrice;
-    const drift = Math.abs(state.lastPrice - center) / center;
+    const reference = state.referencePrice || state.lastPrice;
+    const drift = Math.abs(state.lastPrice - reference) / reference;
     const idleTicks = (state.tickCount || 0) - (state.lastPlaceTick || 0);
     const cooldownOk = (Date.now() - (state.lastRecenterAtMs || 0)) >= (CONFIG.recenterCooldownSec * 1000);
     const noActiveOrders = countActiveOrders() === 0;
@@ -3106,24 +3142,34 @@ function st_heartbeat(tickJson) {
       (state.positionNotional <= -CONFIG.maxPosition && hasOnlyActiveBuyOrders())
     );
 
-    if (drift >= CONFIG.recenterDistance &&
-        idleTicks >= CONFIG.recenterMinIdleTicks &&
-        cooldownOk &&
-        (noActiveOrders || fullPositionStuck)) {
+    // P1修复：Short策略价格下跌超15%时强制recenter（无视活跃订单）
+    const priceDropRatio = (reference - state.lastPrice) / reference;  // 正值表示价格下跌
+    const forceRecenterShort = CONFIG.lean === 'negative' && priceDropRatio >= 0.15;
 
+    const shouldRecenter = forceRecenterShort || (
+      drift >= CONFIG.recenterDistance &&
+      idleTicks >= CONFIG.recenterMinIdleTicks &&
+      cooldownOk &&
+      (noActiveOrders || fullPositionStuck)
+    );
+
+    if (shouldRecenter) {
       // P2修复：方向性保护 - short只允许上移，long只允许下移
       // P3修复：支持 disableAutoRecenterBlockade 绕过此拦截
-      const newCenter = state.lastPrice;
-      const oldCenter = state.centerPrice || state.lastPrice;
-      if (!CONFIG.disableAutoRecenterBlockade) {
-        if (CONFIG.lean === 'negative' && newCenter < oldCenter) {
-          logWarn('[autoRecenter拦截] short策略禁止追跌: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
+      // P1修复：强制recenter时跳过方向性保护
+      const newReference = state.lastPrice;
+      const oldReference = state.referencePrice || state.lastPrice;
+      if (!forceRecenterShort && !CONFIG.disableAutoRecenterBlockade) {
+        if (CONFIG.lean === 'negative' && newReference < oldReference) {
+          logWarn('[autoRecenter拦截] short策略禁止追跌: oldReference=' + oldReference.toFixed(4) + ' newReference=' + newReference.toFixed(4));
           return;
         }
-        if (CONFIG.lean === 'positive' && newCenter > oldCenter) {
-          logWarn('[autoRecenter拦截] long策略禁止追涨: oldCenter=' + oldCenter.toFixed(4) + ' newCenter=' + newCenter.toFixed(4));
+        if (CONFIG.lean === 'positive' && newReference > oldReference) {
+          logWarn('[autoRecenter拦截] long策略禁止追涨: oldReference=' + oldReference.toFixed(4) + ' newReference=' + newReference.toFixed(4));
           return;
         }
+      } else if (forceRecenterShort) {
+        logWarn('[autoRecenter强制] short策略价格下跌超15%，强制recenter: priceDrop=' + (priceDropRatio * 100).toFixed(2) + '%');
       } else {
         logInfo('[autoRecenter] disableAutoRecenterBlockade=true，跳过方向性保护');
       }
@@ -3132,13 +3178,13 @@ function st_heartbeat(tickJson) {
       logWarn('[' + reason + '] drift=' + (drift * 100).toFixed(2) +
               '% idleTicks=' + idleTicks +
               ' posNotional=' + state.positionNotional.toFixed(2) +
-              ' center=' + center.toFixed(4) + ' -> ' + state.lastPrice.toFixed(4));
+              ' reference=' + reference.toFixed(4) + ' -> ' + state.lastPrice.toFixed(4));
 
       // 强制撤销所有订单（包括卖单/买单）
       cancelAllOrders();
 
       // 重心并重建网格
-      state.centerPrice = state.lastPrice;
+      state.referencePrice = state.lastPrice;
       initializeGrids();
       state.lastRecenterAtMs = Date.now();
       state.lastRecenterTick = state.tickCount;
@@ -3299,8 +3345,8 @@ function st_onParamsUpdate(newParamsJson) {
 
   // 重新初始化网格（保持当前价格）
   if (state.initialized) {
-    logInfo('[Gales] 重新初始化网格（中心价格: ' + state.lastPrice + '）');
-    state.centerPrice = state.lastPrice;
+    logInfo('[Gales] 重新初始化网格（基准价格: ' + state.lastPrice + '）');
+    state.referencePrice = state.lastPrice;
     initializeGrids();
   }
 
@@ -3317,7 +3363,7 @@ function st_onParamsUpdate(newParamsJson) {
   // 如果要求立刻重心
   if (newParams.forceRecenter) {
     logWarn('[Gales] forceRecenter=true，立即重心');
-    state.centerPrice = state.lastPrice;
+    state.referencePrice = state.lastPrice;
     initializeGrids();
     state.lastRecenterAtMs = Date.now();
     state.lastRecenterTick = state.tickCount || 0;
@@ -3437,7 +3483,7 @@ function st_stop() {
 
 function initializeGrids() {
   state.gridLevels = [];
-  const center = state.centerPrice;
+  const reference = state.referencePrice;
 
   // 非对称间距（向后兼容：不传时使用 gridSpacing）
   const spacingDown = CONFIG.gridSpacingDown !== null ? CONFIG.gridSpacingDown : CONFIG.gridSpacing;
@@ -3445,7 +3491,7 @@ function initializeGrids() {
 
   // 买单网格（跌方向）
   for (let i = 1; i <= CONFIG.gridCount; i++) {
-    const price = center * (1 - spacingDown * i);
+    const price = reference * (1 - spacingDown * i);
     state.gridLevels.push({
       id: state.nextGridId++,
       price: price,
@@ -3460,7 +3506,7 @@ function initializeGrids() {
 
   // 卖单网格（升方向）
   for (let i = 1; i <= CONFIG.gridCount; i++) {
-    const price = center * (1 + spacingUp * i);
+    const price = reference * (1 + spacingUp * i);
     state.gridLevels.push({
       id: state.nextGridId++,
       price: price,
