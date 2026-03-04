@@ -1818,6 +1818,8 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
 #define LNDTB_MAX_ITV 32
     char* sym_dict[LNDTB_MAX_SYM];
     char* itv_dict[LNDTB_MAX_ITV];
+    memset(sym_dict, 0, sizeof(sym_dict));  /* MEM-2: 初始化防止 cleanup 泄漏 */
+    memset(itv_dict, 0, sizeof(itv_dict));
     int n_sym = 0, n_itv = 0;
 
     /* 提取 symbol 数组 */
@@ -1832,7 +1834,9 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
                 if (!q1 || q1 >= sym_end) break;
                 const char* q2 = strchr(q1 + 1, '"');
                 if (!q2 || q2 >= sym_end) break;
-                sym_dict[n_sym++] = strndup(q1 + 1, (size_t)(q2 - q1 - 1));
+                size_t str_len = (size_t)(q2 - q1 - 1);
+                if (str_len > 255) str_len = 255;  /* MEM-1: 限制最大字符串长度 */
+                sym_dict[n_sym++] = strndup(q1 + 1, str_len);
                 p = q2 + 1;
             }
         }
@@ -1850,7 +1854,9 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
                 if (!q1 || q1 >= itv_end) break;
                 const char* q2 = strchr(q1 + 1, '"');
                 if (!q2 || q2 >= itv_end) break;
-                itv_dict[n_itv++] = strndup(q1 + 1, (size_t)(q2 - q1 - 1));
+                size_t str_len = (size_t)(q2 - q1 - 1);
+                if (str_len > 255) str_len = 255;  /* MEM-1: 限制最大字符串长度 */
+                itv_dict[n_itv++] = strndup(q1 + 1, str_len);
                 p = q2 + 1;
             }
         }
@@ -1908,6 +1914,8 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
 
         /* 解码 dict：格式 = n_items (uint32_t) + item_indices (uint32_t[]) */
         if (clen < 4) { free(cbuf); goto cleanup_ndtb; }
+        /* MEM-3: 验证缓冲区足够容纳 header + 数据 */
+        if (clen < 4 + row_count * 4) { free(cbuf); goto cleanup_ndtb; }
         uint32_t n_items = 0;
         memcpy(&n_items, cbuf, 4);
         if (n_items != row_count) { free(cbuf); goto cleanup_ndtb; }
@@ -1945,6 +1953,8 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
         if (disk_crc != computed_crc) { free(cbuf); goto cleanup_ndtb; }
 
         if (clen < 4) { free(cbuf); goto cleanup_ndtb; }
+        /* MEM-3: 验证缓冲区足够容纳 header + 数据 */
+        if (clen < 4 + row_count * 4) { free(cbuf); goto cleanup_ndtb; }
         uint32_t n_items = 0;
         memcpy(&n_items, cbuf, 4);
         if (n_items != row_count) { free(cbuf); goto cleanup_ndtb; }
