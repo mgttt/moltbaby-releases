@@ -6,44 +6,7 @@ pub fn build(b: *std.Build) !void {
     const enable_readline = b.option(bool, "enable-readline", "Enable readline support (default: false)") orelse false;
 
     // ============================================
-    // Shared Library: libndtsdb.so
-    // ============================================
-    const lib = b.addSharedLibrary(.{
-        .name = "ndtsdb",
-        .root_source_file = null,
-        .target = target,
-        .optimize = optimize,
-        .version = .{ .major = 0, .minor = 4, .patch = 0 },
-    });
-
-    // 库 C 编译标志（不含 QuickJS）
-    var lib_flags = std.ArrayList([]const u8).init(b.allocator);
-    defer lib_flags.deinit();
-    try lib_flags.appendSlice(&.{
-        "-O2", "-Wall", "-fPIC",
-        "-D_DEFAULT_SOURCE", "-D_XOPEN_SOURCE=600",
-        "-DNDTSDB_BUILD_SHARED",
-    });
-    if (target.result.os.tag == .macos) {
-        try lib_flags.appendSlice(&.{"-D_DARWIN_C_SOURCE"});
-    }
-
-    // 库源文件（仅核心，无 CLI/QuickJS）
-    lib.addCSourceFile(.{ .file = b.path("../ndtsdb-lib/native/ndts.c"), .flags = lib_flags.items });
-    lib.addCSourceFile(.{ .file = b.path("../ndtsdb-lib/native/ndtsdb_vec.c"), .flags = lib_flags.items });
-
-    // 库包含路径
-    lib.addIncludePath(b.path("include"));
-    lib.addIncludePath(b.path("../ndtsdb-lib/native"));
-
-    // 链接库
-    lib.linkLibC();
-    lib.linkSystemLibrary("m");
-
-    b.installArtifact(lib);
-
-    // ============================================
-    // Static Library: libndtsdb.a
+    // Static Library: libndtsdb.a (Zig 0.13.0 compatible)
     // ============================================
     const lib_static = b.addStaticLibrary(.{
         .name = "ndtsdb",
