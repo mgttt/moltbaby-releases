@@ -78,7 +78,7 @@ cosmo-docker-ci:
 	@echo "Output: ndtsdb-cli/$(COSMO_BINARY)"
 	@rm -f ndtsdb-cli/$(COSMO_BINARY)
 	@podman run --rm \
-		-v $$(pwd)/..:/workspace \
+		-v $$(pwd):/workspace \
 		-w /workspace \
 		$(COSMO_IMAGE) \
 		cosmocc -o ndtsdb-cli/$(COSMO_BINARY) \
