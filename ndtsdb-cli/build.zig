@@ -29,12 +29,12 @@ pub fn build(b: *std.Build) !void {
     }
 
     // 库源文件（仅核心，无 CLI/QuickJS）
-    lib.addCSourceFile(.{ .file = b.path("../ndtsdb/native/ndts.c"), .flags = lib_flags.items });
-    lib.addCSourceFile(.{ .file = b.path("../ndtsdb/native/ndtsdb_vec.c"), .flags = lib_flags.items });
+    lib.addCSourceFile(.{ .file = b.path("../ndtsdb-lib/native/ndts.c"), .flags = lib_flags.items });
+    lib.addCSourceFile(.{ .file = b.path("../ndtsdb-lib/native/ndtsdb_vec.c"), .flags = lib_flags.items });
 
     // 库包含路径
     lib.addIncludePath(b.path("include"));
-    lib.addIncludePath(b.path("../ndtsdb/native"));
+    lib.addIncludePath(b.path("../ndtsdb-lib/native"));
 
     // 链接库
     lib.linkLibC();
@@ -64,10 +64,10 @@ pub fn build(b: *std.Build) !void {
         try static_flags.appendSlice(&.{"-D_DARWIN_C_SOURCE"});
     }
 
-    lib_static.addCSourceFile(.{ .file = b.path("../ndtsdb/native/ndts.c"), .flags = static_flags.items });
-    lib_static.addCSourceFile(.{ .file = b.path("../ndtsdb/native/ndtsdb_vec.c"), .flags = static_flags.items });
+    lib_static.addCSourceFile(.{ .file = b.path("../ndtsdb-lib/native/ndts.c"), .flags = static_flags.items });
+    lib_static.addCSourceFile(.{ .file = b.path("../ndtsdb-lib/native/ndtsdb_vec.c"), .flags = static_flags.items });
     lib_static.addIncludePath(b.path("include"));
-    lib_static.addIncludePath(b.path("../ndtsdb/native"));
+    lib_static.addIncludePath(b.path("../ndtsdb-lib/native"));
     lib_static.linkLibC();
     lib_static.linkSystemLibrary("m");
 
@@ -127,9 +127,9 @@ pub fn build(b: *std.Build) !void {
     exe.addCSourceFile(.{ .file = b.path("src/cmd_facts_enhancements.c"), .flags = c_flags.items });
     exe.addCSourceFile(.{ .file = b.path("src/ndtsdb_lock.c"), .flags = c_flags.items });
     exe.addCSourceFile(.{ .file = b.path("src/bindings/qjs_ndtsdb.c"), .flags = c_flags.items });
-    exe.addCSourceFile(.{ .file = b.path("../ndtsdb/native/ndts.c"), .flags = c_flags.items });
-    exe.addCSourceFile(.{ .file = b.path("../ndtsdb/native/ndtsdb_vec.c"), .flags = c_flags.items });
-    
+    exe.addCSourceFile(.{ .file = b.path("../ndtsdb-lib/native/ndts.c"), .flags = c_flags.items });
+    exe.addCSourceFile(.{ .file = b.path("../ndtsdb-lib/native/ndtsdb_vec.c"), .flags = c_flags.items });
+
     // QuickJS 源文件
     exe.addCSourceFile(.{ .file = b.path("vendor/quickjs-2024-01-13/quickjs.c"), .flags = qjs_flags.items });
     exe.addCSourceFile(.{ .file = b.path("vendor/quickjs-2024-01-13/libregexp.c"), .flags = qjs_flags.items });
@@ -140,7 +140,7 @@ pub fn build(b: *std.Build) !void {
     // 包含路径
     exe.addIncludePath(b.path("include"));
     exe.addIncludePath(b.path("src/bindings"));
-    exe.addIncludePath(b.path("../ndtsdb/native"));
+    exe.addIncludePath(b.path("../ndtsdb-lib/native"));
     exe.addIncludePath(b.path("vendor/quickjs-2024-01-13"));
 
     // 链接库
