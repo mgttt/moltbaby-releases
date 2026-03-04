@@ -37,22 +37,27 @@ Commands:
     remove <strategy-id>    从池子移除策略
     list                    列出所有策略
     show <strategy-id>      显示策略详情
-    
+
   Execution:
     run <strategy-id>       手动执行一次策略
     test <strategy-id>      测试运行（dry-run）
-    
+
   Timer Management:
     start <strategy-id>     启动策略定时任务
     stop <strategy-id>      停止策略定时任务
     restart <strategy-id>   重启策略定时任务
     timers                  列出所有定时任务
-    
+
+  Hot Reload (Issue #136):
+    reload <strategy-id>    热更新策略（显式触发）
+    rollback <strategy-id>  回滚到上一版本
+    snapshots <strategy-id> 列出可用快照
+
   Monitoring:
     logs <strategy-id>      查看策略执行日志
     status                  查看整体状态
     monit                   实时监控面板（tmux）
-    
+
   System:
     doctor                  诊断系统状态
     init                    初始化 quant-lab 环境
@@ -143,7 +148,18 @@ async function main() {
     case 'timers':
       await cmdTimers(restArgs);
       break;
-      
+
+    // Hot Reload (Issue #136)
+    case 'reload':
+      await cmdReload(restArgs);
+      break;
+    case 'rollback':
+      await cmdRollback(restArgs);
+      break;
+    case 'snapshots':
+      await cmdSnapshots(restArgs);
+      break;
+
     // Monitoring
     case 'logs':
       await cmdLogs(restArgs);
@@ -529,6 +545,151 @@ async function cmdDoctor(args: string[]): Promise<void> {
   
   logger.info('');
   logger.info('✅ All checks passed!');
+}
+
+// ========== Hot Reload (Issue #136) ==========
+
+async function cmdReload(args: string[]): Promise<void> {
+  if (args.length === 0) {
+    logger.error('Usage: qlab reload <strategy-id> [--target <strategy|module|provider|all>] [--dry-run]');
+    process.exit(1);
+  }
+
+  const strategyId = args[0];
+  const target = args.includes('--target') ? args[args.indexOf('--target') + 1] || 'strategy' : 'strategy';
+  const dryRun = args.includes('--dry-run');
+
+  try {
+    // 动态导入 HotReloadManager
+    const { HotReloadManager } = await import('./hot-reload/HotReloadManager');
+    const manager = new HotReloadManager();
+
+    logger.info(`🔄 Triggering hot reload for: ${strategyId}`);
+    logger.info(`   Target: ${target}`);
+    logger.info(`   Dry-run: ${dryRun ? 'yes' : 'no'}`);
+    logger.info('');
+
+    const result = await manager.reload(strategyId, {
+      target: target as 'strategy' | 'module' | 'provider' | 'all',
+      dryRun,
+    });
+
+    if (result.success) {
+      logger.info(`✅ Hot reload successful! (${result.duration}ms)`);
+      if (result.snapshot) {
+        logger.info(`   Snapshot: ${result.snapshot.hash}`);
+      }
+      process.exit(0);
+    } else {
+      logger.error(`❌ Hot reload failed: ${result.error}`);
+      process.exit(1);
+    }
+  } catch (error: any) {
+    logger.error(`❌ Error: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+async function cmdRollback(args: string[]): Promise<void> {
+  if (args.length === 0) {
+    logger.error('Usage: qlab rollback <strategy-id> [--to <snapshot-id>]');
+    process.exit(1);
+  }
+
+  const strategyId = args[0];
+  const toSnapshotId = args.includes('--to') ? args[args.indexOf('--to') + 1] : undefined;
+
+  try {
+    const { HotReloadManager } = await import('./hot-reload/HotReloadManager');
+    const manager = new HotReloadManager();
+
+    logger.info(`⏪ Rolling back: ${strategyId}`);
+    if (toSnapshotId) {
+      logger.info(`   To snapshot: ${toSnapshotId}`);
+    } else {
+      logger.info(`   To: previous version`);
+    }
+    logger.info('');
+
+    const result = await manager.rollback?.(strategyId, toSnapshotId);
+
+    if (result?.success) {
+      logger.info(`✅ Rollback successful! (${result.duration}ms)`);
+      process.exit(0);
+    } else {
+      logger.error(`❌ Rollback failed: ${result?.error || 'Unknown error'}`);
+      process.exit(1);
+    }
+  } catch (error: any) {
+    logger.error(`❌ Error: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+async function cmdSnapshots(args: string[]): Promise<void> {
+  if (args.length === 0) {
+    logger.error('Usage: qlab snapshots <strategy-id>');
+    process.exit(1);
+  }
+
+  const strategyId = args[0];
+  const { existsSync, readdirSync, statSync } = await import('fs');
+  const { readFileSync } = await import('fs');
+  const { homedir } = await import('os');
+
+  const snapshotDir = join(homedir(), '.quant-lab', 'snapshots');
+
+  if (!existsSync(snapshotDir)) {
+    logger.info(`📸 No snapshots found for: ${strategyId}`);
+    process.exit(0);
+  }
+
+  try {
+    const files = readdirSync(snapshotDir);
+    const snapshots = files
+      .filter(f => f.startsWith(`${strategyId}-`) && f.endsWith('.json'))
+      .map(f => {
+        const path = join(snapshotDir, f);
+        const stat = statSync(path);
+        const content = readFileSync(path, 'utf-8');
+        const data = JSON.parse(content);
+
+        return {
+          id: f.replace('.json', ''),
+          timestamp: data.timestamp || stat.mtimeMs,
+          hash: data.hash || 'unknown',
+          size: stat.size,
+        };
+      })
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    if (snapshots.length === 0) {
+      logger.info(`📸 No snapshots found for: ${strategyId}`);
+      process.exit(0);
+    }
+
+    logger.info(`📸 Snapshots for ${strategyId}:`);
+    logger.info('');
+    logger.info('ID                           | Time                  | Hash      | Size');
+    logger.info('-'.repeat(80));
+
+    for (const snapshot of snapshots.slice(0, 10)) {
+      const date = new Date(snapshot.timestamp).toLocaleString();
+      const size = (snapshot.size / 1024).toFixed(1) + 'KB';
+      logger.info(
+        `${snapshot.id.padEnd(28)} | ${date.padEnd(20)} | ${snapshot.hash.slice(0, 8)} | ${size}`
+      );
+    }
+
+    if (snapshots.length > 10) {
+      logger.info(`... and ${snapshots.length - 10} more snapshots`);
+    }
+
+    process.exit(0);
+  } catch (error: any) {
+    logger.error(`❌ Error: ${error.message}`);
+    process.exit(1);
+  }
 }
 
 async function cmdInit(args: string[]): Promise<void> {

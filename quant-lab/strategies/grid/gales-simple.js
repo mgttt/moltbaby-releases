@@ -441,13 +441,13 @@ function loadState() {
         if (obj.circuitBreakerState) {
           // P0修复: 恢复circuitBreakerState（包括peakNetEq），防止虚假熔断
           Object.assign(circuitBreakerState, obj.circuitBreakerState);
-          
+
           // 兼容旧数据: 如active未定义, 默认为true
           if (circuitBreakerState.active === undefined) {
             circuitBreakerState.active = true;
             logInfo('[熔断] 兼容旧数据: 设置active=true');
           }
-          
+
           // [hotfix] 重启时重置 highWaterMark=0
           // 原因: hwm 是基于历史会计账本累积值(positionNotional)，跨进程持久化后
           // 与真实仓位口径不匹配，导致重启入金时误触发 D 类回撤拦截
@@ -458,8 +458,20 @@ function loadState() {
           // P1修复：重置杠杆硬顶状态（重启后重新评估）
           circuitBreakerState.blockNewOrders = false;
           circuitBreakerState.leverageHardCapTriggeredAt = 0;
-          logInfo('[熔断] 已恢复peakNetEq=' + (circuitBreakerState.peakNetEq || 0) + 
+          logInfo('[熔断] 已恢复peakNetEq=' + (circuitBreakerState.peakNetEq || 0) +
                   ', 重置: highWaterMark=0, tripped=false, blockNewOrders=false');
+        }
+
+        // Issue #136: 恢复缓存指标（支持版本 2）
+        if (obj.cachedIndicators) {
+          cachedIndicators.adx = obj.cachedIndicators.adx || 0;
+          cachedIndicators.sma20 = obj.cachedIndicators.sma20 || 0;
+          cachedIndicators.sma50 = obj.cachedIndicators.sma50 || 0;
+          cachedIndicators.rsi14 = obj.cachedIndicators.rsi14 || 0;
+          cachedIndicators.timestamp = obj.cachedIndicators.timestamp || 0;
+          cachedIndicators.klineCount = obj.cachedIndicators.klineCount || 0;
+          logInfo('[Issue #136] cachedIndicators已加载: ADX=' + cachedIndicators.adx +
+                  ', SMA20=' + cachedIndicators.sma20 + ', SMA50=' + cachedIndicators.sma50);
         }
       }
     }
@@ -525,13 +537,24 @@ function saveState() {
       });
     }
 
+    // Issue #136修复：持久化缓存指标，避免热更新后指标重新计算延迟
+    const cachedIndicatorsSnapshot = {
+      adx: cachedIndicators.adx || 0,
+      sma20: cachedIndicators.sma20 || 0,
+      sma50: cachedIndicators.sma50 || 0,
+      rsi14: cachedIndicators.rsi14 || 0,
+      timestamp: cachedIndicators.timestamp || 0,
+      klineCount: cachedIndicators.klineCount || 0,
+    };
+
     // 3. 构建待保存数据（添加版本号用于未来兼容）
     const stateToSave = {
       ...state,
       positionDiffState: positionDiffStateSnapshot,
       marketRegimeState: marketRegimeSnapshot,
       circuitBreakerState: circuitBreakerState,  // P0修复: 持久化熔断状态
-      _saveVersion: 1,           // 版本号，用于未来兼容
+      cachedIndicators: cachedIndicatorsSnapshot,  // Issue #136: 持久化缓存指标
+      _saveVersion: 2,           // 版本号升级：增加了cachedIndicators
       _saveAt: Date.now(),       // 保存时间戳
     };
 
