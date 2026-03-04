@@ -2778,11 +2778,19 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
             int ok = 1;
 
             /* 读取 symbol_id: [len(4) + delta_data(len)] */
+            /* Issue #137: Allow clen == 0 for new bucket format (all symbols may be same) */
             if (ok) {
                 uint32_t clen = 0;
-                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > row_count * 4) {
+                if (fread(&clen, 4, 1, f) != 1 || clen > row_count * 4) {
                     fprintf(stderr, "[ndtsdb debug] chunk %d: invalid symbol_id length %u\n", chunk_num, clen);
                     ok = 0;
+                } else if (clen == 0) {
+                    /* Issue #137: clen == 0 means all symbol_ids are 0 (default) */
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: symbol_id length is 0, using default value 0\n", chunk_num);
+                    for (uint32_t i = 0; i < row_count; i++) {
+                        sym_ids[i] = 0;
+                    }
+                    crc_state = crc32_update(crc_state, &clen, 4);
                 } else {
                     uint8_t* cbuf = (uint8_t*)malloc(clen);
                     if (!cbuf) { ok = 0; }
