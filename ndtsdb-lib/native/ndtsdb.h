@@ -534,6 +534,75 @@ uint32_t ndtb_streaming_iterator_next(StreamingIterator* iter);
  */
 void ndtb_streaming_iterator_free(StreamingIterator* iter);
 
+/* ─── NULL Bitmap Support (Phase 2.3) ─── */
+
+/**
+ * NullBitmap — NULL 值位图（用于支持可空列）
+ *
+ * @field data    位图缓冲（每行 1 bit，0=NULL，1=NOT NULL）
+ * @field byte_count 位图字节数（= (row_count + 7) / 8）
+ * @field row_count   行数
+ */
+typedef struct {
+    uint8_t* data;
+    uint32_t byte_count;
+    uint32_t row_count;
+} NullBitmap;
+
+/**
+ * ndtb_null_bitmap_create — 为列数据创建 NULL bitmap
+ *
+ * @param row_count  行数
+ * @param null_flags  NULL 标志数组（true/false 表示是否为 NULL）
+ * @return           NullBitmap 指针（成功）或 NULL（失败）
+ */
+NullBitmap* ndtb_null_bitmap_create(uint32_t row_count, const int* null_flags);
+
+/**
+ * ndtb_null_bitmap_is_null — 检查指定行是否为 NULL
+ *
+ * @param bitmap  NULL bitmap
+ * @param row_idx  行索引（0-based）
+ * @return        1 如果为 NULL，0 如果非 NULL，-1 表示无效索引
+ */
+int ndtb_null_bitmap_is_null(const NullBitmap* bitmap, uint32_t row_idx);
+
+/**
+ * ndtb_null_bitmap_set — 设置指定行的 NULL 状态
+ *
+ * @param bitmap    NULL bitmap
+ * @param row_idx   行索引（0-based）
+ * @param is_null   1 设置为 NULL，0 设置为非 NULL
+ * @return          0 成功，-1 表示无效索引
+ */
+int ndtb_null_bitmap_set(NullBitmap* bitmap, uint32_t row_idx, int is_null);
+
+/**
+ * ndtb_null_bitmap_encode — 将 bitmap 编码为字节数据
+ *
+ * @param bitmap  NULL bitmap
+ * @param out_len  输出参数：编码后的字节数
+ * @return        编码后的字节缓冲（malloc 分配），需要 free()
+ */
+uint8_t* ndtb_null_bitmap_encode(const NullBitmap* bitmap, uint32_t* out_len);
+
+/**
+ * ndtb_null_bitmap_decode — 从字节数据解码 bitmap
+ *
+ * @param data       编码的字节缓冲
+ * @param byte_count 缓冲字节数
+ * @param row_count  行数
+ * @return           NullBitmap 指针（成功）或 NULL（失败）
+ */
+NullBitmap* ndtb_null_bitmap_decode(const uint8_t* data, uint32_t byte_count, uint32_t row_count);
+
+/**
+ * ndtb_null_bitmap_free — 释放 NULL bitmap
+ *
+ * @param bitmap  bitmap 指针，NULL 安全
+ */
+void ndtb_null_bitmap_free(NullBitmap* bitmap);
+
 /* ─── NDTB File Operations (Phase 2 Internal) ─── */
 
 /**

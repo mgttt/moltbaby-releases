@@ -4908,3 +4908,140 @@ void ndtb_streaming_iterator_free(StreamingIterator* iter) {
     }
     free(iter);
 }
+
+/* ─── NULL Bitmap Implementation (Phase 2.3) ─── */
+
+/**
+ * ndtb_null_bitmap_create — 为列数据创建 NULL bitmap
+ *
+ * Bitmap 格式: 每行 1 bit，0=NULL，1=NOT NULL
+ * 字节对齐：byte_count = (row_count + 7) / 8
+ */
+NullBitmap* ndtb_null_bitmap_create(uint32_t row_count, const int* null_flags) {
+    if (row_count == 0) return NULL;
+
+    uint32_t byte_count = (row_count + 7) / 8;
+    NullBitmap* bitmap = (NullBitmap*)malloc(sizeof(NullBitmap));
+    if (!bitmap) return NULL;
+
+    bitmap->data = (uint8_t*)malloc(byte_count);
+    if (!bitmap->data) {
+        free(bitmap);
+        return NULL;
+    }
+
+    bitmap->byte_count = byte_count;
+    bitmap->row_count = row_count;
+
+    /* 默认初始化所有行为 NOT NULL（位为 1）*/
+    memset(bitmap->data, 0xFF, byte_count);
+
+    /* 如果提供了 null_flags，根据标志调整位图 */
+    if (null_flags) {
+        for (uint32_t i = 0; i < row_count; i++) {
+            if (!null_flags[i]) {
+                /* null_flags[i] == 0 表示 NULL，清除对应的位 */
+                uint32_t byte_idx = i / 8;
+                uint32_t bit_idx = i % 8;
+                bitmap->data[byte_idx] &= ~(1u << bit_idx);
+            }
+        }
+    }
+
+    return bitmap;
+}
+
+/**
+ * ndtb_null_bitmap_is_null — 检查指定行是否为 NULL
+ */
+int ndtb_null_bitmap_is_null(const NullBitmap* bitmap, uint32_t row_idx) {
+    if (!bitmap || row_idx >= bitmap->row_count) return -1;
+
+    uint32_t byte_idx = row_idx / 8;
+    uint32_t bit_idx = row_idx % 8;
+
+    /* 位为 0 表示 NULL，位为 1 表示非 NULL */
+    int bit_set = (bitmap->data[byte_idx] >> bit_idx) & 1;
+    return bit_set ? 0 : 1;  /* 返回 1 = NULL，0 = NOT NULL */
+}
+
+/**
+ * ndtb_null_bitmap_set — 设置指定行的 NULL 状态
+ */
+int ndtb_null_bitmap_set(NullBitmap* bitmap, uint32_t row_idx, int is_null) {
+    if (!bitmap || row_idx >= bitmap->row_count) return -1;
+
+    uint32_t byte_idx = row_idx / 8;
+    uint32_t bit_idx = row_idx % 8;
+
+    if (is_null) {
+        /* 清除位 = NULL */
+        bitmap->data[byte_idx] &= ~(1u << bit_idx);
+    } else {
+        /* 设置位 = NOT NULL */
+        bitmap->data[byte_idx] |= (1u << bit_idx);
+    }
+
+    return 0;
+}
+
+/**
+ * ndtb_null_bitmap_encode — 将 bitmap 编码为字节数据
+ */
+uint8_t* ndtb_null_bitmap_encode(const NullBitmap* bitmap, uint32_t* out_len) {
+    if (!bitmap || !out_len) return NULL;
+
+    /* 编码格式：row_count (4 bytes) + bitmap data (byte_count bytes) */
+    uint32_t total_len = 4 + bitmap->byte_count;
+    uint8_t* encoded = (uint8_t*)malloc(total_len);
+    if (!encoded) return NULL;
+
+    /* 写入 row_count */
+    memcpy(encoded, &bitmap->row_count, 4);
+
+    /* 写入 bitmap 数据 */
+    memcpy(encoded + 4, bitmap->data, bitmap->byte_count);
+
+    *out_len = total_len;
+    return encoded;
+}
+
+/**
+ * ndtb_null_bitmap_decode — 从字节数据解码 bitmap
+ */
+NullBitmap* ndtb_null_bitmap_decode(const uint8_t* data, uint32_t byte_count, uint32_t row_count) {
+    if (!data || byte_count < 4) return NULL;
+
+    /* 验证：byte_count >= 4 + 实际位图字节数 */
+    uint32_t expected_bitmap_bytes = (row_count + 7) / 8;
+    if (byte_count < 4 + expected_bitmap_bytes) return NULL;
+
+    /* 读取行数验证 */
+    uint32_t stored_row_count = 0;
+    memcpy(&stored_row_count, data, 4);
+    if (stored_row_count != row_count) return NULL;
+
+    NullBitmap* bitmap = (NullBitmap*)malloc(sizeof(NullBitmap));
+    if (!bitmap) return NULL;
+
+    bitmap->data = (uint8_t*)malloc(expected_bitmap_bytes);
+    if (!bitmap->data) {
+        free(bitmap);
+        return NULL;
+    }
+
+    memcpy(bitmap->data, data + 4, expected_bitmap_bytes);
+    bitmap->byte_count = expected_bitmap_bytes;
+    bitmap->row_count = row_count;
+
+    return bitmap;
+}
+
+/**
+ * ndtb_null_bitmap_free — 释放 NULL bitmap
+ */
+void ndtb_null_bitmap_free(NullBitmap* bitmap) {
+    if (!bitmap) return;
+    if (bitmap->data) free(bitmap->data);
+    free(bitmap);
+}
