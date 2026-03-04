@@ -490,7 +490,9 @@ size_t gorilla_compress_f64(
     uint8_t* out_buffer
 ) {
     if (n == 0) return 0;
-    
+
+    fprintf(stderr, "[GORILLA_DEBUG] compress_f64 called: n=%zu, first=%f, last=%f\n", n, data[0], data[n-1]);
+
     size_t byte_pos = 0;
     int bit_pos = 0;
     uint64_t prev_value = 0;
@@ -528,9 +530,17 @@ size_t gorilla_compress_f64(
         } else {
             // 不同值：写 1
             WRITE_BIT(1);
-            
+
             int leading = clz64(xor_val);
             int trailing = ctz64(xor_val);
+            // Sanity check: for any non-zero value, leading + trailing must be < 64
+            // If this fails, something is wrong with clz64/ctz64
+            if (leading + trailing >= 64) {
+                // This shouldn't happen for non-zero values, but handle gracefully
+                // Treat all bits as "meaningful"
+                leading = 0;
+                trailing = 0;
+            }
             
             if (prev_leading != -1 &&
                 leading >= prev_leading &&
@@ -544,9 +554,14 @@ size_t gorilla_compress_f64(
                 WRITE_BIT(1);
                 WRITE_BITS(leading, 6);
                 int meaningful = 64 - leading - trailing;
+                // Ensure meaningful stays in valid range [0, 63]
+                if (meaningful < 0) meaningful = 0;
+                if (meaningful > 63) meaningful = 63;
                 WRITE_BITS(meaningful, 6);
-                WRITE_BITS(xor_val >> trailing, meaningful);
-                
+                if (meaningful > 0) {
+                    WRITE_BITS(xor_val >> trailing, meaningful);
+                }
+
                 prev_leading = leading;
                 prev_trailing = trailing;
             }
@@ -557,10 +572,18 @@ size_t gorilla_compress_f64(
     
     #undef WRITE_BIT
     #undef WRITE_BITS
-    
+
     // 补齐最后一个字节
     if (bit_pos > 0) byte_pos++;
-    
+
+    fprintf(stderr, "[GORILLA_DEBUG] compress_f64 result: %zu bytes for %zu values (ratio: %.2f), final byte_pos=%zu, bit_pos=%d\n",
+        byte_pos, n, (double)byte_pos / (n * 8.0), byte_pos, bit_pos);
+
+    // Sanity check: if result is much larger than input, something is wrong
+    if (byte_pos > n * 8 + 256) {
+        fprintf(stderr, "[GORILLA_DEBUG] WARNING: compression result %zu is much larger than input %zu + overhead!\n", byte_pos, n * 8);
+    }
+
     return byte_pos;
 }
 
@@ -808,7 +831,10 @@ size_t gorilla_decompress_f64(
     // 第一个值
     prev_value = READ_BITS(64);
     out_data[count++] = bits_to_double(prev_value);
+    fprintf(stderr, "[GORILLA_DECOMP_DEBUG] first 64 bits=0x%016lx, as double=%f\n", prev_value, out_data[0]);
+    fflush(stderr);
     
+    fprintf(stderr, "[GORILLA_DECOMP_DEBUG] entering loop: count=%zu, max_count=%zu, byte_pos=%zu, buffer_len=%zu\n", count, max_count, byte_pos, buffer_len);
     while (count < max_count && byte_pos < buffer_len) {
         int same = READ_BIT();
         
@@ -829,7 +855,11 @@ size_t gorilla_decompress_f64(
                 meaningful = (int)READ_BITS(6);
                 prev_leading = leading;
                 // #Bug3: 损坏数据可能使 leading+meaningful > 64，导致负移位 UB
-                if ((uint32_t)leading + (uint32_t)meaningful > 64) return 0;
+                if ((uint32_t)leading + (uint32_t)meaningful > 64) {
+                    fprintf(stderr, "[GORILLA_DECOMP_ERROR] leading=%d meaningful=%d sum=%u > 64, returning 0 rows\n",
+                        leading, meaningful, (uint32_t)leading + (uint32_t)meaningful);
+                    return 0;
+                }
                 prev_trailing = 64 - leading - meaningful;
             }
             
@@ -1298,6 +1328,8 @@ static void write_partition_file(const char* filepath,
     size_t len_quote_volume = 0, len_taker_buy_volume = 0, len_taker_buy_quote_volume = 0;
 
     if (use_gorilla && n_rows > 0) {
+        fprintf(stderr, "[ndtsdb debug] write: populating col_quote_volume with %u rows, first val=%f, last val=%f\n",
+            n_rows, rows[0].quoteVolume, rows[n_rows-1].quoteVolume);
         for (uint32_t i = 0; i < n_rows; i++) {
             col_open[i]   = rows[i].open;
             col_high[i]   = rows[i].high;
@@ -1314,6 +1346,7 @@ static void write_partition_file(const char* filepath,
         len_close  = gorilla_compress_f64(col_close,  n_rows, buf_close);
         len_volume = gorilla_compress_f64(col_volume, n_rows, buf_volume);
         len_quote_volume = gorilla_compress_f64(col_quote_volume, n_rows, buf_quote_volume);
+        fprintf(stderr, "[ndtsdb debug] write: quoteVolume compressed len=%zu (raw would be %zu)\n", len_quote_volume, (size_t)n_rows * 8);
         len_taker_buy_volume = gorilla_compress_f64(col_taker_buy_volume, n_rows, buf_taker_buy_volume);
         len_taker_buy_quote_volume = gorilla_compress_f64(col_taker_buy_quote_volume, n_rows, buf_taker_buy_quote_volume);
     }
@@ -1358,6 +1391,7 @@ static void write_partition_file(const char* filepath,
      * Use 4080 so snprintf never writes past the available space. */
     char json[4080];
     int pos = 0;
+    fprintf(stderr, "[ndtsdb debug] write_partition_file: use_gorilla=%d, n_rows=%u\n", use_gorilla, n_rows);
     pos += snprintf(json+pos, sizeof(json)-pos,
         "{\"columns\":["
         "\"symbol_id\",\"timestamp\",\"open\",\"high\",\"low\",\"close\",\"volume\","
@@ -1476,7 +1510,11 @@ static void write_partition_file(const char* filepath,
         u32 = (uint32_t)len_low;    memcpy(p, &u32, 4); p += 4; memcpy(p, buf_low,    len_low);    p += len_low;
         u32 = (uint32_t)len_close;  memcpy(p, &u32, 4); p += 4; memcpy(p, buf_close,  len_close);  p += len_close;
         u32 = (uint32_t)len_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_volume, len_volume); p += len_volume;
-        u32 = (uint32_t)len_quote_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_quote_volume, len_quote_volume); p += len_quote_volume;
+        u32 = (uint32_t)len_quote_volume;
+        fprintf(stderr, "[WRITE_CHUNK] quoteVolume: writing len=%u, first 8 bytes of data: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            u32, buf_quote_volume[0], buf_quote_volume[1], buf_quote_volume[2], buf_quote_volume[3],
+            buf_quote_volume[4], buf_quote_volume[5], buf_quote_volume[6], buf_quote_volume[7]);
+        memcpy(p, &u32, 4); p += 4; memcpy(p, buf_quote_volume, len_quote_volume); p += len_quote_volume;
         u32 = (uint32_t)len_taker_buy_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_taker_buy_volume, len_taker_buy_volume); p += len_taker_buy_volume;
         u32 = (uint32_t)len_taker_buy_quote_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_taker_buy_quote_volume, len_taker_buy_quote_volume); p += len_taker_buy_quote_volume;
         free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume);
@@ -2790,10 +2828,12 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
             /* 读取 OHLCV (5 列 gorilla) */
             if (ok) {
                 double* ohlcv_basic[5] = { opens, highs, lows, closes, volumes };
+                const char* ohlcv_names[5] = { "open", "high", "low", "close", "volume" };
                 for (int ci = 0; ci < 5 && ok; ci++) {
                     uint32_t clen = 0;
+                    long pos_before = ftell(f);
                     if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
-                        fprintf(stderr, "[ndtsdb debug] chunk %d: invalid ohlcv[%d] length %u\n", chunk_num, ci, clen);
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: invalid ohlcv[%d](%s) length %u at pos %ld\n", chunk_num, ci, ohlcv_names[ci], clen, pos_before);
                         ok = 0;
                         break;
                     }
@@ -2810,30 +2850,46 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
                     size_t decoded = gorilla_decompress_f64(cbuf, clen, ohlcv_basic[ci], row_count);
                     free(cbuf);
                     if (decoded != row_count) {
-                        fprintf(stderr, "[ndtsdb debug] chunk %d: ohlcv[%d] decode mismatch %zu vs %u\n", chunk_num, ci, decoded, row_count);
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: ohlcv[%d](%s) decode mismatch %zu vs %u\n", chunk_num, ci, ohlcv_names[ci], decoded, row_count);
                         ok = 0;
+                    } else {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: ohlcv[%d](%s) OK len=%u decoded=%zu\n", chunk_num, ci, ohlcv_names[ci], clen, decoded);
                     }
                 }
+                fprintf(stderr, "[ndtsdb debug] chunk %d: after OHLCV, file pos=%ld\n", chunk_num, ftell(f));
             }
 
             /* 读取 quoteVolume (gorilla) */
             if (ok) {
                 uint32_t clen = 0;
                 long pos_before = ftell(f);
-                if (fread(&clen, 4, 1, f) != 1 || clen == 0 || clen > (uint32_t)GORILLA_BOUND(row_count)) {
-                    fprintf(stderr, "[ndtsdb debug] chunk %d: invalid quoteVolume length %u (file pos %ld before read)\n", chunk_num, clen, pos_before);
+                if (fread(&clen, 4, 1, f) != 1) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read quoteVolume length at pos %ld\n", chunk_num, pos_before);
+                    ok = 0;
+                } else if (clen == 0) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: quoteVolume length is 0 (pos %ld), skipping\n", chunk_num, pos_before);
+                    ok = 0;
+                } else if (clen > (uint32_t)GORILLA_BOUND(row_count)) {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: quoteVolume length %u exceeds bound %u (pos %ld)\n", chunk_num, clen, (uint32_t)GORILLA_BOUND(row_count), pos_before);
                     ok = 0;
                 } else {
+                    fprintf(stderr, "[ndtsdb debug] chunk %d: reading quoteVolume len=%u at pos %ld\n", chunk_num, clen, pos_before);
                     uint8_t* cbuf = (uint8_t*)malloc(clen);
-                    if (!cbuf) { ok = 0; }
+                    if (!cbuf) {
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: malloc failed for quoteVolume\n", chunk_num);
+                        ok = 0;
+                    }
                     else if (fread(cbuf, 1, clen, f) != clen) {
-                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read quoteVolume data\n", chunk_num);
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: failed to read quoteVolume data (%u bytes)\n", chunk_num, clen);
                         free(cbuf);
                         ok = 0;
                     } else {
                         crc_state = crc32_update(crc_state, &clen, 4);
                         crc_state = crc32_update(crc_state, cbuf, clen);
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: quoteVolume buf len=%u, first 8 bytes: %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                            chunk_num, clen, cbuf[0], cbuf[1], cbuf[2], cbuf[3], cbuf[4], cbuf[5], cbuf[6], clen > 7 ? cbuf[7] : 0);
                         size_t decoded = gorilla_decompress_f64(cbuf, clen, quote_volumes, row_count);
+                        fprintf(stderr, "[ndtsdb debug] chunk %d: quoteVolume decoded %zu rows (expected %u)\n", chunk_num, decoded, row_count);
                         free(cbuf);
                         if (decoded != row_count) {
                             fprintf(stderr, "[ndtsdb debug] chunk %d: quoteVolume decode mismatch %zu vs %u\n", chunk_num, decoded, row_count);
