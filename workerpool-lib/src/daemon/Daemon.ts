@@ -267,17 +267,36 @@ export class Daemon {
 
   /**
    * 恢复之前管理的进程
+   * 参数来源：strategy-process-adapter（单一来源），而非 processes.json
    */
   private async restoreProcesses(): Promise<void> {
     const processes = this.stateManager.listProcesses();
     console.log(`[Daemon] 恢复 ${processes.length} 个进程...`);
+
+    // 动态加载 adapter（避免编译时循环依赖）
+    let STRATEGY_REGISTRY: Record<string, any> = {};
+    let buildProcessConfig: (spec: any) => any = () => ({});
+    try {
+      const adapterModule = await import('../../../quant-lab/adapters/strategy-process-adapter.js');
+      STRATEGY_REGISTRY = adapterModule.STRATEGY_REGISTRY || {};
+      buildProcessConfig = adapterModule.buildProcessConfig || (() => ({}));
+    } catch (error) {
+      console.warn('[Daemon] 无法加载 adapter，进程恢复只会重建旧配置:', error);
+    }
 
     for (const proc of processes) {
       // 只恢复之前是 online 的进程
       if (proc.status === 'online' || proc.status === 'starting') {
         console.log(`  恢复: ${proc.name}`);
         try {
-          await this.processManager!.start(proc.config);
+          // 优先从 adapter 读取新参数；如果 adapter 不可用，使用旧参数（向后兼容）
+          let config = proc.config;
+          const spec = STRATEGY_REGISTRY[proc.name];
+          if (spec) {
+            config = buildProcessConfig(spec);
+            console.log(`    使用 adapter 新参数`);
+          }
+          await this.processManager!.start(config);
         } catch (error) {
           console.error(`  恢复失败: ${proc.name}`, error);
         }

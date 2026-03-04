@@ -452,9 +452,16 @@ export class ProcessManager extends EventEmitter {
     // 快速失败保护：启动期（1秒内）崩溃由 spawnProcess 的 catch 块处理
     // 避免与 Promise reject 路径竞争
     if (!instance.startupCompleted) {
-      this.logManager.close(config.name);
-      this.processes.delete(config.name);
-      return;
+      // 快速失败保护：仅当异常退出时才跳过重启
+      // 正常退出（code=0, 无signal）仍应检查 autorestart
+      if (code !== 0 || signal !== null) {
+        // 异常退出：不重启（保留快速失败保护）
+        this.logManager.close(config.name);
+        this.processes.delete(config.name);
+        return;
+      }
+      // 正常退出但启动快速完成 → 继续检查 autorestart
+      instance.startupCompleted = true;
     }
 
     // 检查重启次数
