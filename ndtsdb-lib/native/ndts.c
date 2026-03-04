@@ -1550,12 +1550,22 @@ static void write_partition_file(const char* filepath,
         free(buf_trades);
         fclose(f);
         unlink(tmppath);
-        fprintf(stderr, "[ndtsdb] ERROR: fwrite partial (%zu/%zu) — disk full?\n", written, chunk_size);
+        fprintf(stderr, "[ndtsdb] ERROR: fwrite partial (%zu/%zu) — disk full? Deleting %s\n", written, chunk_size, tmppath);
         return;
     }
 
     uint32_t ccrc = crc32_buf(chunk_buf, chunk_size);
-    fwrite(&ccrc, 4, 1, f);
+    size_t crc_written = fwrite(&ccrc, 4, 1, f);
+    if (crc_written != 1) {
+        free(chunk_buf);
+        free(buf_sym_ids);
+        free(buf_timestamps);
+        free(buf_trades);
+        fclose(f);
+        unlink(tmppath);
+        fprintf(stderr, "[ndtsdb] ERROR: fwrite CRC failed — disk full? Deleting %s\n", tmppath);
+        return;
+    }
 
     free(chunk_buf);
     free(buf_sym_ids);
@@ -2143,6 +2153,11 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
     }
 
     /* 5. 重建行数据并插入数据库 */
+    // Guard: 确保字典非空
+    if (n_sym == 0 || n_itv == 0) {
+        fprintf(stderr, "[ndtsdb] ERROR: Empty dictionaries (n_sym=%d, n_itv=%d)\n", n_sym, n_itv);
+        goto cleanup_ndtb;
+    }
     for (uint32_t i = 0; i < row_count; i++) {
         const char* sym = (sym_ids[i] >= 0 && sym_ids[i] < n_sym)
                           ? sym_dict[sym_ids[i]] : "UNKNOWN";
