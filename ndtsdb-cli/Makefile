@@ -4,6 +4,9 @@
 # 版本号优先级: 1) 传入的 VERSION 参数 2) ../ndtsdb-lib/VERSION 3) ../ndtsdb/VERSION (向后兼容) 4) 默认值
 VERSION := $(if $(VERSION),$(VERSION),$(shell cat ../ndtsdb-lib/VERSION 2>/dev/null || cat ../ndtsdb/VERSION 2>/dev/null || echo "1.0.0.1"))
 
+# 项目根目录 (moltbaby): 获取 Makefile 目录的父目录（正确化路径，去掉 .. 符号）
+MOLTBABY_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)
+
 # ============================================================================
 # 正式构建: Cosmocc (podman 容器, APE 跨平台二进制)
 # 产物: ndtsdb-cli.com — Linux/macOS/Windows/FreeBSD 通用单文件
@@ -51,26 +54,28 @@ all: cosmo-docker
 
 # cosmo-docker: 从 moltbaby 根目录挂载，路径与 COSMO_SOURCES 对齐
 # 产物: ndtsdb-cli/ndtsdb-cli.com (APE 跨平台可执行文件)
+# 说明: 用 $(MOLTBABY_ROOT) 确保无论从哪里调用，都能正确定位 moltbaby 根目录
 cosmo-docker:
 	@echo "=== Cosmocc APE Build (podman, reproducible) ==="
 	@echo "Image : $(COSMO_IMAGE)"
 	@echo "Output: ndtsdb-cli/$(COSMO_BINARY)"
-	@rm -f $(COSMO_BINARY)
+	@rm -f ndtsdb-cli/$(COSMO_BINARY)
 	@podman run --rm \
-		-v $$(pwd)/..:/workspace \
+		-v $(MOLTBABY_ROOT):/workspace \
 		-w /workspace \
 		$(COSMO_IMAGE) \
 		cosmocc -o ndtsdb-cli/$(COSMO_BINARY) \
 			$(COSMO_SOURCES) $(COSMO_FLAGS)
 	@echo ""
 	@echo "✓ APE binary: ndtsdb-cli/$(COSMO_BINARY)"
-	@echo "  Size  : $$(ls -lh $(COSMO_BINARY) | awk '{print $$5}')"
-	@echo "  Format: $$(file $(COSMO_BINARY) | cut -d: -f2)"
+	@echo "  Size  : $$(ls -lh ndtsdb-cli/$(COSMO_BINARY) | awk '{print $$5}')"
+	@echo "  Format: $$(file ndtsdb-cli/$(COSMO_BINARY) | cut -d: -f2)"
 	@echo "  Runs on: Linux / macOS / Windows / FreeBSD (x86-64)"
-	@rm -f *.elf *.dbg
+	@rm -f ndtsdb-cli/*.elf ndtsdb-cli/*.dbg
 	@echo "  Cleaned: *.elf *.dbg (intermediate files)"
 
 # cosmo-docker-ci: 从 moltbaby 根目录调用（CI 环境专用）
+# 说明: 用 $(MOLTBABY_ROOT) 确保 CI 环境也能正确定位挂载路径
 # 用法: make -C ndtsdb-cli cosmo-docker-ci
 cosmo-docker-ci:
 	@echo "=== Cosmocc APE Build (CI mode) ==="
@@ -78,17 +83,17 @@ cosmo-docker-ci:
 	@echo "Output: ndtsdb-cli/$(COSMO_BINARY)"
 	@rm -f ndtsdb-cli/$(COSMO_BINARY)
 	@podman run --rm \
-		-v $$(pwd):/workspace \
+		-v $(MOLTBABY_ROOT):/workspace \
 		-w /workspace \
 		$(COSMO_IMAGE) \
 		cosmocc -o ndtsdb-cli/$(COSMO_BINARY) \
 			$(COSMO_SOURCES) $(COSMO_FLAGS)
 	@echo ""
 	@echo "✓ APE binary: ndtsdb-cli/$(COSMO_BINARY)"
-	@echo "  Size  : $$(ls -lh $(COSMO_BINARY) | awk '{print $$5}')"
-	@echo "  Format: $$(file $(COSMO_BINARY) | cut -d: -f2)"
+	@echo "  Size  : $$(ls -lh ndtsdb-cli/$(COSMO_BINARY) | awk '{print $$5}')"
+	@echo "  Format: $$(file ndtsdb-cli/$(COSMO_BINARY) | cut -d: -f2)"
 	@echo "  Runs on: Linux / macOS / Windows / FreeBSD (x86-64)"
-	@rm -f *.elf *.dbg
+	@rm -f ndtsdb-cli/*.elf ndtsdb-cli/*.dbg
 	@echo "  Cleaned: *.elf *.dbg (intermediate files)"
 
 # cosmo: 从 ndtsdb-cli 目录内挂载 (备用, 需手动调整路径)
