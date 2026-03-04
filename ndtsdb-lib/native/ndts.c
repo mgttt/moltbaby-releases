@@ -1363,6 +1363,7 @@ static void write_partition_file(const char* filepath,
         "\"symbol_id\",\"timestamp\",\"open\",\"high\",\"low\",\"close\",\"volume\","
         "\"quoteVolume\",\"trades\",\"takerBuyVolume\",\"takerBuyQuoteVolume\""
         "],\"compression\":{\"enabled\":%s,\"algorithms\":{"
+        "\"symbol_id\":\"delta\",\"timestamp\":\"delta\","
         "\"open\":\"gorilla\",\"high\":\"gorilla\",\"low\":\"gorilla\",\"close\":\"gorilla\","
         "\"volume\":\"gorilla\",\"quoteVolume\":\"gorilla\",\"takerBuyVolume\":\"gorilla\","
         "\"takerBuyQuoteVolume\":\"gorilla\",\"trades\":\"delta\"}},\"stringDicts\":{",
@@ -1442,6 +1443,9 @@ static void write_partition_file(const char* filepath,
             free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume);
             free(buf_quote_volume); free(buf_taker_buy_volume); free(buf_taker_buy_quote_volume);
         }
+        free(buf_sym_ids);
+        free(buf_timestamps);
+        free(buf_trades);
         fclose(f); remove(tmppath);
         return;
     }
@@ -1503,6 +1507,9 @@ static void write_partition_file(const char* filepath,
     size_t written = fwrite(chunk_buf, 1, chunk_size, f);
     if (written != chunk_size) {
         free(chunk_buf);
+        free(buf_sym_ids);
+        free(buf_timestamps);
+        free(buf_trades);
         fclose(f);
         unlink(tmppath);
         fprintf(stderr, "[ndtsdb] ERROR: fwrite partial (%zu/%zu) — disk full?\n", written, chunk_size);
@@ -1715,6 +1722,848 @@ NDTSDB* ndtsdb_open(const char* path) {
  *
  * 返回加载的行数，出错返回 -1。
  * ============================================================ */
+/**
+ * load_ndtb_file — 读取 .ndtb 列式存储文件
+ *
+ * 格式：
+ *   [0..3]      Magic: "NDTB"
+ *   [4..7]      Header JSON length (uint32_t LE)
+ *   [8..8+len]  Header JSON
+ *   [8+len..4095] Padding
+ *   [4096..4099] Header CRC32
+ *   [4100..]    Column Data Chunks
+ *
+ * 返回加载的行数，出错返回 -1。
+ */
+int load_ndtb_file(NDTSDB* db, const char* filepath) {
+    FILE* f = fopen(filepath, "rb");
+    if (!f) return -1;
+
+    /* 1. 读取并验证完整 4096 字节 header block */
+    uint8_t header_block[4096];
+    if (fread(header_block, 1, 4096, f) != 4096) { fclose(f); return -1; }
+    if (memcmp(header_block, "NDTB", 4) != 0) { fclose(f); return -1; }
+
+    /* 验证 header CRC32 */
+    uint32_t expected_hcrc = crc32_buf(header_block, 4096);
+    uint32_t actual_hcrc = 0;
+    if (fread(&actual_hcrc, 4, 1, f) != 1) { fclose(f); return -1; }
+    if (actual_hcrc != expected_hcrc) { fclose(f); return -1; }
+
+    /* 2. 解析 header JSON */
+    uint32_t header_len;
+    memcpy(&header_len, header_block + 4, 4);
+    if (header_len == 0 || header_len > 4088) { fclose(f); return -1; }
+
+    char* header_json = (char*)malloc(header_len + 1);
+    if (!header_json) { fclose(f); return -1; }
+    memcpy(header_json, header_block + 8, header_len);
+    header_json[header_len] = '\0';
+
+    /* 3. 解析 stringDicts */
+#define LNDTB_MAX_SYM 256
+#define LNDTB_MAX_ITV 32
+    char* sym_dict[LNDTB_MAX_SYM];
+    char* itv_dict[LNDTB_MAX_ITV];
+    int n_sym = 0, n_itv = 0;
+
+    /* 提取 symbol 数组 */
+    const char* sym_start = strstr(header_json, "\"symbol\":[");
+    if (sym_start) {
+        sym_start += 10;
+        const char* sym_end = strchr(sym_start, ']');
+        if (sym_end) {
+            const char* p = sym_start;
+            while (p < sym_end && n_sym < LNDTB_MAX_SYM) {
+                const char* q1 = strchr(p, '"');
+                if (!q1 || q1 >= sym_end) break;
+                const char* q2 = strchr(q1 + 1, '"');
+                if (!q2 || q2 >= sym_end) break;
+                sym_dict[n_sym++] = strndup(q1 + 1, (size_t)(q2 - q1 - 1));
+                p = q2 + 1;
+            }
+        }
+    }
+
+    /* 提取 interval 数组 */
+    const char* itv_start = strstr(header_json, "\"interval\":[");
+    if (itv_start) {
+        itv_start += 12;
+        const char* itv_end = strchr(itv_start, ']');
+        if (itv_end) {
+            const char* p = itv_start;
+            while (p < itv_end && n_itv < LNDTB_MAX_ITV) {
+                const char* q1 = strchr(p, '"');
+                if (!q1 || q1 >= itv_end) break;
+                const char* q2 = strchr(q1 + 1, '"');
+                if (!q2 || q2 >= itv_end) break;
+                itv_dict[n_itv++] = strndup(q1 + 1, (size_t)(q2 - q1 - 1));
+                p = q2 + 1;
+            }
+        }
+    }
+
+    fprintf(stderr, "[ndtsdb debug] %s: n_sym=%d n_itv=%d\n", filepath, n_sym, n_itv);
+    free(header_json);
+
+    int total_loaded = 0;
+
+    /* 4. 读取所有列数据块
+     * 列顺序（预期）:
+     *   0: symbol (dict, int32_t[])
+     *   1: interval (dict, int32_t[])
+     *   2: timestamp (raw, int64_t[])
+     *   3-7: OHLCV (gorilla, double[])
+     *   8: quoteVolume (gorilla, double[])
+     *   9: trades (delta, uint32_t[])
+     *   10-11: takerBuy* (gorilla, double[])
+     */
+
+    uint32_t row_count = 0;
+    int32_t* sym_ids = NULL;
+    int32_t* itv_ids = NULL;
+    int64_t* timestamps = NULL;
+    double *opens = NULL, *highs = NULL, *lows = NULL, *closes = NULL, *volumes = NULL;
+    double *quote_volumes = NULL;
+    uint32_t* trades = NULL;
+    double *taker_buy_volumes = NULL, *taker_buy_quote_volumes = NULL;
+
+    /* 读取 symbol 列（dict）*/
+    {
+        uint8_t chunk_type = 0;
+        uint32_t clen = 0;
+        if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x03) goto cleanup_ndtb;
+        if (fread(&row_count, 4, 1, f) != 1 || row_count == 0 || row_count > 10000000) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1 || clen == 0) goto cleanup_ndtb;
+
+        uint8_t* cbuf = (uint8_t*)malloc(clen);
+        if (!cbuf) goto cleanup_ndtb;
+
+        if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t disk_crc = 0;
+        if (fread(&disk_crc, 4, 1, f) != 1) { free(cbuf); goto cleanup_ndtb; }
+
+        /* 验证 CRC */
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, cbuf, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) { free(cbuf); goto cleanup_ndtb; }
+
+        /* 解码 dict：格式 = n_items (uint32_t) + item_indices (uint32_t[]) */
+        if (clen < 4) { free(cbuf); goto cleanup_ndtb; }
+        uint32_t n_items = 0;
+        memcpy(&n_items, cbuf, 4);
+        if (n_items != row_count) { free(cbuf); goto cleanup_ndtb; }
+
+        sym_ids = (int32_t*)malloc(row_count * 4);
+        if (!sym_ids) { free(cbuf); goto cleanup_ndtb; }
+        memcpy(sym_ids, cbuf + 4, row_count * 4);
+        free(cbuf);
+    }
+
+    /* 读取 interval 列（dict）*/
+    {
+        uint8_t chunk_type = 0;
+        uint32_t clen = 0;
+        if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x03) goto cleanup_ndtb;
+        uint32_t row_count2 = 0;
+        if (fread(&row_count2, 4, 1, f) != 1 || row_count2 != row_count) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1 || clen == 0) goto cleanup_ndtb;
+
+        uint8_t* cbuf = (uint8_t*)malloc(clen);
+        if (!cbuf) goto cleanup_ndtb;
+
+        if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t disk_crc = 0;
+        if (fread(&disk_crc, 4, 1, f) != 1) { free(cbuf); goto cleanup_ndtb; }
+
+        /* 验证 CRC */
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, cbuf, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) { free(cbuf); goto cleanup_ndtb; }
+
+        if (clen < 4) { free(cbuf); goto cleanup_ndtb; }
+        uint32_t n_items = 0;
+        memcpy(&n_items, cbuf, 4);
+        if (n_items != row_count) { free(cbuf); goto cleanup_ndtb; }
+
+        itv_ids = (int32_t*)malloc(row_count * 4);
+        if (!itv_ids) { free(cbuf); goto cleanup_ndtb; }
+        memcpy(itv_ids, cbuf + 4, row_count * 4);
+        free(cbuf);
+    }
+
+    /* 读取 timestamp 列（raw int64）*/
+    {
+        uint8_t chunk_type = 0;
+        uint32_t clen = 0;
+        if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x00) goto cleanup_ndtb;
+        uint32_t row_count2 = 0;
+        if (fread(&row_count2, 4, 1, f) != 1 || row_count2 != row_count) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1 || clen != row_count * 8) goto cleanup_ndtb;
+
+        timestamps = (int64_t*)malloc(row_count * 8);
+        if (!timestamps) goto cleanup_ndtb;
+
+        if (fread(timestamps, 8, row_count, f) != row_count) goto cleanup_ndtb;
+
+        uint32_t disk_crc = 0;
+        if (fread(&disk_crc, 4, 1, f) != 1) goto cleanup_ndtb;
+
+        /* 验证 CRC */
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, (const uint8_t*)timestamps, row_count * 8);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) goto cleanup_ndtb;
+    }
+
+    /* 读取 OHLCV 列（gorilla double，5 列）*/
+    double* ohlcv[5];
+    ohlcv[0] = opens = (double*)malloc(row_count * 8);
+    ohlcv[1] = highs = (double*)malloc(row_count * 8);
+    ohlcv[2] = lows = (double*)malloc(row_count * 8);
+    ohlcv[3] = closes = (double*)malloc(row_count * 8);
+    ohlcv[4] = volumes = (double*)malloc(row_count * 8);
+
+    if (!opens || !highs || !lows || !closes || !volumes) goto cleanup_ndtb;
+
+    for (int col = 0; col < 5; col++) {
+        uint8_t chunk_type = 0;
+        uint32_t clen = 0;
+        if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x01) goto cleanup_ndtb;
+        uint32_t row_count2 = 0;
+        if (fread(&row_count2, 4, 1, f) != 1 || row_count2 != row_count) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1 || clen == 0) goto cleanup_ndtb;
+
+        uint8_t* cbuf = (uint8_t*)malloc(clen);
+        if (!cbuf) goto cleanup_ndtb;
+
+        if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t disk_crc = 0;
+        if (fread(&disk_crc, 4, 1, f) != 1) { free(cbuf); goto cleanup_ndtb; }
+
+        /* 验证 CRC 和解压 */
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, cbuf, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) { free(cbuf); goto cleanup_ndtb; }
+
+        size_t decoded = gorilla_decompress_f64(cbuf, clen, ohlcv[col], row_count);
+        free(cbuf);
+        if (decoded != row_count) goto cleanup_ndtb;
+    }
+
+    /* 读取 quoteVolume（gorilla double）*/
+    {
+        uint8_t chunk_type = 0;
+        uint32_t clen = 0;
+        if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x01) goto cleanup_ndtb;
+        uint32_t row_count2 = 0;
+        if (fread(&row_count2, 4, 1, f) != 1 || row_count2 != row_count) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1 || clen == 0) goto cleanup_ndtb;
+
+        quote_volumes = (double*)malloc(row_count * 8);
+        if (!quote_volumes) goto cleanup_ndtb;
+
+        uint8_t* cbuf = (uint8_t*)malloc(clen);
+        if (!cbuf) goto cleanup_ndtb;
+
+        if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t disk_crc = 0;
+        if (fread(&disk_crc, 4, 1, f) != 1) { free(cbuf); goto cleanup_ndtb; }
+
+        /* 验证 CRC 和解压 */
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, cbuf, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) { free(cbuf); goto cleanup_ndtb; }
+
+        size_t decoded = gorilla_decompress_f64(cbuf, clen, quote_volumes, row_count);
+        free(cbuf);
+        if (decoded != row_count) goto cleanup_ndtb;
+    }
+
+    /* 读取 trades（delta uint32）*/
+    {
+        uint8_t chunk_type = 0;
+        uint32_t clen = 0;
+        if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x02) goto cleanup_ndtb;
+        uint32_t row_count2 = 0;
+        if (fread(&row_count2, 4, 1, f) != 1 || row_count2 != row_count) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1 || clen == 0) goto cleanup_ndtb;
+
+        trades = (uint32_t*)malloc(row_count * 4);
+        if (!trades) goto cleanup_ndtb;
+
+        uint8_t* cbuf = (uint8_t*)malloc(clen);
+        if (!cbuf) goto cleanup_ndtb;
+
+        if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t disk_crc = 0;
+        if (fread(&disk_crc, 4, 1, f) != 1) { free(cbuf); goto cleanup_ndtb; }
+
+        /* 验证 CRC 和解压 */
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, cbuf, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) { free(cbuf); goto cleanup_ndtb; }
+
+        /* 注意：delta_decompress_i32 返回 int32_t，但需要 uint32_t */
+        int32_t* tmp_trades = (int32_t*)trades;
+        size_t decoded = delta_decompress_i32(cbuf, clen, tmp_trades, row_count);
+        free(cbuf);
+        if (decoded != row_count) goto cleanup_ndtb;
+    }
+
+    /* 读取 takerBuyVolume 和 takerBuyQuoteVolume（gorilla double，2 列）*/
+    {
+        uint8_t chunk_type = 0;
+        uint32_t clen = 0;
+        if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x01) goto cleanup_ndtb;
+        uint32_t row_count2 = 0;
+        if (fread(&row_count2, 4, 1, f) != 1 || row_count2 != row_count) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1 || clen == 0) goto cleanup_ndtb;
+
+        taker_buy_volumes = (double*)malloc(row_count * 8);
+        if (!taker_buy_volumes) goto cleanup_ndtb;
+
+        uint8_t* cbuf = (uint8_t*)malloc(clen);
+        if (!cbuf) goto cleanup_ndtb;
+
+        if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t disk_crc = 0;
+        if (fread(&disk_crc, 4, 1, f) != 1) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, cbuf, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) { free(cbuf); goto cleanup_ndtb; }
+
+        size_t decoded = gorilla_decompress_f64(cbuf, clen, taker_buy_volumes, row_count);
+        free(cbuf);
+        if (decoded != row_count) goto cleanup_ndtb;
+    }
+
+    {
+        uint8_t chunk_type = 0;
+        uint32_t clen = 0;
+        if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x01) goto cleanup_ndtb;
+        uint32_t row_count2 = 0;
+        if (fread(&row_count2, 4, 1, f) != 1 || row_count2 != row_count) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1 || clen == 0) goto cleanup_ndtb;
+
+        taker_buy_quote_volumes = (double*)malloc(row_count * 8);
+        if (!taker_buy_quote_volumes) goto cleanup_ndtb;
+
+        uint8_t* cbuf = (uint8_t*)malloc(clen);
+        if (!cbuf) goto cleanup_ndtb;
+
+        if (fread(cbuf, 1, clen, f) != clen) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t disk_crc = 0;
+        if (fread(&disk_crc, 4, 1, f) != 1) { free(cbuf); goto cleanup_ndtb; }
+
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &chunk_type, 1);
+        crc_state = crc32_update(crc_state, &row_count2, 4);
+        crc_state = crc32_update(crc_state, &clen, 4);
+        crc_state = crc32_update(crc_state, cbuf, clen);
+        uint32_t computed_crc = crc_state ^ 0xFFFFFFFFu;
+        if (disk_crc != computed_crc) { free(cbuf); goto cleanup_ndtb; }
+
+        size_t decoded = gorilla_decompress_f64(cbuf, clen, taker_buy_quote_volumes, row_count);
+        free(cbuf);
+        if (decoded != row_count) goto cleanup_ndtb;
+    }
+
+    /* 5. 重建行数据并插入数据库 */
+    for (uint32_t i = 0; i < row_count; i++) {
+        const char* sym = (sym_ids[i] >= 0 && sym_ids[i] < n_sym)
+                          ? sym_dict[sym_ids[i]] : "UNKNOWN";
+        const char* itv = (itv_ids[i] >= 0 && itv_ids[i] < n_itv)
+                          ? itv_dict[itv_ids[i]] : "UNKNOWN";
+
+        SymbolData* sd = find_or_create_symbol(db, sym, itv);
+        if (!sd) continue;
+
+        if (sd->count >= sd->capacity) {
+            uint32_t nc = sd->capacity * 2;
+            KlineRow* nk = (KlineRow*)realloc(sd->klines, nc * sizeof(KlineRow));
+            if (!nk) continue;
+            sd->klines   = nk;
+            sd->capacity = nc;
+        }
+
+        sd->klines[sd->count].timestamp = timestamps[i];
+        sd->klines[sd->count].open      = opens[i];
+        sd->klines[sd->count].high      = highs[i];
+        sd->klines[sd->count].low       = lows[i];
+        sd->klines[sd->count].close     = closes[i];
+        sd->klines[sd->count].volume    = volumes[i];
+        sd->klines[sd->count].quoteVolume    = quote_volumes[i];
+        sd->klines[sd->count].trades         = trades[i];
+        sd->klines[sd->count].takerBuyVolume = taker_buy_volumes[i];
+        sd->klines[sd->count].takerBuyQuoteVolume = taker_buy_quote_volumes[i];
+        sd->klines[sd->count].flags     = 0;
+        sd->count++;
+        total_loaded++;
+    }
+
+cleanup_ndtb:
+    fclose(f);
+    free(sym_ids);
+    free(itv_ids);
+    free(timestamps);
+    free(opens);
+    free(highs);
+    free(lows);
+    free(closes);
+    free(volumes);
+    free(quote_volumes);
+    free(trades);
+    free(taker_buy_volumes);
+    free(taker_buy_quote_volumes);
+    for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+    for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+
+    fprintf(stderr, "[ndtsdb debug] %s: loaded %d rows (ndtb format)\n", filepath, total_loaded);
+
+    return total_loaded;
+}
+
+/**
+ * write_ndtb_file — 写入 .ndtb 列式存储文件
+ *
+ * 将内存中的所有 symbol/interval 组合的 KlineRows 写出到 .ndtb 格式文件。
+ *
+ * 格式：
+ *   [0..3]      Magic: "NDTB"
+ *   [4..7]      Header JSON length (uint32_t LE)
+ *   [8..8+len]  Header JSON
+ *   [8+len..4095] Padding
+ *   [4096..4099] Header CRC32
+ *   [4100..]    Column Data Chunks
+ *
+ * 返回写入的行数，失败返回 -1。
+ */
+int write_ndtb_file(const char* filepath, NDTSDB* db) {
+    if (!filepath || !db || db->symbol_count == 0) return -1;
+
+    char tmppath[512 + 4];
+    snprintf(tmppath, sizeof(tmppath), "%s.tmp", filepath);
+
+    FILE* f = fopen(tmppath, "wb");
+    if (!f) return -1;
+
+    /* === 第一步：收集所有 symbol/interval 和行数据 === */
+    uint32_t total_rows = 0;
+    char* sym_dict[LNDTB_MAX_SYM];
+    char* itv_dict[LNDTB_MAX_ITV];
+    int32_t n_sym = 0, n_itv = 0;
+
+    int32_t* sym_ids = NULL;
+    int32_t* itv_ids = NULL;
+    KlineRow* all_rows = NULL;
+
+    /* 第一遍扫描：计算总行数，建立字典 */
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        SymbolData* sd = &db->symbols[i];
+        if (sd->count == 0) continue;
+
+        /* 添加 symbol 到字典 */
+        int32_t sym_id = -1;
+        for (int32_t j = 0; j < n_sym; j++) {
+            if (strcmp(sym_dict[j], sd->symbol) == 0) {
+                sym_id = j;
+                break;
+            }
+        }
+        if (sym_id == -1) {
+            if (n_sym >= LNDTB_MAX_SYM) { fclose(f); return -1; }
+            sym_dict[n_sym] = strdup(sd->symbol);
+            sym_id = n_sym++;
+        }
+
+        /* 添加 interval 到字典 */
+        int32_t itv_id = -1;
+        for (int32_t j = 0; j < n_itv; j++) {
+            if (strcmp(itv_dict[j], sd->interval) == 0) {
+                itv_id = j;
+                break;
+            }
+        }
+        if (itv_id == -1) {
+            if (n_itv >= LNDTB_MAX_ITV) { fclose(f); return -1; }
+            itv_dict[n_itv] = strdup(sd->interval);
+            itv_id = n_itv++;
+        }
+
+        total_rows += sd->count;
+    }
+
+    if (total_rows == 0 || total_rows > 10000000) {
+        fclose(f);
+        for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+        for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+        return -1;
+    }
+
+    /* === 第二步：构建 Header JSON === */
+    char json[4080];
+    int pos = 0;
+    pos += snprintf(json+pos, sizeof(json)-pos, "{\"version\":\"1.0.0\",\"columns\":[");
+    pos += snprintf(json+pos, sizeof(json)-pos,
+        "\"symbol\",\"interval\",\"timestamp\",\"open\",\"high\",\"low\",\"close\",\"volume\",");
+    pos += snprintf(json+pos, sizeof(json)-pos,
+        "\"quoteVolume\",\"trades\",\"takerBuyVolume\",\"takerBuyQuoteVolume\"],");
+    pos += snprintf(json+pos, sizeof(json)-pos,
+        "\"compression\":{\"symbol\":\"dict\",\"interval\":\"dict\",\"timestamp\":\"raw\",");
+    pos += snprintf(json+pos, sizeof(json)-pos,
+        "\"open\":\"gorilla\",\"high\":\"gorilla\",\"low\":\"gorilla\",\"close\":\"gorilla\",");
+    pos += snprintf(json+pos, sizeof(json)-pos,
+        "\"volume\":\"gorilla\",\"quoteVolume\":\"gorilla\",\"trades\":\"delta\",");
+    pos += snprintf(json+pos, sizeof(json)-pos,
+        "\"takerBuyVolume\":\"gorilla\",\"takerBuyQuoteVolume\":\"gorilla\"},");
+    pos += snprintf(json+pos, sizeof(json)-pos, "\"stringDicts\":{\"symbol\":[");
+    for (int32_t i = 0; i < n_sym; i++) {
+        pos += snprintf(json+pos, sizeof(json)-pos, "%s\"%s\"",
+            i > 0 ? "," : "", sym_dict[i]);
+    }
+    pos += snprintf(json+pos, sizeof(json)-pos, "],\"interval\":[");
+    for (int32_t i = 0; i < n_itv; i++) {
+        pos += snprintf(json+pos, sizeof(json)-pos, "%s\"%s\"",
+            i > 0 ? "," : "", itv_dict[i]);
+    }
+    pos += snprintf(json+pos, sizeof(json)-pos, "]},\"rowCount\":%u}", total_rows);
+
+    if (pos >= 4080) {
+        fclose(f);
+        for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+        for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+        return -1;
+    }
+
+    /* 构建 header block（4096 字节） */
+    uint8_t header_block[4096];
+    memcpy(header_block, "NDTB", 4);
+    uint32_t json_len = (uint32_t)pos;
+    memcpy(header_block + 4, &json_len, 4);
+    memcpy(header_block + 8, json, json_len);
+    memset(header_block + 8 + json_len, 0, 4096 - 8 - json_len);
+
+    /* 写 header block + CRC32 */
+    uint32_t hcrc = crc32_buf(header_block, 4096);
+    if (fwrite(header_block, 1, 4096, f) != 4096 ||
+        fwrite(&hcrc, 4, 1, f) != 1) {
+        fclose(f);
+        unlink(tmppath);
+        for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+        for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+        return -1;
+    }
+
+    /* === 第三步：收集所有行数据并建立 sym_ids/itv_ids === */
+    sym_ids = (int32_t*)malloc(total_rows * 4);
+    itv_ids = (int32_t*)malloc(total_rows * 4);
+    all_rows = (KlineRow*)malloc(total_rows * sizeof(KlineRow));
+
+    if (!sym_ids || !itv_ids || !all_rows) {
+        fclose(f);
+        unlink(tmppath);
+        for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+        for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+        free(sym_ids);
+        free(itv_ids);
+        free(all_rows);
+        return -1;
+    }
+
+    uint32_t row_idx = 0;
+    for (uint32_t i = 0; i < db->symbol_count; i++) {
+        SymbolData* sd = &db->symbols[i];
+        if (sd->count == 0) continue;
+
+        /* 查找 sym_id 和 itv_id */
+        int32_t sym_id = -1;
+        for (int32_t j = 0; j < n_sym; j++) {
+            if (strcmp(sym_dict[j], sd->symbol) == 0) {
+                sym_id = j;
+                break;
+            }
+        }
+        int32_t itv_id = -1;
+        for (int32_t j = 0; j < n_itv; j++) {
+            if (strcmp(itv_dict[j], sd->interval) == 0) {
+                itv_id = j;
+                break;
+            }
+        }
+
+        for (uint32_t j = 0; j < sd->count; j++) {
+            sym_ids[row_idx] = sym_id;
+            itv_ids[row_idx] = itv_id;
+            all_rows[row_idx] = sd->klines[j];
+            row_idx++;
+        }
+    }
+
+    /* === 第四步：提取列数据并压缩 === */
+    size_t gorilla_bound = GORILLA_BOUND(total_rows);
+
+    /* symbol 列（dict）*/
+    uint8_t* buf_sym = (uint8_t*)malloc(total_rows * 4 + 4);
+    size_t len_sym = 0;
+    if (buf_sym) {
+        memcpy(buf_sym, &total_rows, 4);
+        memcpy(buf_sym + 4, sym_ids, total_rows * 4);
+        len_sym = total_rows * 4 + 4;
+    }
+
+    /* interval 列（dict）*/
+    uint8_t* buf_itv = (uint8_t*)malloc(total_rows * 4 + 4);
+    size_t len_itv = 0;
+    if (buf_itv) {
+        memcpy(buf_itv, &total_rows, 4);
+        memcpy(buf_itv + 4, itv_ids, total_rows * 4);
+        len_itv = total_rows * 4 + 4;
+    }
+
+    /* timestamp 列（raw int64）*/
+    int64_t* ts_col = (int64_t*)malloc(total_rows * 8);
+    if (ts_col) {
+        for (uint32_t i = 0; i < total_rows; i++) {
+            ts_col[i] = all_rows[i].timestamp;
+        }
+    }
+
+    /* OHLCV 列（gorilla double，5 列）*/
+    double* col_open   = (double*)malloc(total_rows * 8);
+    double* col_high   = (double*)malloc(total_rows * 8);
+    double* col_low    = (double*)malloc(total_rows * 8);
+    double* col_close  = (double*)malloc(total_rows * 8);
+    double* col_volume = (double*)malloc(total_rows * 8);
+    if (col_open && col_high && col_low && col_close && col_volume) {
+        for (uint32_t i = 0; i < total_rows; i++) {
+            col_open[i]   = all_rows[i].open;
+            col_high[i]   = all_rows[i].high;
+            col_low[i]    = all_rows[i].low;
+            col_close[i]  = all_rows[i].close;
+            col_volume[i] = all_rows[i].volume;
+        }
+    }
+
+    /* quoteVolume 列（gorilla double）*/
+    double* col_quote_vol = (double*)malloc(total_rows * 8);
+    if (col_quote_vol) {
+        for (uint32_t i = 0; i < total_rows; i++) {
+            col_quote_vol[i] = all_rows[i].quoteVolume;
+        }
+    }
+
+    /* trades 列（delta uint32）*/
+    uint32_t* trades_col = (uint32_t*)malloc(total_rows * 4);
+    if (trades_col) {
+        for (uint32_t i = 0; i < total_rows; i++) {
+            trades_col[i] = all_rows[i].trades;
+        }
+    }
+
+    /* takerBuy* 列（gorilla double，2 列）*/
+    double* col_taker_vol = (double*)malloc(total_rows * 8);
+    double* col_taker_quote_vol = (double*)malloc(total_rows * 8);
+    if (col_taker_vol && col_taker_quote_vol) {
+        for (uint32_t i = 0; i < total_rows; i++) {
+            col_taker_vol[i]       = all_rows[i].takerBuyVolume;
+            col_taker_quote_vol[i] = all_rows[i].takerBuyQuoteVolume;
+        }
+    }
+
+    /* 压缩缓冲区 */
+    uint8_t* buf_open   = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_high   = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_low    = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_close  = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_volume = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_quote_vol = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_trades = (uint8_t*)malloc(total_rows * 5);
+    uint8_t* buf_taker_vol = (uint8_t*)malloc(gorilla_bound);
+    uint8_t* buf_taker_quote_vol = (uint8_t*)malloc(gorilla_bound);
+
+    size_t len_open = 0, len_high = 0, len_low = 0, len_close = 0, len_volume = 0;
+    size_t len_quote_vol = 0, len_trades = 0, len_taker_vol = 0, len_taker_quote_vol = 0;
+
+    if (col_open && buf_open) len_open = gorilla_compress_f64(col_open, total_rows, buf_open);
+    if (col_high && buf_high) len_high = gorilla_compress_f64(col_high, total_rows, buf_high);
+    if (col_low && buf_low) len_low = gorilla_compress_f64(col_low, total_rows, buf_low);
+    if (col_close && buf_close) len_close = gorilla_compress_f64(col_close, total_rows, buf_close);
+    if (col_volume && buf_volume) len_volume = gorilla_compress_f64(col_volume, total_rows, buf_volume);
+    if (col_quote_vol && buf_quote_vol) len_quote_vol = gorilla_compress_f64(col_quote_vol, total_rows, buf_quote_vol);
+    if (trades_col && buf_trades) len_trades = delta_compress_i32((int32_t*)trades_col, total_rows, buf_trades);
+    if (col_taker_vol && buf_taker_vol) len_taker_vol = gorilla_compress_f64(col_taker_vol, total_rows, buf_taker_vol);
+    if (col_taker_quote_vol && buf_taker_quote_vol) len_taker_quote_vol = gorilla_compress_f64(col_taker_quote_vol, total_rows, buf_taker_quote_vol);
+
+    /* === 第五步：写所有列数据块 === */
+#define WRITE_CHUNK(chunk_type, data, len, name) do { \
+    uint8_t ct = (chunk_type); \
+    uint32_t rowc = total_rows; \
+    uint32_t datalen = (len); \
+    uint32_t crc_state = 0xFFFFFFFFu; \
+    crc_state = crc32_update(crc_state, &ct, 1); \
+    crc_state = crc32_update(crc_state, &rowc, 4); \
+    crc_state = crc32_update(crc_state, &datalen, 4); \
+    crc_state = crc32_update(crc_state, (data), len); \
+    uint32_t chunk_crc = crc_state ^ 0xFFFFFFFFu; \
+    if (fwrite(&ct, 1, 1, f) != 1 || fwrite(&rowc, 4, 1, f) != 1 || \
+        fwrite(&datalen, 4, 1, f) != 1 || fwrite((data), 1, len, f) != len || \
+        fwrite(&chunk_crc, 4, 1, f) != 1) { \
+        fprintf(stderr, "[ndtsdb] Failed to write chunk: %s\n", name); \
+        goto cleanup_write_ndtb; \
+    } \
+} while(0)
+
+    /* 写 symbol 列（dict, type=0x03）*/
+    if (buf_sym) WRITE_CHUNK(0x03, buf_sym, len_sym, "symbol");
+
+    /* 写 interval 列（dict, type=0x03）*/
+    if (buf_itv) WRITE_CHUNK(0x03, buf_itv, len_itv, "interval");
+
+    /* 写 timestamp 列（raw, type=0x00）*/
+    {
+        uint8_t ct = 0x00;
+        uint32_t rowc = total_rows;
+        uint32_t datalen = total_rows * 8;
+        uint32_t crc_state = 0xFFFFFFFFu;
+        crc_state = crc32_update(crc_state, &ct, 1);
+        crc_state = crc32_update(crc_state, &rowc, 4);
+        crc_state = crc32_update(crc_state, &datalen, 4);
+        crc_state = crc32_update(crc_state, (const uint8_t*)ts_col, datalen);
+        uint32_t chunk_crc = crc_state ^ 0xFFFFFFFFu;
+        if (fwrite(&ct, 1, 1, f) != 1 || fwrite(&rowc, 4, 1, f) != 1 ||
+            fwrite(&datalen, 4, 1, f) != 1 || fwrite(ts_col, 8, total_rows, f) != total_rows ||
+            fwrite(&chunk_crc, 4, 1, f) != 1) {
+            fprintf(stderr, "[ndtsdb] Failed to write chunk: timestamp\n");
+            goto cleanup_write_ndtb;
+        }
+    }
+
+    /* 写 OHLCV 列（gorilla, type=0x01，5 列）*/
+    if (buf_open) WRITE_CHUNK(0x01, buf_open, len_open, "open");
+    if (buf_high) WRITE_CHUNK(0x01, buf_high, len_high, "high");
+    if (buf_low) WRITE_CHUNK(0x01, buf_low, len_low, "low");
+    if (buf_close) WRITE_CHUNK(0x01, buf_close, len_close, "close");
+    if (buf_volume) WRITE_CHUNK(0x01, buf_volume, len_volume, "volume");
+
+    /* 写 quoteVolume 列（gorilla, type=0x01）*/
+    if (buf_quote_vol) WRITE_CHUNK(0x01, buf_quote_vol, len_quote_vol, "quoteVolume");
+
+    /* 写 trades 列（delta, type=0x02）*/
+    if (buf_trades) WRITE_CHUNK(0x02, buf_trades, len_trades, "trades");
+
+    /* 写 takerBuy* 列（gorilla, type=0x01，2 列）*/
+    if (buf_taker_vol) WRITE_CHUNK(0x01, buf_taker_vol, len_taker_vol, "takerBuyVolume");
+    if (buf_taker_quote_vol) WRITE_CHUNK(0x01, buf_taker_quote_vol, len_taker_quote_vol, "takerBuyQuoteVolume");
+
+    /* 成功：关闭文件并原子 rename */
+    fclose(f);
+    if (rename(tmppath, filepath) != 0) {
+        unlink(tmppath);
+        fprintf(stderr, "[ndtsdb] Failed to rename %s to %s\n", tmppath, filepath);
+        goto cleanup_write_ndtb;
+    }
+
+    fprintf(stderr, "[ndtsdb debug] %s: wrote %u rows (ndtb format)\n", filepath, total_rows);
+
+    /* 清理 */
+    free(sym_ids);
+    free(itv_ids);
+    free(all_rows);
+    free(buf_sym);
+    free(buf_itv);
+    free(ts_col);
+    free(col_open);
+    free(col_high);
+    free(col_low);
+    free(col_close);
+    free(col_volume);
+    free(col_quote_vol);
+    free(trades_col);
+    free(buf_open);
+    free(buf_high);
+    free(buf_low);
+    free(buf_close);
+    free(buf_volume);
+    free(buf_quote_vol);
+    free(buf_trades);
+    free(col_taker_vol);
+    free(col_taker_quote_vol);
+    free(buf_taker_vol);
+    free(buf_taker_quote_vol);
+    for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+    for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+
+    return (int)total_rows;
+
+cleanup_write_ndtb:
+    fclose(f);
+    unlink(tmppath);
+    free(sym_ids);
+    free(itv_ids);
+    free(all_rows);
+    free(buf_sym);
+    free(buf_itv);
+    free(ts_col);
+    free(col_open);
+    free(col_high);
+    free(col_low);
+    free(col_close);
+    free(col_volume);
+    free(col_quote_vol);
+    free(trades_col);
+    free(buf_open);
+    free(buf_high);
+    free(buf_low);
+    free(buf_close);
+    free(buf_volume);
+    free(buf_quote_vol);
+    free(buf_trades);
+    free(col_taker_vol);
+    free(col_taker_quote_vol);
+    free(buf_taker_vol);
+    free(buf_taker_quote_vol);
+    for (int i = 0; i < n_sym; i++) free(sym_dict[i]);
+    for (int i = 0; i < n_itv; i++) free(itv_dict[i]);
+
+    return -1;
+}
+
 static int load_ndts_file(NDTSDB* db, const char* filepath) {
     FILE* f = fopen(filepath, "rb");
     if (!f) return -1;
@@ -1722,7 +2571,14 @@ static int load_ndts_file(NDTSDB* db, const char* filepath) {
     /* 1. 读取并验证完整 4096 字节 header block */
     uint8_t header_block[4096];
     if (fread(header_block, 1, 4096, f) != 4096) { fclose(f); return -1; }
-    if (memcmp(header_block, "NDTS", 4) != 0)     { fclose(f); return -1; }
+
+    /* 检测 Magic — 自动分发到对应的加载器 */
+    if (memcmp(header_block, "NDTB", 4) == 0) {
+        fclose(f);
+        return load_ndtb_file(db, filepath);
+    }
+
+    if (memcmp(header_block, "NDTS", 4) != 0) { fclose(f); return -1; }
 
     /* 验证 header CRC32 */
     uint32_t expected_hcrc = crc32_buf(header_block, 4096);
