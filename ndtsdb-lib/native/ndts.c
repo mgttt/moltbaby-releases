@@ -589,6 +589,100 @@ static size_t varint_decode_u64(const uint8_t* buffer, size_t buffer_len, uint64
 }
 
 /**
+ * VarInt 编码 Uint64 (LEB128)
+ *
+ * 使用 7 bits 存储数据，最高位作为继续标志：
+ * - bit 7 = 1: 还有更多字节
+ * - bit 7 = 0: 最后一个字节
+ *
+ * @param value   要编码的值
+ * @param buffer  输出缓冲区
+ * @return        编码的字节数
+ */
+static size_t varint_encode_u64(uint64_t value, uint8_t* buffer) {
+    size_t pos = 0;
+
+    while (value > 0x7f) {
+        buffer[pos++] = (uint8_t)((value & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    buffer[pos++] = (uint8_t)(value & 0x7f);
+
+    return pos;  /* 返回编码的字节数 */
+}
+
+/**
+ * Delta 压缩 Int32 数组 (VarInt 编码)
+ *
+ * Delta 编码：计算相邻值的差值，使用 zigzag 编码处理负数，然后 VarInt 编码
+ * 输出：[zigzag(delta[0]), zigzag(delta[1]), ...]（其中 delta[0] 是初值）
+ *
+ * @param data       输入数组
+ * @param count      元素数量
+ * @param out_buf    输出缓冲区
+ * @return           编码的字节数
+ */
+static size_t delta_compress_i32(
+    const int32_t* data,
+    size_t count,
+    uint8_t* out_buf
+) {
+    if (count == 0) return 0;
+
+    size_t pos = 0;
+    int32_t prev = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        int32_t delta = data[i] - prev;
+
+        /* Zigzag 编码：处理负数 */
+        uint64_t zigzag = ((uint64_t)delta << 1) ^ (delta >> 31);
+
+        /* VarInt 编码 */
+        pos += varint_encode_u64(zigzag, out_buf + pos);
+
+        prev = data[i];
+    }
+
+    return pos;
+}
+
+/**
+ * Delta 压缩 Int64 数组 (VarInt 编码)
+ *
+ * 同 delta_compress_i32 但针对 int64_t
+ *
+ * @param data       输入数组
+ * @param count      元素数量
+ * @param out_buf    输出缓冲区
+ * @return           编码的字节数
+ */
+static size_t delta_compress_i64(
+    const int64_t* data,
+    size_t count,
+    uint8_t* out_buf
+) {
+    if (count == 0) return 0;
+
+    size_t pos = 0;
+    int64_t prev = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        int64_t delta = data[i] - prev;
+
+        /* Zigzag 编码：处理负数 */
+        uint64_t zigzag = ((uint64_t)delta << 1) ^ (delta >> 63);
+
+        /* VarInt 编码 */
+        pos += varint_encode_u64(zigzag, out_buf + pos);
+
+        prev = data[i];
+    }
+
+    return pos;
+}
+
+/**
  * Delta 解压 Int32 数组 (VarInt 编码)
  *
  * Delta 编码：第一个值是初值，后续是差值（全部 VarInt 编码）
@@ -1226,6 +1320,39 @@ static void write_partition_file(const char* filepath,
     free(col_open); free(col_high); free(col_low); free(col_close); free(col_volume);
     free(col_quote_volume); free(col_taker_buy_volume); free(col_taker_buy_quote_volume);
 
+    /* === Delta 压缩 sym_ids, timestamps, trades === */
+    uint8_t* buf_sym_ids = (uint8_t*)malloc(n_rows * 5);  /* VarInt worst case: 5 bytes per int */
+    uint8_t* buf_timestamps = (uint8_t*)malloc(n_rows * 10);  /* VarInt worst case: 10 bytes per int64 */
+    uint8_t* buf_trades = (uint8_t*)malloc(n_rows * 5);  /* VarInt worst case: 5 bytes per int */
+
+    size_t len_sym_ids = 0, len_timestamps = 0, len_trades = 0;
+
+    if (buf_sym_ids && n_rows > 0) {
+        len_sym_ids = delta_compress_i32(sym_ids, n_rows, buf_sym_ids);
+    }
+
+    if (buf_timestamps && n_rows > 0) {
+        int64_t* ts_array = (int64_t*)malloc(n_rows * 8);
+        if (ts_array) {
+            for (uint32_t i = 0; i < n_rows; i++) {
+                ts_array[i] = rows[i].timestamp;
+            }
+            len_timestamps = delta_compress_i64(ts_array, n_rows, buf_timestamps);
+            free(ts_array);
+        }
+    }
+
+    if (buf_trades && n_rows > 0) {
+        int32_t* trades_array = (int32_t*)malloc(n_rows * 4);
+        if (trades_array) {
+            for (uint32_t i = 0; i < n_rows; i++) {
+                trades_array[i] = rows[i].trades;
+            }
+            len_trades = delta_compress_i32(trades_array, n_rows, buf_trades);
+            free(trades_array);
+        }
+    }
+
     /* === 构建 JSON header === */
     /* header_block = 4096 bytes: magic(4) + hlen(4) + json(≤4088) + CRC4
      * Use 4080 so snprintf never writes past the available space. */
@@ -1282,12 +1409,12 @@ static void write_partition_file(const char* filepath,
     uint8_t* chunk_buf;
 
     if (use_gorilla) {
-        /* 压缩格式: sym_ids(raw) + itv_ids(raw) + timestamps(raw)
-         *           + [len(4)+data](×8 OHLCV+extra_3_double) + trades(len+raw) + flags(raw) */
+        /* 压缩格式: sym_ids(len+delta) + itv_ids(raw) + timestamps(len+delta)
+         *           + [len(4)+data](×8 OHLCV+extra_3_double) + trades(len+delta) + flags(raw) */
         chunk_size = 4                       /* row_count */
-            + n_rows * 4                     /* sym_ids */
-            + n_rows * 4                     /* itv_ids */
-            + n_rows * 8                     /* timestamps */
+            + (4 + len_sym_ids)              /* sym_ids: len(4) + delta_compressed_data */
+            + n_rows * 4                     /* itv_ids (still raw) */
+            + (4 + len_timestamps)           /* timestamps: len(4) + delta_compressed_data */
             + (4 + len_open)                 /* open: len+data */
             + (4 + len_high)
             + (4 + len_low)
@@ -1296,15 +1423,16 @@ static void write_partition_file(const char* filepath,
             + (4 + len_quote_volume)         /* quoteVolume: len+data */
             + (4 + len_taker_buy_volume)     /* takerBuyVolume: len+data */
             + (4 + len_taker_buy_quote_volume) /* takerBuyQuoteVolume: len+data */
-            + (4 + n_rows * 4)               /* trades: len+raw int32 */
+            + (4 + len_trades)               /* trades: len(4) + delta_compressed_data */
             + n_rows * 4;                    /* flags */
     } else {
         chunk_size = 4
-            + n_rows * 4 + n_rows * 4
-            + n_rows * 8
-            + n_rows * 8 * 5                 /* OHLCV */
+            + (4 + len_sym_ids)              /* sym_ids: len(4) + delta_compressed_data */
+            + n_rows * 4                     /* itv_ids (still raw) */
+            + (4 + len_timestamps)           /* timestamps: len(4) + delta_compressed_data */
+            + n_rows * 8 * 5                 /* OHLCV (raw) */
             + n_rows * 8 * 3                 /* quoteVolume, takerBuyVolume, takerBuyQuoteVolume */
-            + (4 + n_rows * 4)               /* trades: len+raw */
+            + (4 + len_trades)               /* trades: len(4) + delta_compressed_data */
             + n_rows * 4;                    /* flags */
     }
 
@@ -1323,12 +1451,18 @@ static void write_partition_file(const char* filepath,
     /* row_count */
     memcpy(p, &n_rows, 4); p += 4;
 
-    /* sym_ids (raw) */
-    for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &sym_ids[i], 4); p += 4; }
+    /* sym_ids: [len(4) + delta_compressed_data] */
+    uint32_t u32_len = (uint32_t)len_sym_ids;
+    memcpy(p, &u32_len, 4); p += 4;
+    if (len_sym_ids > 0) { memcpy(p, buf_sym_ids, len_sym_ids); p += len_sym_ids; }
+
     /* itv_ids (raw) */
     for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &itv_ids[i], 4); p += 4; }
-    /* timestamps (raw int64) */
-    for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].timestamp, 8); p += 8; }
+
+    /* timestamps: [len(4) + delta_compressed_data] */
+    u32_len = (uint32_t)len_timestamps;
+    memcpy(p, &u32_len, 4); p += 4;
+    if (len_timestamps > 0) { memcpy(p, buf_timestamps, len_timestamps); p += len_timestamps; }
 
     if (use_gorilla) {
         /* OHLCV + extra 3 double: gorilla 压缩，每列前缀 uint32_t 长度 */
@@ -1343,10 +1477,10 @@ static void write_partition_file(const char* filepath,
         u32 = (uint32_t)len_taker_buy_quote_volume; memcpy(p, &u32, 4); p += 4; memcpy(p, buf_taker_buy_quote_volume, len_taker_buy_quote_volume); p += len_taker_buy_quote_volume;
         free(buf_open); free(buf_high); free(buf_low); free(buf_close); free(buf_volume);
         free(buf_quote_volume); free(buf_taker_buy_volume); free(buf_taker_buy_quote_volume);
-        /* trades: raw int32 with length prefix (row_count * 4) */
-        u32 = n_rows * 4;
+        /* trades: [len(4) + delta_compressed_data] */
+        u32 = (uint32_t)len_trades;
         memcpy(p, &u32, 4); p += 4;
-        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].trades, 4); p += 4; }
+        if (len_trades > 0) { memcpy(p, buf_trades, len_trades); p += len_trades; }
     } else {
         /* OHLCV + extra 3 double: raw float64 */
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].open,   8); p += 8; }
@@ -1357,10 +1491,10 @@ static void write_partition_file(const char* filepath,
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].quoteVolume, 8); p += 8; }
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].takerBuyVolume, 8); p += 8; }
         for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].takerBuyQuoteVolume, 8); p += 8; }
-        /* trades: raw int32 with length prefix (row_count * 4) */
-        uint32_t u32 = n_rows * 4;
+        /* trades: [len(4) + delta_compressed_data] */
+        uint32_t u32 = (uint32_t)len_trades;
         memcpy(p, &u32, 4); p += 4;
-        for (uint32_t i = 0; i < n_rows; i++) { memcpy(p, &rows[i].trades, 4); p += 4; }
+        if (len_trades > 0) { memcpy(p, buf_trades, len_trades); p += len_trades; }
     }
 
     /* flags (raw) */
@@ -1379,6 +1513,9 @@ static void write_partition_file(const char* filepath,
     fwrite(&ccrc, 4, 1, f);
 
     free(chunk_buf);
+    free(buf_sym_ids);
+    free(buf_timestamps);
+    free(buf_trades);
 
     // #90: fsync 保证数据落盘，再 rename（POSIX 原子操作）替换目标文件
     NDTS_FSYNC(fileno(f));
