@@ -17,6 +17,22 @@
 #include <time.h>
 #include "ndtsdb.h"
 
+/* ============================================================
+ * 安全乘法函数 - 防止整数溢出
+ * ============================================================ */
+static inline int safe_mul_size(size_t* result, uint32_t a, size_t b) {
+    if (a == 0 || b == 0) {
+        *result = 0;
+        return 0;
+    }
+    /* 检查溢出: a * b > SIZE_MAX */
+    if (a > SIZE_MAX / b) {
+        return -1;  /* 溢出 */
+    }
+    *result = (size_t)a * b;
+    return 0;
+}
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <windows.h>
@@ -1921,9 +1937,12 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
         memcpy(&n_items, cbuf, 4);
         if (n_items != row_count) { free(cbuf); goto cleanup_ndtb; }
 
-        sym_ids = (int32_t*)malloc(row_count * 4);
+        /* MEM-2: 安全乘法检查 */
+        size_t sym_ids_size = 0;
+        if (safe_mul_size(&sym_ids_size, row_count, 4) < 0) { free(cbuf); goto cleanup_ndtb; }
+        sym_ids = (int32_t*)malloc(sym_ids_size);
         if (!sym_ids) { free(cbuf); goto cleanup_ndtb; }
-        memcpy(sym_ids, cbuf + 4, row_count * 4);
+        memcpy(sym_ids, cbuf + 4, sym_ids_size);
         free(cbuf);
     }
 
@@ -1960,9 +1979,12 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
         memcpy(&n_items, cbuf, 4);
         if (n_items != row_count) { free(cbuf); goto cleanup_ndtb; }
 
-        itv_ids = (int32_t*)malloc(row_count * 4);
+        /* MEM-2: 安全乘法检查 */
+        size_t itv_ids_size = 0;
+        if (safe_mul_size(&itv_ids_size, row_count, 4) < 0) { free(cbuf); goto cleanup_ndtb; }
+        itv_ids = (int32_t*)malloc(itv_ids_size);
         if (!itv_ids) { free(cbuf); goto cleanup_ndtb; }
-        memcpy(itv_ids, cbuf + 4, row_count * 4);
+        memcpy(itv_ids, cbuf + 4, itv_ids_size);
         free(cbuf);
     }
 
@@ -1973,9 +1995,14 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
         if (fread(&chunk_type, 1, 1, f) != 1 || chunk_type != 0x00) goto cleanup_ndtb;
         uint32_t row_count2 = 0;
         if (fread(&row_count2, 4, 1, f) != 1 || row_count2 != row_count) goto cleanup_ndtb;
-        if (fread(&clen, 4, 1, f) != 1 || clen != row_count * 8) goto cleanup_ndtb;
+        if (fread(&clen, 4, 1, f) != 1) goto cleanup_ndtb;
+        
+        /* MEM-2: 安全乘法检查 */
+        size_t timestamps_size = 0;
+        if (safe_mul_size(&timestamps_size, row_count, 8) < 0) goto cleanup_ndtb;
+        if (clen != timestamps_size) goto cleanup_ndtb;
 
-        timestamps = (int64_t*)malloc(row_count * 8);
+        timestamps = (int64_t*)malloc(timestamps_size);
         if (!timestamps) goto cleanup_ndtb;
 
         if (fread(timestamps, 8, row_count, f) != row_count) goto cleanup_ndtb;
@@ -1995,11 +2022,15 @@ int load_ndtb_file(NDTSDB* db, const char* filepath) {
 
     /* 读取 OHLCV 列（gorilla double，5 列）*/
     double* ohlcv[5];
-    ohlcv[0] = opens = (double*)malloc(row_count * 8);
-    ohlcv[1] = highs = (double*)malloc(row_count * 8);
-    ohlcv[2] = lows = (double*)malloc(row_count * 8);
-    ohlcv[3] = closes = (double*)malloc(row_count * 8);
-    ohlcv[4] = volumes = (double*)malloc(row_count * 8);
+    /* MEM-2: 安全乘法检查 */
+    size_t ohlcv_size = 0;
+    if (safe_mul_size(&ohlcv_size, row_count, 8) < 0) goto cleanup_ndtb;
+    
+    ohlcv[0] = opens = (double*)malloc(ohlcv_size);
+    ohlcv[1] = highs = (double*)malloc(ohlcv_size);
+    ohlcv[2] = lows = (double*)malloc(ohlcv_size);
+    ohlcv[3] = closes = (double*)malloc(ohlcv_size);
+    ohlcv[4] = volumes = (double*)malloc(ohlcv_size);
 
     if (!opens || !highs || !lows || !closes || !volumes) goto cleanup_ndtb;
 
