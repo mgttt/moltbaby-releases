@@ -1800,6 +1800,8 @@ class SQLExecutor {
     return String(expr)
       .replace(/\s+/g, ' ')
       .replace(/\s*\.\s*/g, '.')
+      .replace(/\s*\(\s*/g, '(')  // 去除 ( 前的空格和 ( 后的空格
+      .replace(/\s*\)/g, ')')     // 去除 ) 前的空格
       .trim();
   }
 
