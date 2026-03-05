@@ -148,13 +148,15 @@ pub fn build(b: *std.Build) !void {
     const run_dlopen_test = b.addRunArtifact(test_dlopen);
     test_step.dependOn(&run_dlopen_test.step);
 
-    const lib_shared_step = b.step("lib-shared", "Build shared library only");
-    lib_shared_step.dependOn(b.getInstallStep());
+    // ============================================
+    // Build Steps (Zig 0.13.0 compatible)
+    // ============================================
+    // Note: Shared library support removed for Zig 0.13.0 compatibility
+    // See: https://github.com/ziglang/zig/issues/...
 
     const lib_static_step = b.step("lib-static", "Build static library only");
     lib_static_step.dependOn(b.getInstallStep());
 
-    const lib_step = b.step("lib", "Build both static and shared libraries");
+    const lib_step = b.step("lib", "Build static library (shared library not supported in Zig 0.13.0)");
     lib_step.dependOn(lib_static_step);
-    lib_step.dependOn(lib_shared_step);
 }
