@@ -12,6 +12,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <time.h>
 #include "ndtsdb.h"
@@ -3409,8 +3410,13 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
             int has_ndts_ext = (plen >= 5 &&
                 strcmp(path + plen - 5, ".ndts") == 0);
             if (!has_ndts_ext) {
-                if (mkdir(path, 0755) == 0)
+                if (mkdir(path, 0755) == 0) {
                     db->is_dir = 1;
+                } else {
+                    /* mkdir 失败 — 记录错误但继续（尝试文件模式）*/
+                    int mkdir_errno = errno;
+                    fprintf(stderr, "[ndtsdb] WARNING: mkdir(%s) failed (errno=%d)\n", path, mkdir_errno);
+                }
             }
         }
         /* 若 stat 成功则为普通文件，保持 is_dir = 0 (文件模式向后兼容) */
@@ -3433,8 +3439,14 @@ NDTSDB* ndtsdb_open_snapshot(const char* path, uint64_t snapshot_size) {
                 return NULL;
             }
             db->lock_fd = lfd;
+        } else {
+            /* open 失败 — 记录详细错误信息（可能是权限、目录不存在等） */
+            int open_errno = errno;
+            fprintf(stderr, "[ndtsdb] WARNING: failed to create lock file %s (errno=%d, strerror=%s)\n",
+                    lockpath, open_errno, strerror(open_errno));
+            fprintf(stderr, "[ndtsdb] WARNING: continuing without lock (downgrade to no-lock mode)\n");
+            /* 降级为无锁模式，继续运行 */
         }
-        /* 若 open 失败（如只读文件系统），静默继续（降级为无锁） */
     }
 #endif
 
