@@ -1479,7 +1479,11 @@ void ndtsdb_close(NDTSDB* db) {
         qsort(flat, total, sizeof(FlatRow), compare_by_timestamp);
 
         /* 确保目录存在 */
+#ifdef _WIN32
+        _mkdir(db->path);
+#else
         mkdir(db->path, 0755);
+#endif
 
         /* 线性扫描：按day分组，一次性写出 */
         uint32_t i = 0;
