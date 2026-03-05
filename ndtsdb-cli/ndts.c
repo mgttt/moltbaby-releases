@@ -15,6 +15,9 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <time.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 #include "ndtsdb.h"
 
 // ─── 类型转换 ─────────────────────────────────────────────
